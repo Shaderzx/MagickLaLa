@@ -1,6 +1,6 @@
 # MagickLaLa
 
-**MagickLaLa** is a ground-up **100% Rust** revival of [Oneirocom/Magick](https://github.com/Oneirocom/Magick), built as a fast, single-binary-capable visual AI agent and workflow studio (**Spells**, **Nodes**, **Wires**, and **Agents**) with a native GPU UI powered by [Anomaly's Rune](https://github.com/anomalyco/rune).
+**MagickLaLa** is a **100% Rust** visual AI agent and workflow studio (**Spells**, **Nodes**, **Wires**, and **Agents**) with a native GPU UI powered by [Rune](https://github.com/anomalyco/rune).
 
 > **Status:** Planning & architecture phase. See [`docs/PLAN.md`](docs/PLAN.md) for the full technical architecture and phased roadmap.
 
@@ -24,12 +24,12 @@ crates/
 ├── magicklala-server      # Headless Axum REST + WebSocket control plane
 ├── magicklala-canvas      # GPU-rendered Rune node-graph & Bézier wire canvas
 ├── magicklala-studio      # Native Rune visual IDE (Inspector, Playground, Agents)
-└── magicklala-cli         # CLI runner (studio, serve, spell run/validate/import)
+└── magicklala-cli         # CLI runner (studio, serve, spell run/validate)
 ```
 
 ## Roadmap
 
-- **Phase 0**: Cargo workspace, Rust toolchain, `anomalyco/rune` submodule & headless smoke test
+- **Phase 0**: Cargo workspace, Rust toolchain, Rune integration & headless smoke test
 - **Phase 1**: Core graph engine, standard nodes, and headless CLI spell runner
 - **Phase 2**: SQLite persistence, encrypted credentials, Agent runtime, and Axum server
 - **Phase 3**: MagickLaLa Studio (Rune visual node editor & live execution debugger)
@@ -37,8 +37,6 @@ crates/
 - **Phase 5**: First-party connectors (Webhooks, Cron, Discord, Slack) and WASM plugins
 - **Phase 6**: In-studio Co-Pilot, optional WebGPU build, distributed workers, and release builds
 
-## Credits & License
-
-Inspired by [Oneirocom/Magick](https://github.com/Oneirocom/Magick) (Apache-2.0) and built with [anomalyco/rune](https://github.com/anomalyco/rune) (MIT).
+## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).

@@ -1,20 +1,20 @@
-# MagickLaLa — Ground-Up Rust Rewrite & Revival Plan
+# MagickLaLa — Rust + Rune Architecture & Implementation Plan
 
-Reviving [Oneirocom/Magick](https://github.com/Oneirocom/Magick) as **MagickLaLa**, rebuilt from scratch in **100% Rust** using [Anomaly's Rune](https://github.com/anomalyco/rune) native GPU UI framework for the visual Studio.
+**MagickLaLa** is a **100% Rust** visual AI agent and workflow development environment (AIDE), built around a fast single-binary architecture and a native GPU-rendered Studio powered by [Rune](https://github.com/anomalyco/rune).
 
 ---
 
-## 1. Why Rewrite & What We Are Reviving
+## 1. Design Goals
 
-| Area | Original Magick (TypeScript/Nx) | MagickLaLa (100% Rust + Rune) |
-| :--- | :--- | :--- |
-| **Runtime & Packaging** | 7 separate apps (`server`, `client`, `cloud-agent-manager`, `cloud-agent-worker`, `agent-connector`, `embedder`, `seraph-express`) + `portal` + Redis/BullMQ/S3Mock/Postgres | Single Cargo workspace compiling into one cohesive binary (`magicklala`) with modular crates; optional distributed worker mode later |
-| **Graph Engine** | `@magickml/behave-graph` (JS dual-socket flow + value graph) | Pure Rust async graph engine (`magicklala-graph`), shared directly by engine, CLI, and Rune Studio with zero schema drift |
-| **Visual Studio (IDE)** | React + React Flow + Feathers Redux Toolkit | **Rune (`anomalyco/rune`)** native GPU UI (`wgpu`) on macOS, Windows, Linux, and optional WebGPU browser build (`crates/magicklala-studio` + `crates/magicklala-canvas`) |
-| **Database & Vectors** | PostgreSQL + `pgvector` required even locally, dual Prisma + Knex migrations | `sqlx` repository traits: **SQLite** by default for zero-config local startup, **PostgreSQL + `pgvector`** for production scale |
-| **Agent Orchestration** | Split across manager, worker, connector, and `agents-v2` over Redis pub/sub | In-process Tokio actor runtime (`magicklala-runtime`) with pluggable event bus trait (in-memory default, Redis/NATS later) |
-| **Custom Code & Plugins** | Hot-loaded TS plugins + JS code nodes | Sandboxed **Rhai** script nodes + trait-based Rust plugins, expanding to **WASM Component Model (`wasmtime`)** external plugins |
-| **UI Verification** | Fragile browser e2e setup | Rune headless runtime (`Runtime::new`, scripted pointer/drag events, `--snap` PNG captures) for deterministic visual & interaction tests |
+| Area | MagickLaLa (100% Rust + Rune) |
+| :--- | :--- |
+| **Runtime & Packaging** | Single Cargo workspace compiling into one cohesive binary (`magicklala`) with modular crates; optional distributed worker mode later |
+| **Graph Engine** | Pure Rust async dual-socket graph engine (`magicklala-graph`), shared directly by the engine, CLI, and Rune Studio with zero schema drift |
+| **Visual Studio (IDE)** | **Rune** native GPU UI (`wgpu`) on macOS, Windows, Linux, and optional WebGPU browser build (`crates/magicklala-studio` + `crates/magicklala-canvas`) |
+| **Database & Vectors** | `sqlx` repository traits: **SQLite** by default for zero-config local startup, **PostgreSQL + `pgvector`** for production scale |
+| **Agent Orchestration** | In-process Tokio actor runtime (`magicklala-runtime`) with pluggable event bus trait (in-memory default, Redis/NATS later) |
+| **Custom Code & Plugins** | Sandboxed **Rhai** script nodes + trait-based Rust plugins, expanding to **WASM Component Model (`wasmtime`)** external plugins |
+| **UI Verification** | Rune headless runtime (`Runtime::new`, scripted pointer/drag events, `--snap` PNG captures) for deterministic visual & interaction tests |
 
 ---
 
@@ -57,7 +57,6 @@ flowchart TD
      - **Flow sockets** drive imperative async control flow (`branch`, `switch`, `split`, `wait_for_all`, `while_loop`, `delay`, cancellation, step watchdogs).
      - **Value sockets** resolve lazily via pull evaluation with per-activation memoization.
    - `TraceSink` channel emitting live node/wire activation events for Studio playback and CLI debugging.
-   - Best-effort **legacy importer** (`import_behave_graph`) for migrating existing `Oneirocom/Magick` spell JSON files.
 
 2. **`crates/magicklala-nodes`** — *Standard Node Library*
    - **Flow & Lifecycle**: `on_start`, `on_tick`, `branch`, `switch`, `split`, `wait_for_all`, `while_loop`, `do_once`, `delay`.
@@ -97,7 +96,7 @@ flowchart TD
 9. **`crates/magicklala-cli`** — *CLI (`clap`)*
    - `magicklala studio` — Launch the Rune native Studio (with embedded local runtime).
    - `magicklala serve` — Run headless API/agent server.
-   - `magicklala spell run|validate|import-magick` — Execute, check, or import Spells from the terminal.
+   - `magicklala spell run|validate|specs` — Execute, check, or inspect Spells from the terminal.
    - `magicklala agent start|stop|logs` — Control agents from CLI.
 
 ---
@@ -141,7 +140,7 @@ Every phase ends with a runnable, tested vertical slice reviewed via PR + CodeRa
 - Prototype `wasmtime` / WIT custom node plugin loader.
 - **Exit criterion**: Run the same Spell live across Studio Chat, Webhooks, Discord, and Slack.
 
-### Phase 6 — Co-Pilot (Seraph Revival), WebGPU Build & Scale-Out
+### Phase 6 — In-Studio Co-Pilot, WebGPU Build & Scale-Out
 - Build **MagickLaLa Co-Pilot**: in-Studio AI assistant that generates, explains, and patches Spells through typed graph-mutation tools.
 - Enable optional Rune WebGPU browser bundle (`web-build.sh`) + optional Redis/NATS distributed worker mode (`magicklala worker`).
-- Polish legacy `Oneirocom/Magick` spell JSON importer, OpenTelemetry export, and release packaging.
+- Add OpenTelemetry export and cross-platform release packaging.
