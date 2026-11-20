@@ -47,6 +47,7 @@ async fn probe() -> ProbeResult<()> {
         "run-correlation" => run_correlation(&spec).await?,
         "vault-keys" => vault_keys(&spec)?,
         "memory-urls" => memory_urls(&spec).await?,
+        "connect-urls" => connect_urls(&spec).await?,
         "webhook-deliveries" => webhook_deliveries(&spec).await?,
         other => return Err(format!("unknown command {other}").into()),
     };
@@ -544,19 +545,7 @@ async fn memory_urls(spec: &Value) -> ProbeResult<Value> {
     let classified: Vec<Value> = strings(spec, "urls")?.into_iter().map(|url| json!({ "url": url, "inMemory": is_in_memory_database_url(url) })).collect();
     let shared = SqliteStore::connect("sqlite::memory:").await?;
     shared.migrate().await?;
-    let mut writers = tokio::task::JoinSet::new();
-    for index in 0..count(spec, "writers")? {
-        let store = shared.clone();
-        writers.spawn(async move { store.create_project(NewProject { name: format!("writer-{index:02}"), description: String::new() }).await });
-    }
-    let mut errors = Vec::new();
-    while let Some(joined) = writers.join_next().await {
-        match joined {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => errors.push(error.to_string()),
-            Err(error) => errors.push(error.to_string()),
-        }
-    }
+    let errors = concurrent_writers(&shared, count(spec, "writers")?).await;
     let concurrent = project_names(&shared).await?;
     let on_disk = SqliteStore::connect(text(spec, "fileUrl")?).await?;
     on_disk.migrate().await?;
@@ -564,4 +553,36 @@ async fn memory_urls(spec: &Value) -> ProbeResult<Value> {
     let file_projects = project_names(&on_disk).await?;
     on_disk.pool().close().await;
     Ok(json!({ "classified": classified, "concurrent": { "errors": errors, "projects": concurrent }, "file": { "projects": file_projects } }))
+}
+
+async fn concurrent_writers(shared: &SqliteStore, writers: usize) -> Vec<String> {
+    let mut tasks = tokio::task::JoinSet::new();
+    for index in 0..writers {
+        let store = shared.clone();
+        tasks.spawn(async move { store.create_project(NewProject { name: format!("writer-{index:02}"), description: String::new() }).await });
+    }
+    let mut errors = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => errors.push(error.to_string()),
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+    errors
+}
+
+async fn connect_urls(spec: &Value) -> ProbeResult<Value> {
+    let writers = count(spec, "writers")?;
+    let mut stores = Vec::new();
+    for url in strings(spec, "urls")? {
+        let store = SqliteStore::connect(url).await?;
+        store.migrate().await?;
+        let on_disk = store.is_on_disk().await?;
+        let errors = concurrent_writers(&store, writers).await;
+        let projects = project_names(&store).await?;
+        store.pool().close().await;
+        stores.push(json!({ "url": url, "inMemory": is_in_memory_database_url(url), "onDisk": on_disk, "errors": errors, "projects": projects }));
+    }
+    Ok(json!({ "stores": stores }))
 }

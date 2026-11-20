@@ -137,10 +137,12 @@ fn main() -> ExitCode {
 
 fn dispatch(cli: Cli) -> CliResult {
     match cli.command {
-        Command::Studio { snap: Some(path), width, height, .. } => Ok(magicklala_studio::render_headless_snapshot_sized(&path, (width, height))?),
-        Command::Studio { snap: None, width, height, db } => {
-            let db_path = db.map(|path| studio_db_path(&path));
-            Ok(magicklala_studio::run_studio(magicklala_studio::StudioConfig { size: (width, height), db_path, ..Default::default() })?)
+        Command::Studio { snap, width, height, db } => {
+            let config = magicklala_studio::StudioConfig { size: (width, height), db_path: db, ..Default::default() };
+            match snap {
+                Some(path) => Ok(magicklala_studio::render_headless_snapshot_with_config(&path, config, magicklala_studio::Theme::Dark)?),
+                None => Ok(magicklala_studio::run_studio(config)?),
+            }
         }
         Command::Serve { bind, database_url, insecure_no_auth } => {
             let config = ServerConfig::from_env(bind, database_url_or_default(database_url));
@@ -165,7 +167,7 @@ fn database_url_or_default(argument: Option<String>) -> String {
     }
 }
 
-fn studio_db_path(raw: &Path) -> PathBuf {
+fn spell_db_file(raw: &Path) -> PathBuf {
     let text = raw.to_string_lossy();
     let stripped = text.strip_prefix("sqlite://").or_else(|| text.strip_prefix("sqlite:")).unwrap_or(&text);
     PathBuf::from(stripped)
@@ -288,7 +290,7 @@ async fn stored_subgraphs(
     registry: &NodeRegistry,
 ) -> Result<(ProjectSubgraphResolver, SubgraphKey), Box<dyn std::error::Error>> {
     let url = database_url_or_default(Some(db.to_owned()));
-    if !is_in_memory_database_url(&url) && !studio_db_path(Path::new(db)).exists() {
+    if !is_in_memory_database_url(&url) && !spell_db_file(Path::new(db)).exists() {
         return Err(format!("database {db} does not exist; pass the SQLite file magicklala serve uses").into());
     }
     let store = SqliteStore::connect(&url).await?;

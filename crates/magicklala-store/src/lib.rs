@@ -36,13 +36,34 @@ pub fn is_in_memory_database_url(url: &str) -> bool {
     let url = url.trim();
     let target = url.strip_prefix("sqlite:").unwrap_or(url);
     let target = target.strip_prefix("//").unwrap_or(target);
-    let target = target.strip_prefix("file:").unwrap_or(target);
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    path == ":memory:"
-        || query.split('&').filter_map(|pair| pair.split_once('=')).any(|(key, value)| form_decoded(key) == "mode" && form_decoded(value) == "memory")
+    let path = percent_decoded(path);
+    let path = match path.strip_prefix("file:") {
+        Some(uri_path) => percent_decoded(uri_authority_stripped(uri_path)),
+        None => path,
+    };
+    path.is_empty() || path == ":memory:" || query_selects_memory(query)
+}
+
+fn uri_authority_stripped(uri_path: &str) -> &str {
+    match uri_path.strip_prefix("//") {
+        Some(rest) => rest.find('/').map_or("", |slash| &rest[slash..]),
+        None => uri_path,
+    }
+}
+
+fn query_selects_memory(query: &str) -> bool {
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .any(|(key, value)| matches!((form_decoded(key).as_str(), form_decoded(value).as_str()), ("mode", "memory") | ("vfs", "memdb")))
 }
 
 fn form_decoded(raw: &str) -> String {
+    percent_decoded(&raw.replace('+', " "))
+}
+
+fn percent_decoded(raw: &str) -> String {
     let bytes = raw.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -58,7 +79,7 @@ fn form_decoded(raw: &str) -> String {
                 index += 3;
             }
             None => {
-                decoded.push(if bytes[index] == b'+' { b' ' } else { bytes[index] });
+                decoded.push(bytes[index]);
                 index += 1;
             }
         }
@@ -139,13 +160,14 @@ impl SqliteStore {
             .foreign_keys(true)
             .journal_mode(SqliteJournalMode::Wal)
             .busy_timeout(std::time::Duration::from_secs(10));
-        let pool = if is_in_memory_database_url(url) {
-            SqlitePoolOptions::new().max_connections(1).min_connections(1).idle_timeout(None).max_lifetime(None)
-        } else {
-            SqlitePoolOptions::new().max_connections(8)
+        let pinned = Self {
+            pool: SqlitePoolOptions::new().max_connections(1).min_connections(1).idle_timeout(None).max_lifetime(None).connect_with(options.clone()).await?,
+        };
+        if is_in_memory_database_url(url) || !pinned.is_on_disk().await? {
+            return Ok(pinned);
         }
-        .connect_with(options)
-        .await?;
+        pinned.pool.close().await;
+        let pool = SqlitePoolOptions::new().max_connections(8).connect_with(options).await?;
         Ok(Self { pool })
     }
 

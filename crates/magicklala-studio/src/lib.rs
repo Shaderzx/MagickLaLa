@@ -131,13 +131,16 @@ fn escaped_file_path(path: &str) -> String {
 
 fn studio_database_url(db_path: Option<&Path>) -> String {
     let text = db_path.map(|path| path.to_string_lossy().into_owned()).unwrap_or_default();
-    let trimmed = text.trim();
-    match trimmed {
-        "" | ":memory:" => IN_MEMORY_DATABASE_URL.to_owned(),
-        _ if trimmed.starts_with("sqlite:") => trimmed.to_owned(),
-        _ if trimmed.starts_with("file:") => format!("sqlite:{trimmed}"),
-        _ => format!("sqlite://{}", escaped_file_path(trimmed)),
+    if matches!(text.trim(), "" | ":memory:") {
+        return IN_MEMORY_DATABASE_URL.to_owned();
     }
+    if text.starts_with("sqlite:") {
+        return text;
+    }
+    if text.starts_with("file:") {
+        return format!("sqlite:{text}");
+    }
+    format!("sqlite://{}", escaped_file_path(&text))
 }
 
 async fn studio_project_record(repository: &SqliteStore, graph: SpellId) -> Result<Option<SpellRecord>, StoreError> {
@@ -1226,11 +1229,7 @@ impl Drop for StudioApp {
 }
 
 pub fn run_studio(config: StudioConfig) -> Result<(), StudioError> {
-    remember_size(config.size);
-    if let Ok(mut slot) = LAUNCH_DB.lock() {
-        slot.clone_from(&config.db_path);
-    }
-    remember_theme(Theme::Dark);
+    remember_launch(&config, Theme::Dark);
     App::new(spec(config)).args(Vec::new()).try_run().map_err(StudioError::Rune)
 }
 
@@ -1243,13 +1242,25 @@ pub fn render_headless_snapshot_sized(out_path: &Path, size: (f32, f32)) -> Resu
 }
 
 pub fn render_headless_snapshot_themed(out_path: &Path, size: (f32, f32), theme: Theme) -> Result<(), StudioError> {
+    render_headless_snapshot_with_config(out_path, StudioConfig { size, ..StudioConfig::default() }, theme)
+}
+
+pub fn render_headless_snapshot_with_config(out_path: &Path, config: StudioConfig, theme: Theme) -> Result<(), StudioError> {
     let target = out_path.display().to_string();
-    remember_size(size);
-    remember_theme(theme);
+    let (width, height) = config.size;
+    remember_launch(&config, theme);
     let args =
-        vec!["--snap".to_owned(), target.clone(), "--size".to_owned(), format!("{}x{}", size.0 as u32, size.1 as u32), "--scale".to_owned(), "1".to_owned()];
-    App::new(spec(StudioConfig { size, ..StudioConfig::default() })).args(args).try_run().map_err(StudioError::Rune)?;
+        vec!["--snap".to_owned(), target.clone(), "--size".to_owned(), format!("{}x{}", width as u32, height as u32), "--scale".to_owned(), "1".to_owned()];
+    App::new(spec(config)).args(args).try_run().map_err(StudioError::Rune)?;
     if out_path.is_file() { Ok(()) } else { Err(StudioError::MissingSnapshot(target)) }
+}
+
+fn remember_launch(config: &StudioConfig, theme: Theme) {
+    remember_size(config.size);
+    if let Ok(mut slot) = LAUNCH_DB.lock() {
+        slot.clone_from(&config.db_path);
+    }
+    remember_theme(theme);
 }
 
 fn remember_theme(theme: Theme) {
