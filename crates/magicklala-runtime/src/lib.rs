@@ -21,8 +21,8 @@ pub use bridges::{SharedEmbedder, StoreKnowledgeBridge, StoreMemoryBridge};
 pub use copilot::{CopilotEngine, CopilotError, CopilotRequest, CopilotSuggestion, GraphPatchOp, PatchRejection};
 pub use metered::{LlmCallScope, MeteredLlmGateway};
 pub use runner::{
-    AgentRelease, CORRELATION_ID_KEY, EngineReleaseRunner, ReleaseOrigin, ReleaseRunner, RunScope, StoreScope, TemplateReplyRunner, correlation_id,
-    inbound_payload, ordered_replies, structural_errors, trigger_kinds, trigger_payload,
+    AgentRelease, CORRELATION_ID_KEY, EngineReleaseRunner, ProjectLlmFactory, ReleaseOrigin, ReleaseRunner, RunScope, StoreScope, TemplateReplyRunner,
+    correlation_id, inbound_payload, ordered_replies, structural_errors, trigger_kinds, trigger_payload,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]

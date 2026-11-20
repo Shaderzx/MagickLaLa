@@ -6,12 +6,14 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use magicklala_graph::{EngineServices, NodeCatalog, NodeId, RunTrigger, SpellEngine, SpellGraph, SpellValidator, TraceEvent, Value};
 use magicklala_nodes::{HttpLlmGateway, InMemoryKnowledge, InMemoryMemory, LlmGatewayConfig, default_registry};
-use magicklala_server::{AppState, ServerConfig, Wiring};
+use magicklala_server::{API_TOKEN_ENV, AppState, ServerConfig, Wiring};
 use magicklala_store::{AesGcmVault, CryptoVault, MASTER_KEY_ENV, Repository, SqliteStore};
 
 const VAULT_KEY_ENV: &str = "MAGICKLALA_VAULT_KEY";
 const EMBEDDER_URL_ENV: &str = "MAGICKLALA_EMBEDDER_URL";
 const EMBEDDER_MODEL_ENV: &str = "MAGICKLALA_EMBEDDER_MODEL";
+const DATABASE_ALIAS_ENV: &str = "MAGICKLALA_DB";
+const DEFAULT_DATABASE_URL: &str = "sqlite://magicklala.db";
 
 #[derive(Parser)]
 #[command(name = "magicklala", version, about = "MagickLaLa visual AI agent studio and runtime")]
@@ -25,8 +27,8 @@ enum Command {
     Serve {
         #[arg(long, env = "MAGICKLALA_BIND", default_value = "127.0.0.1:7777")]
         bind: std::net::SocketAddr,
-        #[arg(long, env = "MAGICKLALA_DATABASE_URL", default_value = "sqlite://magicklala.db")]
-        database_url: String,
+        #[arg(long, visible_alias = "db", env = "MAGICKLALA_DATABASE_URL")]
+        database_url: Option<String>,
     },
     Studio {
         #[arg(long, value_name = "PATH")]
@@ -43,6 +45,8 @@ enum Command {
     Agent {
         #[arg(long, global = true, env = "MAGICKLALA_SERVER", default_value = "http://127.0.0.1:7777")]
         server: String,
+        #[arg(long, global = true, env = "MAGICKLALA_API_TOKEN", hide_env_values = true)]
+        token: Option<String>,
         #[command(subcommand)]
         command: AgentCommand,
     },
@@ -129,9 +133,9 @@ fn dispatch(cli: Cli) -> CliResult {
         Command::Studio { snap: None, width, height } => {
             Ok(magicklala_studio::run_studio(magicklala_studio::StudioConfig { size: (width, height), ..Default::default() })?)
         }
-        Command::Serve { bind, database_url } => block_on(serve(ServerConfig { bind, database_url })),
+        Command::Serve { bind, database_url } => block_on(serve(ServerConfig::from_env(bind, database_url_or_default(database_url)))),
         Command::Spell { command } => spell(command),
-        Command::Agent { server, command } => block_on(agent(server, command)),
+        Command::Agent { server, token, command } => block_on(agent(server, token, command)),
     }
 }
 
@@ -139,16 +143,31 @@ fn block_on(future: impl Future<Output = CliResult>) -> CliResult {
     tokio::runtime::Runtime::new()?.block_on(future)
 }
 
-fn vault() -> Result<Arc<dyn CryptoVault>, Box<dyn std::error::Error>> {
+fn database_url_or_default(argument: Option<String>) -> String {
+    let raw = argument.or_else(|| std::env::var(DATABASE_ALIAS_ENV).ok()).map(|url| url.trim().to_owned()).filter(|url| !url.is_empty());
+    match raw {
+        None => DEFAULT_DATABASE_URL.to_owned(),
+        Some(url) if url.starts_with("sqlite:") => url,
+        Some(path) => format!("sqlite://{path}"),
+    }
+}
+
+fn is_in_memory(database_url: &str) -> bool {
+    database_url.contains(":memory:") || database_url.contains("mode=memory")
+}
+
+fn vault(database_url: &str) -> Result<Arc<dyn CryptoVault>, Box<dyn std::error::Error>> {
     let fallback = std::env::var(VAULT_KEY_ENV).ok().filter(|key| !key.trim().is_empty());
     match AesGcmVault::from_env_or_key(fallback.as_deref()) {
         Ok(vault) => Ok(Arc::new(vault)),
-        Err(_) => {
-            eprintln!(
-                "warning: neither {MASTER_KEY_ENV} nor {VAULT_KEY_ENV} is set; credentials are sealed with an ephemeral key and cannot be revealed after a restart"
-            );
+        Err(_) if is_in_memory(database_url) => {
+            eprintln!("warning: neither {MASTER_KEY_ENV} nor {VAULT_KEY_ENV} is set; the in-memory store seals credentials with an ephemeral key");
             Ok(Arc::new(AesGcmVault::new(&AppState::ephemeral_vault_key())))
         }
+        Err(_) => Err(format!(
+            "refusing to start: {database_url} is a file-backed database, so set {MASTER_KEY_ENV} or {VAULT_KEY_ENV} to a stable 32-byte key (64 hex characters); an ephemeral key would make every sealed credential unreadable after a restart"
+        )
+        .into()),
     }
 }
 
@@ -168,12 +187,19 @@ fn embedder() -> Arc<dyn magicklala_embedder::Embedder> {
 }
 
 async fn serve(config: ServerConfig) -> CliResult {
+    let vault = vault(&config.database_url)?;
     let store = SqliteStore::connect(&config.database_url).await?;
     store.migrate().await?;
     let store: Arc<dyn Repository> = Arc::new(store);
-    let state = AppState::wire(Wiring::new(Arc::new(default_registry()), store, vault()?).with_embedder(embedder()));
+    let wiring =
+        Wiring::new(Arc::new(default_registry()), store, vault).with_embedder(embedder()).with_access(config.access.clone()).with_spell_runs(config.runs);
+    let state = AppState::wire(wiring);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
-    eprintln!("magicklala server listening on http://{} (store: sqlite {})", listener.local_addr()?, config.database_url);
+    let address = listener.local_addr()?;
+    if !address.ip().is_loopback() && !config.access.requires_token() {
+        eprintln!("warning: serving on non-loopback address {address} without {API_TOKEN_ENV}; anyone who can reach it controls every agent");
+    }
+    eprintln!("magicklala server listening on http://{address} (store: sqlite {})", config.database_url);
     Ok(magicklala_server::serve_on(listener, state).await?)
 }
 
@@ -272,18 +298,26 @@ fn describe_agent(agent: &serde_json::Value) -> String {
     format!("{id}\t{state}\t{name}")
 }
 
-async fn agent(server: String, command: AgentCommand) -> CliResult {
+fn authorized(request: reqwest::RequestBuilder, token: Option<&str>) -> reqwest::RequestBuilder {
+    match token.map(str::trim).filter(|token| !token.is_empty()) {
+        Some(token) => request.bearer_auth(token),
+        None => request,
+    }
+}
+
+async fn agent(server: String, token: Option<String>, command: AgentCommand) -> CliResult {
     let client = reqwest::Client::new();
     let base = format!("{}/api/v1", server.trim_end_matches('/'));
+    let token = token.as_deref();
     match command {
         AgentCommand::List => {
-            let agents = api_call(client.get(format!("{base}/agents"))).await?;
+            let agents = api_call(authorized(client.get(format!("{base}/agents")), token)).await?;
             for agent in agents.as_array().into_iter().flatten() {
                 println!("{}", describe_agent(agent));
             }
         }
-        AgentCommand::Start { id } => println!("{}", describe_agent(&api_call(client.post(format!("{base}/agents/{id}/start"))).await?)),
-        AgentCommand::Stop { id } => println!("{}", describe_agent(&api_call(client.post(format!("{base}/agents/{id}/stop"))).await?)),
+        AgentCommand::Start { id } => println!("{}", describe_agent(&api_call(authorized(client.post(format!("{base}/agents/{id}/start")), token)).await?)),
+        AgentCommand::Stop { id } => println!("{}", describe_agent(&api_call(authorized(client.post(format!("{base}/agents/{id}/stop")), token)).await?)),
     }
     Ok(())
 }

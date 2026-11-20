@@ -91,6 +91,11 @@ pub trait NodeExecutor: Send + Sync {
 - **SQLite** is the zero-config default (`magicklala.db`) using WAL mode and `sqlx` migrations.
 - **PostgreSQL + `pgvector`** shares the same trait surface for multi-agent cloud deployments (Phase 4).
 - **Secrets at rest**: `credentials.ciphertext` is encrypted with AES-256-GCM using a master key from the OS keychain or `MAGICKLALA_MASTER_KEY`. Plaintext secrets are injected only into outbound provider/connector calls and are never serialized to logs, execution traces, or API responses.
+- **Vault key at startup**: `magicklala serve` refuses to start on a file-backed SQLite database unless `MAGICKLALA_MASTER_KEY` or `MAGICKLALA_VAULT_KEY` is set; an ephemeral random key is used only for `sqlite::memory:`.
+- **Project-scoped credentials**: an LLM node's `credential_id` is resolved by `VaultCredentialResolver`, pinned to the spell's (or the running agent's) project; a credential from another project is refused before any provider call. Without `credential_id` the env keys (`MAGICKLALA_LLM_API_KEY`, `OPENAI_API_KEY`, ...) still apply.
+- **API access**: `MAGICKLALA_API_TOKEN` turns on bearer auth for `/api/v1/*`, `/api/nodes` and `/ws` (`Authorization: Bearer <token>`, or `?token=` on `/ws`), compared in constant time; `/health` and `POST /api/v1/webhooks/{path}` stay public. CORS answers only the origins in `MAGICKLALA_CORS_ORIGINS` (comma separated; default `http://127.0.0.1:3000`, `http://localhost:3000`, `http://127.0.0.1:4242`, `http://localhost:4242`), never `*`.
+- **Webhooks**: bodies are capped at 1 MiB (413). A webhook with `secret_credential_id` dispatches only when `X-MagickLaLa-Signature: sha256=<hex HMAC-SHA256 of the raw body>` verifies against the project's sealed secret (401 otherwise); malformed JSON is 400.
+- **Runs**: every agent chat and webhook run, and every `POST /api/v1/spells/{id}/run` (succeeded, failed or timed out after `MAGICKLALA_SPELL_RUN_TIMEOUT_MS`, default 60 s), is recorded in `execution_runs`. `MAGICKLALA_ALLOW_PRIVATE_HTTP=1` lets HTTP nodes reach private addresses; it is off by default.
 
 ---
 

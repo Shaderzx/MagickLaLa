@@ -53,10 +53,10 @@ impl IntoResponse for ApiError {
 impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> Self {
         match error {
-            StoreError::NotFound(what) => Self::not_found(format!("not found: {what}")),
-            StoreError::Conflict(what) => Self::conflict("conflict", format!("conflict: {what}")),
-            StoreError::Invalid(what) => Self::bad_request("invalid_input", format!("invalid input: {what}")),
-            StoreError::NotImplemented(what) => Self::new(StatusCode::NOT_IMPLEMENTED, "not_implemented", format!("not implemented yet: {what}")),
+            StoreError::NotFound(_) => Self::not_found(error.to_string()),
+            StoreError::Conflict(_) => Self::conflict("conflict", error.to_string()),
+            StoreError::Invalid(_) => Self::bad_request("invalid_input", error.to_string()),
+            StoreError::NotImplemented(_) => Self::new(StatusCode::NOT_IMPLEMENTED, "not_implemented", error.to_string()),
             StoreError::Crypto => Self::internal("credential vault failure"),
             StoreError::Database(_) | StoreError::Serde(_) => {
                 tracing::error!(%error, "store failure");
