@@ -4,16 +4,19 @@ mod embedding;
 mod error;
 mod memory;
 mod secrets;
+mod subgraphs;
 mod ws;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use axum::http::Request;
 use axum::middleware;
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use magicklala_connectors::{ConnectorRegistry, MAX_WEBHOOK_BODY_BYTES};
 use magicklala_embedder::{Embedder, LocalHashEmbedder};
 use magicklala_graph::{EngineServices, LlmGateway, NodeCatalog, SpellEngine, SpellValidator};
@@ -23,14 +26,20 @@ use magicklala_runtime::{
     StoreScope,
 };
 use magicklala_store::{AesGcmVault, CryptoVault, ProjectId, Repository};
+use tokio::sync::OwnedMutexGuard;
 use tower_http::trace::TraceLayer;
+use uuid::Uuid;
 
-pub use access::{API_TOKEN_ENV, AccessPolicy, CORS_ORIGINS_ENV, LOCAL_STUDIO_ORIGINS, parse_origins, tokens_match};
+pub use access::{
+    ALLOWED_HOSTS_ENV, API_TOKEN_ENV, AccessPolicy, CORS_ORIGINS_ENV, LOCAL_STUDIO_ORIGINS, LOOPBACK_HOSTS, PUBLIC_PATHS, WS_TICKET_TTL, WsTickets,
+    parse_hosts, parse_origins, tokens_match,
+};
 pub use api::ApiDoc;
 pub use embedding::cosine;
 pub use error::{ApiError, ApiResult};
 pub use memory::{InMemoryRepository, content_hash, graph_hash};
 pub use secrets::{LlmSource, ProjectLlms, VaultCredentialResolver, project_secret};
+pub use subgraphs::{MAX_SUBGRAPH_LOOKUPS, ProjectSubgraphResolver, StoreSubgraphLoader};
 
 pub const ALLOW_PRIVATE_HTTP_ENV: &str = "MAGICKLALA_ALLOW_PRIVATE_HTTP";
 pub const SPELL_RUN_TIMEOUT_ENV: &str = "MAGICKLALA_SPELL_RUN_TIMEOUT_MS";
@@ -82,8 +91,30 @@ impl Default for ServerConfig {
 
 impl ServerConfig {
     pub fn from_env(bind: SocketAddr, database_url: String) -> Self {
-        Self { bind, database_url, access: AccessPolicy::from_env(), runs: SpellRunSettings::from_env() }
+        Self { bind, database_url, access: AccessPolicy::from_env().with_bind(bind), runs: SpellRunSettings::from_env() }
     }
+}
+
+#[derive(Debug, Default)]
+pub struct AgentLocks {
+    locks: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl AgentLocks {
+    pub async fn lock(&self, agent_id: Uuid) -> OwnedMutexGuard<()> {
+        let lock = Arc::clone(self.locks.lock().unwrap_or_else(PoisonError::into_inner).entry(agent_id).or_default());
+        lock.lock_owned().await
+    }
+
+    pub fn forget(&self, agent_id: Uuid) {
+        self.locks.lock().unwrap_or_else(PoisonError::into_inner).remove(&agent_id);
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BootReport {
+    pub started: Vec<Uuid>,
+    pub failed: Vec<(Uuid, String)>,
 }
 
 #[derive(Clone)]
@@ -99,6 +130,8 @@ pub struct AppState {
     pub access: Arc<AccessPolicy>,
     pub runs: SpellRunSettings,
     pub connectors: ConnectorRegistry,
+    pub tickets: Arc<WsTickets>,
+    pub agent_locks: Arc<AgentLocks>,
 }
 
 pub struct Wiring {
@@ -173,8 +206,13 @@ impl AppState {
         let project_llms = Arc::clone(&llms);
         let project_llm: ProjectLlmFactory = Arc::new(move |project: ProjectId| project_llms.for_project(project));
         let scope = StoreScope { repository: Arc::clone(&store), llm: Some(shared_llm), embedder: Some(Arc::clone(&embedder)) };
-        let runner = EngineReleaseRunner::scoped(catalog, services, scope).with_project_llm(project_llm).with_private_http(runs.allow_private_http);
-        let supervisor = AgentSupervisor::with_runner(Arc::new(InMemoryEventBus::default()), Arc::new(runner)).with_repository(Arc::clone(&store));
+        let runner = EngineReleaseRunner::scoped(catalog, services, scope)
+            .with_project_llm(project_llm)
+            .with_subgraph_loader(Arc::new(StoreSubgraphLoader::new(Arc::clone(&store))))
+            .with_private_http(runs.allow_private_http);
+        let supervisor = AgentSupervisor::with_runner(Arc::new(InMemoryEventBus::default()), Arc::new(runner))
+            .with_repository(Arc::clone(&store))
+            .with_run_timeout(runs.timeout);
         let supervisor = match &connectors {
             Some(registry) => supervisor.with_connectors(registry.clone()),
             None => supervisor,
@@ -192,7 +230,25 @@ impl AppState {
             access: Arc::new(access),
             runs,
             connectors: connectors.unwrap_or_default(),
+            tickets: Arc::new(WsTickets::new()),
+            agent_locks: Arc::new(AgentLocks::default()),
         }
+    }
+
+    pub async fn boot_enabled_agents(&self) -> BootReport {
+        let mut report = BootReport::default();
+        let Ok(projects) = self.store.list_projects().await else { return report };
+        for project in projects {
+            let Ok(agents) = self.store.list_agents(project.id).await else { continue };
+            for agent in agents.into_iter().filter(|agent| agent.enabled && agent.pinned_release_id.is_some()) {
+                let id = agent.id.0;
+                match api::boot_agent(self, agent).await {
+                    Ok(()) => report.started.push(id),
+                    Err(error) => report.failed.push((id, error.message)),
+                }
+            }
+        }
+        report
     }
 
     pub fn in_memory(registry: Arc<NodeRegistry>, vault_key: [u8; 32]) -> Self {
@@ -221,7 +277,7 @@ fn guarded_v1() -> Router<AppState> {
         .route("/spells/{id}/run", post(api::run_spell))
         .route("/agents", post(api::create_agent).get(api::list_agents))
         .route("/agents/{id}", get(api::get_agent).patch(api::patch_agent).delete(api::delete_agent))
-        .route("/agents/{id}/releases", post(api::publish_release).get(api::list_releases))
+        .route("/agents/{id}/releases", post(api::publish_release).get(api::list_releases).layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES)))
         .route("/agents/{id}/start", post(api::start_agent))
         .route("/agents/{id}/stop", post(api::stop_agent))
         .route("/agents/{id}/chat", post(api::chat_with_agent))
@@ -233,6 +289,7 @@ fn guarded_v1() -> Router<AppState> {
         .route("/credentials", post(api::create_credential).get(api::list_credentials))
         .route("/credentials/{id}", axum::routing::delete(api::delete_credential))
         .route("/webhooks", post(api::create_webhook))
+        .route("/ws-ticket", post(api::create_ws_ticket))
         .route("/copilot/suggest", post(api::copilot_suggest))
 }
 
@@ -242,15 +299,22 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ws", get(ws::websocket))
         .nest("/api/v1", guarded_v1())
         .route_layer(middleware::from_fn_with_state(state.clone(), access::require_token));
-    let webhooks = Router::new().route("/api/v1/webhooks/{*path}", post(api::receive_webhook)).layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES));
+    let [health_path, webhook_path] = PUBLIC_PATHS;
+    let guarded_delete = delete(api::delete_webhook).route_layer(middleware::from_fn_with_state(state.clone(), access::require_token));
+    let webhooks = Router::new()
+        .route(&access::axum_route(webhook_path), post(api::receive_webhook).merge(guarded_delete))
+        .layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES));
     let cors = access::cors_layer(&state.access);
+    let trace = TraceLayer::new_for_http()
+        .make_span_with(|request: &Request<_>| tracing::info_span!("request", method = %request.method(), path = %request.uri().path()));
     Router::new()
-        .route("/health", get(api::health))
+        .route(health_path, get(api::health))
         .merge(webhooks)
         .merge(protected)
         .fallback(api::route_not_found)
-        .layer(TraceLayer::new_for_http())
+        .layer(trace)
         .layer(cors)
+        .layer(middleware::from_fn_with_state(state.clone(), access::require_known_host))
         .with_state(state)
 }
 

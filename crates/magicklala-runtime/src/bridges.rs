@@ -88,6 +88,48 @@ impl MemoryService for StoreMemoryBridge {
             .map(|hit| MemoryItem { id: hit.item.id.0.to_string(), content: hit.item.content, score: hit.score, metadata: hit.item.metadata })
             .collect())
     }
+
+    async fn clear(&self, agent_id: &str) -> Result<u64, NodeError> {
+        let agent_id = trusted_agent(self.pinned, agent_id)?;
+        self.repository.clear_memories(agent_id).await.map_err(service)
+    }
+}
+
+pub const UNBOUND_STORE_ACCESS: &str = "direct spell run requires agent_id in the same project to access memory or knowledge";
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnboundAgentStore;
+
+impl UnboundAgentStore {
+    fn refuse<T>() -> Result<T, NodeError> {
+        Err(NodeError::InvalidConfig(UNBOUND_STORE_ACCESS.to_owned()))
+    }
+}
+
+#[async_trait]
+impl MemoryService for UnboundAgentStore {
+    async fn add(&self, _agent_id: &str, _content: &str, _metadata: serde_json::Value) -> Result<String, NodeError> {
+        Self::refuse()
+    }
+
+    async fn recall(&self, _agent_id: &str, _query: &str, _limit: usize) -> Result<Vec<MemoryItem>, NodeError> {
+        Self::refuse()
+    }
+
+    async fn clear(&self, _agent_id: &str) -> Result<u64, NodeError> {
+        Self::refuse()
+    }
+}
+
+#[async_trait]
+impl KnowledgeService for UnboundAgentStore {
+    async fn add(&self, _agent_id: &str, _title: &str, _content: &str) -> Result<String, NodeError> {
+        Self::refuse()
+    }
+
+    async fn search(&self, _agent_id: &str, _query: &str, _limit: usize) -> Result<Vec<KnowledgeHit>, NodeError> {
+        Self::refuse()
+    }
 }
 
 pub struct StoreKnowledgeBridge {

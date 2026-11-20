@@ -511,7 +511,222 @@ test('A WebSocket chat waiting on a slow run never blocks pings on the same sock
     await llm.close();
   }
 });
-for (const [width, height] of [[960, 640], [1280, 800]]) {
+function llmRequestRows(dbPath: string, agentId: string | null) {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    const rows = agentId === null ? db.prepare('SELECT run_id, agent_id, status FROM llm_requests WHERE agent_id IS NULL').all() : db.prepare('SELECT run_id, agent_id, status FROM llm_requests WHERE agent_id = ?').all(agentId);
+    return rows as { run_id: string | null; agent_id: string | null; status: string }[];
+  } finally {
+    db.close();
+  }
+}
+
+async function startEmbeddingServer(vector: number[]) {
+  const calls: { authorization: string | undefined; body: { model: string; input: string[] } }[] = [];
+  const server = createHttpServer(async (request, response) => {
+    let body = '';
+    for await (const chunk of request) body += chunk;
+    if (request.method !== 'POST' || request.url !== '/v1/embeddings') {
+      response.writeHead(404).end();
+      return;
+    }
+    const parsed = JSON.parse(body);
+    calls.push({ authorization: request.headers.authorization, body: parsed });
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ data: parsed.input.map((_: string, index: number) => ({ index, embedding: vector })), usage: { prompt_tokens: 2 } }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { port } = server.address() as AddressInfo;
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    calls,
+    close: async () => {
+      server.closeAllConnections();
+      server.close();
+      await once(server, 'close');
+    },
+  };
+}
+
+test('A spell whose flow loops forever answers 422 with the step limit error and the server stays healthy', async () => {
+  const llm = await startScriptedLlm(async (call) => completion(call.response, 'unused'));
+  const stack = await launchStack(llm.baseUrl);
+  try {
+    const project = await stack.api('/api/v1/projects', { name: 'Loops' });
+    const graph = {
+      schema_version: 1,
+      id: randomUUID(),
+      name: 'Ping pong',
+      description: 'flow loop',
+      variables: [],
+      nodes: [
+        { id: 'start', kind: 'event/on_start', position: [0, 0], config: {} },
+        { id: 'always', kind: 'logic/regex_match', position: [0, 200], config: { text: 'go', pattern: 'go' } },
+        { id: 'a', kind: 'flow/branch', position: [280, 0], config: {} },
+        { id: 'b', kind: 'flow/branch', position: [560, 0], config: {} },
+      ],
+      wires: [
+        { id: 'w_start', from_node: 'start', from_socket: 'out', to_node: 'a', to_socket: 'in' },
+        { id: 'w_a_cond', from_node: 'always', from_socket: 'matched', to_node: 'a', to_socket: 'condition' },
+        { id: 'w_b_cond', from_node: 'always', from_socket: 'matched', to_node: 'b', to_socket: 'condition' },
+        { id: 'w_ab', from_node: 'a', from_socket: 'true', to_node: 'b', to_socket: 'in' },
+        { id: 'w_ba', from_node: 'b', from_socket: 'true', to_node: 'a', to_socket: 'in' },
+      ],
+      subgraphs: [],
+    };
+    const spell = await stack.api('/api/v1/spells', { project_id: project.body.id, name: 'Ping pong', graph });
+    expect(spell.status).toBe(201);
+    const looped = await stack.api(`/api/v1/spells/${spell.body.id}/run`, {});
+    expect(looped.status).toBe(422);
+    expect(looped.body.error).toContain('step limit 10000 exceeded');
+    expect(looped.body.trace.at(-1).event).toBe('run_finished');
+    expect(looped.body.trace_truncated).toBe(true);
+    expect(storedRun(stack.dbPath, looped.body.run_id)).toMatchObject({ status: 'failed', spell_id: spell.body.id });
+    expect((await fetch(`${stack.baseUrl}/health`)).status).toBe(200);
+    expect((await stack.api('/api/v1/health')).body).toMatchObject({ status: 'ok' });
+  } finally {
+    await stack.stop();
+    await llm.close();
+  }
+});
+
+test('An ai/embedding node with a vault credential_id embeds through the metered gateway in a direct spell run and an agent chat', async () => {
+  const vector = [0.25, -0.5, 0.75];
+  const embeddings = await startEmbeddingServer(vector);
+  const stack = await launchStack(embeddings.baseUrl);
+  try {
+    const project = await stack.api('/api/v1/projects', { name: 'Embeddings' });
+    const secret = `sk-embed-${randomUUID()}`;
+    const key = await stack.api('/api/v1/credentials', { project_id: project.body.id, name: 'embedder', provider: 'openai', secret });
+    expect(key.status).toBe(201);
+    const graph = (trigger: string) => ({
+      schema_version: 1,
+      id: randomUUID(),
+      name: `Embed on ${trigger}`,
+      description: 'embedding',
+      variables: [],
+      nodes: [
+        { id: 'trigger', kind: trigger, position: [0, 0], config: {} },
+        { id: 'embed', kind: 'ai/embedding', position: [280, 0], config: { provider: 'openai', model: 'text-embedding-3-small', credential_id: key.body.id } },
+        { id: 'show', kind: 'json/stringify', position: [560, 120], config: {} },
+        { id: 'send', kind: 'io/send_message', position: [840, 0], config: {} },
+      ],
+      wires: [
+        { id: 'w_flow', from_node: 'trigger', from_socket: 'out', to_node: 'embed', to_socket: 'in' },
+        { id: 'w_text', from_node: 'trigger', from_socket: trigger === 'event/on_start' ? 'payload' : 'content', to_node: 'embed', to_socket: 'text' },
+        { id: 'w_send', from_node: 'embed', from_socket: 'out', to_node: 'send', to_socket: 'in' },
+        { id: 'w_vector', from_node: 'embed', from_socket: 'embedding', to_node: 'show', to_socket: 'value' },
+        { id: 'w_content', from_node: 'show', from_socket: 'text', to_node: 'send', to_socket: 'content' },
+      ],
+      subgraphs: [],
+    });
+    const spell = await stack.api('/api/v1/spells', { project_id: project.body.id, name: 'Embed spell', graph: graph('event/on_start') });
+    const ran = await stack.api(`/api/v1/spells/${spell.body.id}/run`, { input: 'embed this sentence' });
+    expect(ran.status).toBe(200);
+    expect(ran.body.summary.outputs['embed.embedding']).toEqual({ type: 'embedding', value: vector });
+    expect(embeddings.calls.map((call) => [call.body.input, call.authorization])).toEqual([[['embed this sentence'], `Bearer ${secret}`]]);
+    expect(llmRequestRows(stack.dbPath, null).map((row) => row.status)).toEqual(['ok']);
+    const { agent } = await runningLlmAgent(stack.api, project.body.id, 'embedder', graph('event/on_message'));
+    const chat = await stack.api(`/api/v1/agents/${agent.id}/chat`, { content: 'embed my chat' });
+    expect(chat.status).toBe(200);
+    expect(JSON.parse(chat.body.reply.content)).toEqual(vector);
+    expect(embeddings.calls.at(-1)).toEqual({ authorization: `Bearer ${secret}`, body: { model: 'text-embedding-3-small', input: ['embed my chat'] } });
+    const runs = (await stack.api(`/api/v1/agents/${agent.id}/runs`)).body;
+    expect(llmRequestRows(stack.dbPath, agent.id)).toEqual([{ run_id: runs[0].run_id, agent_id: agent.id, status: 'ok' }]);
+  } finally {
+    await stack.stop();
+    await embeddings.close();
+  }
+});
+
+test('MAGICKLALA_SPELL_RUN_TIMEOUT_MS also bounds agent chats: a stuck LLM answers 504 within the configured timeout and records a timed_out run', async () => {
+  const released = Promise.withResolvers<void>();
+  const llm = await startScriptedLlm(async (call) => {
+    await released.promise;
+    completion(call.response, 'too late');
+  });
+  const stack = await launchStack(llm.baseUrl, { MAGICKLALA_SPELL_RUN_TIMEOUT_MS: '1500' });
+  try {
+    const project = await stack.api('/api/v1/projects', { name: 'Slow chats' });
+    const { agent } = await runningLlmAgent(stack.api, project.body.id, 'slow chat', await helloLlmGraph());
+    const response = await fetch(`${stack.baseUrl}/api/v1/agents/${agent.id}/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ content: 'are you stuck?' }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    expect(response.status).toBe(504);
+    const body = await response.json();
+    expect(body.code).toBe('run_timeout');
+    expect(body.error).toContain('1500 ms');
+    const runs = (await stack.api(`/api/v1/agents/${agent.id}/runs`)).body;
+    expect(runs.map((item: { status: string }) => item.status)).toEqual(['timed_out']);
+  } finally {
+    released.resolve();
+    await stack.stop();
+    await llm.close();
+  }
+});
+
+test('Restarting magicklala serve on the same SQLite database boots every enabled agent with a pinned release so chats work without calling start', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-boot-'));
+  const databaseUrl = `sqlite://${join(dir, 'boot.db')}`;
+  const llm = await startScriptedLlm(async (call) => completion(call.response, `loopback answer about ${call.prompt}`));
+  const port = await freePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const api = client(baseUrl);
+  let serve = startServe(port, databaseUrl, llm.baseUrl, dir);
+  try {
+    await waitHealthy(baseUrl);
+    const project = await api('/api/v1/projects', { name: 'Boot' });
+    const { agent } = await runningLlmAgent(api, project.body.id, 'booted', await helloLlmGraph());
+    const idle = await api('/api/v1/agents', { project_id: project.body.id, name: 'never released' });
+    expect((await api(`/api/v1/agents/${agent.id}/chat`, { content: 'before restart' })).status).toBe(200);
+    await stopProcess(serve.child);
+    serve = startServe(port, databaseUrl, llm.baseUrl, dir);
+    await waitHealthy(baseUrl);
+    await expect.poll(async () => (await api(`/api/v1/agents/${agent.id}`)).body.status, { timeout: 20_000 }).toEqual({ state: 'running' });
+    expect((await api(`/api/v1/agents/${idle.body.id}`)).body.status).toEqual({ state: 'stopped' });
+    const chat = await api(`/api/v1/agents/${agent.id}/chat`, { content: 'after restart' });
+    expect(chat.status).toBe(200);
+    expect(chat.body.reply.content).toBe('loopback answer about after restart');
+  } finally {
+    await stopProcess(serve.child);
+    await llm.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('One run id links the live WebSocket trace, GET /api/v1/agents/{id}/runs, the saved trace events and the metered LLM request of an agent chat', async () => {
+  const llm = await startScriptedLlm(async (call) => completion(call.response, `loopback answer about ${call.prompt}`));
+  const stack = await launchStack(llm.baseUrl);
+  let socket: WebSocket | undefined;
+  try {
+    const project = await stack.api('/api/v1/projects', { name: 'Run ids' });
+    const { agent } = await runningLlmAgent(stack.api, project.body.id, 'run ids', await helloLlmGraph());
+    const frames: { type: string; agent_id?: string; run_id?: string; event?: { event: string; run_id: string } }[] = [];
+    socket = new WebSocket(`${stack.wsUrl}?agent_id=${agent.id}`);
+    socket.addEventListener('message', (message) => frames.push(JSON.parse(String(message.data))));
+    await once(socket as unknown as EventTarget, 'open');
+    const chat = await stack.api(`/api/v1/agents/${agent.id}/chat`, { content: 'which run is this?' });
+    expect(chat.status).toBe(200);
+    await expect.poll(() => frames.some((frame) => frame.type === 'run_completed'), { timeout: 20_000 }).toBe(true);
+    const [run] = (await stack.api(`/api/v1/agents/${agent.id}/runs`)).body;
+    expect(run.trace.correlation_id).toBe(chat.body.reply.metadata.correlation_id);
+    expect(run.trace.truncated).toBe(false);
+    const liveTrace = frames.filter((frame) => frame.type === 'trace').map((frame) => frame.event!);
+    expect(new Set(liveTrace.map((event) => event.run_id))).toEqual(new Set([run.run_id]));
+    expect(frames.find((frame) => frame.type === 'run_completed')?.run_id).toBe(run.run_id);
+    expect(run.trace.events.map((event: { event: string }) => event.event)).toEqual(liveTrace.map((event) => event.event));
+    expect(new Set(run.trace.events.map((event: { run_id: string }) => event.run_id))).toEqual(new Set([run.run_id]));
+    expect(llmRequestRows(stack.dbPath, agent.id)).toEqual([{ run_id: run.run_id, agent_id: agent.id, status: 'ok' }]);
+  } finally {
+    socket?.close();
+    await stack.stop();
+    await llm.close();
+  }
+});for (const [width, height] of [[960, 640], [1280, 800]]) {
   test(`magicklala studio --snap renders a ${width}x${height} PNG with no accessibility warnings`, async () => {
     const dir = await mkdtemp(join(tmpdir(), 'magicklala-snap-size-'));
     const out = join(dir, 'studio.png');

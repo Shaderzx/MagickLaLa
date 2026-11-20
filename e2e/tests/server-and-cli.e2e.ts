@@ -191,8 +191,19 @@ async function startedAgent(server: Server, label: string, graph: object) {
   return created;
 }
 
-function sign(secret: string, body: string) {
-  return `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`;
+function sign(secret: string, body: string, timestamp = Math.floor(Date.now() / 1000)) {
+  return { 'X-MagickLaLa-Timestamp': String(timestamp), 'X-MagickLaLa-Signature': `sha256=${createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex')}` };
+}
+
+async function launchToken(token: string, extra: Record<string, string> = {}) {
+  return launchServe({ MAGICKLALA_API_TOKEN: token, ...extra });
+}
+
+function runCli(args: string[], env: NodeJS.ProcessEnv, timeout = 60_000) {
+  return run(binary, args, { env, timeout }).then(
+    () => ({ code: 0 as number | null, stderr: '' }),
+    (error: { code: number | null; stderr: string }) => ({ code: error.code, stderr: error.stderr }),
+  );
 }
 test('GET /api/v1/openapi.json serves an OpenAPI 3.1 document listing every control plane path, its error statuses and its auth schemes', buildBudget, async ({ server }) => {
   const doc = await server.api('/api/v1/openapi.json');
@@ -224,15 +235,21 @@ test('GET /api/v1/openapi.json serves an OpenAPI 3.1 document listing every cont
       '/api/v1/credentials/{id}',
       '/api/v1/webhooks',
       '/api/v1/webhooks/{path}',
+      '/api/v1/webhooks/{id}',
+      '/api/v1/ws-ticket',
       '/api/v1/copilot/suggest',
     ]),
   );
-  expect(Object.keys(doc.body.paths['/api/v1/agents/{id}/chat'].post.responses).sort()).toEqual(['200', '400', '401', '404', '409', '502', '503', '504']);
+  expect(Object.keys(doc.body.paths['/api/v1/agents/{id}/chat'].post.responses).sort()).toEqual(['200', '400', '401', '404', '409', '421', '502', '503', '504']);
+  expect(Object.keys(doc.body.paths['/api/v1/webhooks/{id}'].delete.responses)).toEqual(expect.arrayContaining(['204', '401', '404']));
+  expect(Object.keys(doc.body.paths['/api/v1/ws-ticket'].post.responses)).toEqual(expect.arrayContaining(['201', '401']));
+  expect(doc.body.paths['/ws'].get.parameters.map((parameter: { name: string }) => parameter.name)).toEqual(expect.arrayContaining(['agent_id', 'ticket']));
+  expect(doc.body.paths['/ws'].get.parameters.map((parameter: { name: string }) => parameter.name)).not.toContain('token');
   expect(Object.keys(doc.body.paths['/api/v1/spells/{id}/run'].post.responses)).toEqual(expect.arrayContaining(['200', '400', '401', '404', '422', '504']));
   const webhook = doc.body.paths['/api/v1/webhooks/{path}'].post;
   expect(Object.keys(webhook.responses)).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409', '413']));
   expect(webhook.parameters.map((parameter: { name: string; in: string }) => [parameter.in, parameter.name])).toEqual(
-    expect.arrayContaining([['path', 'path'], ['header', 'X-MagickLaLa-Signature']]),
+    expect.arrayContaining([['path', 'path'], ['header', 'X-MagickLaLa-Signature'], ['header', 'X-MagickLaLa-Timestamp']]),
   );
   expect(webhook.security).toEqual([]);
   expect(doc.body.components.securitySchemes.bearer_token).toMatchObject({ type: 'http', scheme: 'bearer' });
@@ -370,7 +387,7 @@ test('magicklala serve refuses a file-backed database without MAGICKLALA_MASTER_
   }
 });
 
-test('MAGICKLALA_API_TOKEN requires the bearer token on /api/v1 and /ws while /health and signed webhooks stay reachable', buildBudget, async () => {
+test('MAGICKLALA_API_TOKEN requires the bearer token on /api/v1 and /ws, never accepts it in the /ws URL, and /ws takes single-use tickets instead', buildBudget, async () => {
   await buildCli();
   const token = `tok-${randomUUID()}`;
   const { server, stop } = await launchServe({ MAGICKLALA_API_TOKEN: token });
@@ -388,8 +405,17 @@ test('MAGICKLALA_API_TOKEN requires the bearer token on /api/v1 and /ws while /h
     const wsHttp = server.baseUrl + '/ws';
     expect((await rawRequest(wsHttp, { headers: upgradeHeaders() })).status).toBe(401);
     expect((await rawRequest(`${wsHttp}?token=wrong-${token}`, { headers: upgradeHeaders() })).status).toBe(401);
-    expect((await rawRequest(`${wsHttp}?token=${token}`, { headers: upgradeHeaders() })).status).toBe(101);
+    expect((await rawRequest(`${wsHttp}?token=${token}`, { headers: upgradeHeaders() })).status).toBe(401);
     expect((await rawRequest(wsHttp, { headers: upgradeHeaders({ authorization: `Bearer ${token}` }) })).status).toBe(101);
+    expect((await server.api('/api/v1/ws-ticket', { body: {}, headers: { authorization: '' } })).status).toBe(401);
+    const ticket = await server.api('/api/v1/ws-ticket', { body: {} });
+    expect(ticket.status).toBe(201);
+    expect(ticket.body.ticket).toMatch(/^[0-9a-f]{64}$/);
+    expect(ticket.body.expires_in_secs).toBe(30);
+    expect(ticket.text).not.toContain(token);
+    expect((await rawRequest(`${wsHttp}?ticket=${ticket.body.ticket}`, { headers: upgradeHeaders() })).status).toBe(101);
+    expect((await rawRequest(`${wsHttp}?ticket=${ticket.body.ticket}`, { headers: upgradeHeaders() })).status).toBe(401);
+    expect((await rawRequest(`${wsHttp}?ticket=${'0'.repeat(64)}`, { headers: upgradeHeaders() })).status).toBe(401);
   } finally {
     await stop();
   }
@@ -419,7 +445,7 @@ test('CORS answers only allowlisted Studio origins and never grants a foreign Or
   }
 });
 
-test('A webhook with a secret credential runs the agent only for X-MagickLaLa-Signature signed payloads and rejects bodies over 1 MiB', buildBudget, async ({ server }) => {
+test('A webhook with a secret credential runs the agent only for fresh timestamped X-MagickLaLa-Signature payloads and rejects bodies over 1 MiB', buildBudget, async ({ server }) => {
   const { project, spell, agent, release } = await startedAgent(server, 'signed webhook', webhookSpell('signed webhook spell'));
   const secret = `whsec-${randomUUID()}`;
   const credential = await server.api('/api/v1/credentials', { body: { project_id: project.id, name: 'webhook secret', provider: 'webhook', secret } });
@@ -428,13 +454,23 @@ test('A webhook with a secret credential runs the agent only for X-MagickLaLa-Si
   expect(hook.status).toBe(201);
   expect(hook.body.path).toBe('orders/new');
   const payload = JSON.stringify({ type: 'order', id: 42 });
-  const deliver = (body: string, signature?: string) =>
-    fetch(`${server.baseUrl}/api/v1/webhooks/orders/new`, { method: 'POST', headers: { 'content-type': 'application/json', ...(signature ? { 'X-MagickLaLa-Signature': signature } : {}) }, body });
+  const deliver = (body: string, signature: Record<string, string> = {}) =>
+    fetch(`${server.baseUrl}/api/v1/webhooks/orders/new`, { method: 'POST', headers: { 'content-type': 'application/json', ...signature }, body });
   const unsigned = await deliver(payload);
   expect(unsigned.status).toBe(401);
   expect(await unsigned.json()).toMatchObject({ code: 'invalid_signature' });
   expect((await deliver(payload, sign(`not-${secret}`, payload))).status).toBe(401);
   expect((await deliver(payload, sign(secret, `${payload} `))).status).toBe(401);
+  const { 'X-MagickLaLa-Signature': signatureOnly } = sign(secret, payload);
+  const missingTimestamp = await deliver(payload, { 'X-MagickLaLa-Signature': signatureOnly });
+  expect(missingTimestamp.status).toBe(401);
+  expect((await missingTimestamp.json()).error).toContain('X-MagickLaLa-Timestamp');
+  const stale = await deliver(payload, sign(secret, payload, Math.floor(Date.now() / 1000) - 600));
+  expect(stale.status).toBe(401);
+  expect((await stale.json()).error).toContain('timestamp');
+  expect((await deliver(payload, { ...sign(secret, payload), 'X-MagickLaLa-Timestamp': 'yesterday' })).status).toBe(401);
+  const bodyOnly = `sha256=${createHmac('sha256', secret).update(payload).digest('hex')}`;
+  expect((await deliver(payload, { 'X-MagickLaLa-Timestamp': String(Math.floor(Date.now() / 1000)), 'X-MagickLaLa-Signature': bodyOnly })).status).toBe(401);
   const oversized = 'x'.repeat(1024 * 1024 + 1);
   expect((await deliver(oversized, sign(secret, oversized))).status).toBe(413);
   const malformed = '{"type":';
@@ -503,4 +539,221 @@ test('Deleting an agent answers 404 for it afterwards with a message that names 
   expect(gone.body).toEqual({ code: 'not_found', error: `not found: agent ${agent.id}` });
   const chat = await server.api(`/api/v1/agents/${agent.id}/chat`, { body: { content: 'still there?' } });
   expect(chat.status).toBe(404);
+});
+
+test('A webhook signing credential cannot be deleted while a webhook uses it, and deleting the webhook first frees it', buildBudget, async ({ server }) => {
+  const { project, agent } = await startedAgent(server, 'rotating secret', webhookSpell('rotating secret spell'));
+  const secret = `whsec-${randomUUID()}`;
+  const credential = await server.api('/api/v1/credentials', { body: { project_id: project.id, name: 'rotating secret', provider: 'webhook', secret } });
+  const hook = await server.api('/api/v1/webhooks', { body: { agent_id: agent.id, path: 'rotating/hook', secret_credential_id: credential.body.id } });
+  expect(hook.status).toBe(201);
+  const refused = await server.api(`/api/v1/credentials/${credential.body.id}`, { method: 'DELETE' });
+  expect(refused.status).toBe(409);
+  expect(refused.body.code).toBe('conflict');
+  const unsignedAfterRefusal = await fetch(`${server.baseUrl}/api/v1/webhooks/rotating/hook`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  expect(unsignedAfterRefusal.status).toBe(401);
+  expect((await server.api(`/api/v1/credentials?project_id=${project.id}`)).body.map((item: { id: string }) => item.id)).toEqual([credential.body.id]);
+  expect((await server.api(`/api/v1/webhooks/${hook.body.id}`, { method: 'DELETE' })).status).toBe(204);
+  expect((await server.api(`/api/v1/webhooks/${hook.body.id}`, { method: 'DELETE' })).status).toBe(404);
+  const gone = await fetch(`${server.baseUrl}/api/v1/webhooks/rotating/hook`, { method: 'POST', headers: { 'content-type': 'application/json', ...sign(secret, '{}') }, body: '{}' });
+  expect(gone.status).toBe(404);
+  expect((await server.api(`/api/v1/credentials/${credential.body.id}`, { method: 'DELETE' })).status).toBe(204);
+  expect((await server.api(`/api/v1/credentials?project_id=${project.id}`)).body).toEqual([]);
+});
+
+test('Creating a webhook requires a signing credential unless it is explicitly unsigned on a server without an API token', buildBudget, async ({ server }) => {
+  const { agent } = await startedAgent(server, 'unsigned policy', webhookSpell('unsigned policy spell'));
+  const implicit = await server.api('/api/v1/webhooks', { body: { agent_id: agent.id, path: 'implicit/open' } });
+  expect(implicit.status).toBe(400);
+  expect(implicit.body.error).toContain('secret_credential_id');
+  const explicit = await server.api('/api/v1/webhooks', { body: { agent_id: agent.id, path: 'explicit/open', unsigned: true } });
+  expect(explicit.status).toBe(201);
+  expect(explicit.body.secret_credential_id).toBeNull();
+  const delivered = await fetch(`${server.baseUrl}/api/v1/webhooks/explicit/open`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"hello":"world"}' });
+  expect(delivered.status).toBe(202);
+});
+
+test('With MAGICKLALA_API_TOKEN set, an unsigned webhook is refused and a timestamped signed delivery is accepted', buildBudget, async () => {
+  await buildCli();
+  const token = `tok-${randomUUID()}`;
+  const { server, stop } = await launchToken(token);
+  try {
+    const { project, agent } = await startedAgent(server, 'token webhook', webhookSpell('token webhook spell'));
+    const unsigned = await server.api('/api/v1/webhooks', { body: { agent_id: agent.id, path: 'token/open', unsigned: true } });
+    expect(unsigned.status).toBe(400);
+    expect(unsigned.body.error).toContain('MAGICKLALA_API_TOKEN');
+    const secret = `whsec-${randomUUID()}`;
+    const credential = await server.api('/api/v1/credentials', { body: { project_id: project.id, name: 'token hook secret', provider: 'webhook', secret } });
+    const hook = await server.api('/api/v1/webhooks', { body: { agent_id: agent.id, path: 'token/signed', secret_credential_id: credential.body.id } });
+    expect(hook.status).toBe(201);
+    const payload = JSON.stringify({ paid: true });
+    const accepted = await fetch(`${server.baseUrl}/api/v1/webhooks/token/signed`, { method: 'POST', headers: { 'content-type': 'application/json', ...sign(secret, payload) }, body: payload });
+    expect(accepted.status).toBe(202);
+    await expect.poll(async () => (await server.api(`/api/v1/agents/${agent.id}/runs`)).body.map((item: { status: string }) => item.status), { timeout: 20_000 }).toEqual(['succeeded']);
+  } finally {
+    await stop();
+  }
+});
+
+test('The server rejects a foreign Origin on /ws with 403 and an unknown Host header with 421 while allowlisted hosts still work', buildBudget, async () => {
+  await buildCli();
+  const { server, stop } = await launchServe({ MAGICKLALA_ALLOWED_HOSTS: 'studio.internal, agents.example:8443' });
+  try {
+    const wsHttp = `${server.baseUrl}/ws`;
+    expect((await rawRequest(wsHttp, { headers: upgradeHeaders({ origin: 'https://evil.example' }) })).status).toBe(403);
+    expect((await rawRequest(wsHttp, { headers: upgradeHeaders({ origin: 'http://127.0.0.1:4242' }) })).status).toBe(101);
+    expect((await rawRequest(wsHttp, { headers: upgradeHeaders() })).status).toBe(101);
+    const health = `${server.baseUrl}/api/v1/health`;
+    expect((await rawRequest(health, { headers: { host: 'evil.example' } })).status).toBe(421);
+    expect((await rawRequest(`${server.baseUrl}/health`, { headers: { host: 'evil.example:7777' } })).status).toBe(421);
+    expect((await rawRequest(health, { headers: { host: 'studio.internal' } })).status).toBe(200);
+    expect((await rawRequest(health, { headers: { host: 'agents.example:8443' } })).status).toBe(200);
+    expect((await rawRequest(health, { headers: { host: 'localhost:9' } })).status).toBe(200);
+    expect((await rawRequest(health, { headers: { host: '[::1]:7777' } })).status).toBe(200);
+  } finally {
+    await stop();
+  }
+});
+
+test('magicklala serve refuses a non-loopback bind without MAGICKLALA_API_TOKEN unless --insecure-no-auth is passed', buildBudget, async () => {
+  await buildCli();
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-public-'));
+  try {
+    const port = await freePort();
+    const env = { ...keylessEnv(), MAGICKLALA_MASTER_KEY: masterKey, MAGICKLALA_API_TOKEN: '' };
+    const refused = await runCli(['serve', '--bind', `0.0.0.0:${port}`, '--database-url', `sqlite://${join(dir, 'public.db')}`], env);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain('MAGICKLALA_API_TOKEN');
+    expect(refused.stderr).toContain('--insecure-no-auth');
+    const child = spawn(binary, ['serve', '--bind', `0.0.0.0:${port}`, '--database-url', `sqlite://${join(dir, 'public.db')}`, '--insecure-no-auth'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout?.resume();
+    child.stderr?.resume();
+    try {
+      await expect.poll(() => fetch(`http://127.0.0.1:${port}/health`).then((response) => response.status, () => 0), { timeout: 30_000 }).toBe(200);
+    } finally {
+      await stopProcess(child);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+function memorySpell(name: string) {
+  return {
+    ...emptySpell(name),
+    nodes: [
+      { id: 'start', kind: 'event/on_start', position: [0, 0], config: {} },
+      { id: 'remember', kind: 'memory/add', position: [280, 0], config: {} },
+    ],
+    wires: [
+      { id: 'w_flow', from_node: 'start', from_socket: 'out', to_node: 'remember', to_socket: 'in' },
+      { id: 'w_content', from_node: 'start', from_socket: 'payload', to_node: 'remember', to_socket: 'content' },
+    ],
+  };
+}
+
+function clearMemorySpell(name: string) {
+  return {
+    ...emptySpell(name),
+    nodes: [
+      { id: 'start', kind: 'event/on_start', position: [0, 0], config: {} },
+      { id: 'forget', kind: 'memory/clear', position: [280, 0], config: {} },
+    ],
+    wires: [{ id: 'w_flow', from_node: 'start', from_socket: 'out', to_node: 'forget', to_socket: 'in' }],
+  };
+}
+
+function knowledgeSearchSpell(name: string) {
+  return {
+    ...emptySpell(name),
+    nodes: [
+      { id: 'start', kind: 'event/on_start', position: [0, 0], config: {} },
+      { id: 'lookup', kind: 'knowledge/search', position: [280, 0], config: {} },
+    ],
+    wires: [
+      { id: 'w_flow', from_node: 'start', from_socket: 'out', to_node: 'lookup', to_socket: 'in' },
+      { id: 'w_query', from_node: 'start', from_socket: 'payload', to_node: 'lookup', to_socket: 'query' },
+    ],
+  };
+}
+
+test('A direct spell run reaches memory and knowledge only through an agent of the spell\'s own project, and memory/clear reports how many it removed', buildBudget, async ({ server }) => {
+  const home = await server.api('/api/v1/projects', { body: { name: 'memory home' } });
+  const away = await server.api('/api/v1/projects', { body: { name: 'memory away' } });
+  const homeAgent = await server.api('/api/v1/agents', { body: { project_id: home.body.id, name: 'home agent' } });
+  const awayAgent = await server.api('/api/v1/agents', { body: { project_id: away.body.id, name: 'away agent' } });
+  expect((await server.api(`/api/v1/agents/${awayAgent.body.id}/memories`, { body: { content: 'away secret plan' } })).status).toBe(201);
+  expect((await server.api(`/api/v1/agents/${awayAgent.body.id}/knowledge`, { body: { title: 'Away doc', content: 'away confidential roadmap' } })).status).toBe(201);
+  const writer = await server.api('/api/v1/spells', { body: { project_id: home.body.id, name: 'memory writer', graph: memorySpell('memory writer') } });
+  const clearer = await server.api('/api/v1/spells', { body: { project_id: home.body.id, name: 'memory clearer', graph: clearMemorySpell('memory clearer') } });
+  const reader = await server.api('/api/v1/spells', { body: { project_id: home.body.id, name: 'knowledge reader', graph: knowledgeSearchSpell('knowledge reader') } });
+
+  const unbound = await server.api(`/api/v1/spells/${writer.body.id}/run`, { body: { input: 'unbound note' } });
+  expect(unbound.status).toBe(422);
+  expect(unbound.body.error).toContain('direct spell run requires agent_id in the same project to access memory or knowledge');
+  const foreign = await server.api(`/api/v1/spells/${writer.body.id}/run`, { body: { input: 'foreign note', agent_id: awayAgent.body.id } });
+  expect(foreign.status).toBe(403);
+  expect(foreign.body.code).toBe('agent_not_in_project');
+  const unknown = await server.api(`/api/v1/spells/${writer.body.id}/run`, { body: { input: 'ghost note', agent_id: randomUUID() } });
+  expect(unknown.status).toBe(404);
+  const foreignRead = await server.api(`/api/v1/spells/${reader.body.id}/run`, { body: { input: 'roadmap', agent_id: awayAgent.body.id } });
+  expect(foreignRead.status).toBe(403);
+  expect(foreignRead.text).not.toContain('away confidential roadmap');
+  const unboundRead = await server.api(`/api/v1/spells/${reader.body.id}/run`, { body: { input: 'roadmap' } });
+  expect(unboundRead.status).toBe(422);
+  expect(unboundRead.text).not.toContain('away confidential roadmap');
+
+  for (const note of ['home note one', 'home note two']) {
+    const bound = await server.api(`/api/v1/spells/${writer.body.id}/run`, { body: { input: note, agent_id: homeAgent.body.id } });
+    expect(bound.status).toBe(200);
+  }
+  const homeMemories = await server.api(`/api/v1/agents/${homeAgent.body.id}/memories/search?q=home%20note&limit=10`);
+  expect(homeMemories.body.map((hit: { item: { content: string } }) => hit.item.content).sort()).toEqual(['home note one', 'home note two']);
+  const cleared = await server.api(`/api/v1/spells/${clearer.body.id}/run`, { body: { agent_id: homeAgent.body.id } });
+  expect(cleared.status).toBe(200);
+  expect(cleared.body.summary.outputs['forget.removed']).toEqual({ type: 'int', value: homeMemories.body.length });
+  expect((await server.api(`/api/v1/agents/${homeAgent.body.id}/memories/search?q=home%20note`)).body).toEqual([]);
+  const awayMemories = await server.api(`/api/v1/agents/${awayAgent.body.id}/memories/search?q=away%20secret`);
+  expect(awayMemories.body.map((hit: { item: { content: string } }) => hit.item.content)).toEqual(['away secret plan']);
+});
+
+test('PATCH /api/v1/agents/{id} rejects a default spell from another project and clears a stale pinned release when the spell changes', buildBudget, async ({ server }) => {
+  const { project, agent, release } = await createAgentWithRelease(server, 'respell', echoSpell('respell first'));
+  const foreign = await createAgentWithRelease(server, 'respell foreign');
+  const rejected = await server.api(`/api/v1/agents/${agent.id}`, { method: 'PATCH', body: { default_spell_id: foreign.spell.id } });
+  expect(rejected.status).toBe(400);
+  expect(rejected.body.error).toContain('another project');
+  expect((await server.api(`/api/v1/agents/${agent.id}`)).body).toMatchObject({ default_spell_id: expect.any(String), pinned_release_id: release.id });
+  const second = await server.api('/api/v1/spells', { body: { project_id: project.id, name: 'respell second', graph: echoSpell('respell second') } });
+  const switched = await server.api(`/api/v1/agents/${agent.id}`, { method: 'PATCH', body: { default_spell_id: second.body.id } });
+  expect(switched.status).toBe(200);
+  expect(switched.body).toMatchObject({ default_spell_id: second.body.id, pinned_release_id: null });
+  const start = await server.api(`/api/v1/agents/${agent.id}/start`, { body: {} });
+  expect(start.status).toBe(409);
+  expect(start.body.code).toBe('no_release');
+});
+
+test('Publishing a release rejects a spell whose subgraph reference is missing, from another project or cyclic, and accepts one in the same project', buildBudget, async ({ server }) => {
+  const { project, agent } = await createAgentWithRelease(server, 'subgraphs', echoSpell('subgraph parent seed'));
+  const foreign = await createAgentWithRelease(server, 'subgraphs foreign', echoSpell('foreign child'));
+  const child = echoSpell('subgraph child');
+  const childSpell = await server.api('/api/v1/spells', { body: { project_id: project.id, name: 'subgraph child', graph: child } });
+  expect(childSpell.status).toBe(201);
+  const withSubgraph = (name: string, spellId: string) => ({ ...echoSpell(name), subgraphs: [{ node_id: 'send', spell_id: spellId }] });
+  const publish = async (name: string, graph: object) => {
+    const spell = await server.api('/api/v1/spells', { body: { project_id: project.id, name, graph } });
+    return server.api(`/api/v1/agents/${agent.id}/releases`, { body: { spell_id: spell.body.id } });
+  };
+  const missing = await publish('missing child', withSubgraph('missing child', randomUUID()));
+  expect(missing.status).toBe(400);
+  expect(missing.body.error).toContain('cannot be resolved');
+  const crossProject = await publish('foreign child ref', withSubgraph('foreign child ref', foreign.spell.graph.id));
+  expect(crossProject.status).toBe(400);
+  expect(crossProject.body.error).toContain('cannot be resolved');
+  const ownId = randomUUID();
+  const cyclic = await publish('cyclic', { ...withSubgraph('cyclic', ownId), id: ownId });
+  expect(cyclic.status).toBe(400);
+  const accepted = await publish('good parent', withSubgraph('good parent', child.id));
+  expect(accepted.status).toBe(201);
+  expect((await server.api(`/api/v1/agents/${agent.id}`)).body.pinned_release_id).toBe(accepted.body.id);
 });

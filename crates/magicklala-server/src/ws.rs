@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
 use futures::{SinkExt, StreamExt};
 use magicklala_runtime::{RuntimeEvent, correlation_id};
 use serde::Deserialize;
@@ -14,8 +15,9 @@ use utoipa::IntoParams;
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::access::origin_rejected;
 use crate::api::{ChatRequest, deliver_chat};
-use crate::error::ApiQuery;
+use crate::error::{ApiError, ApiQuery};
 
 pub const MAX_CONCURRENT_SOCKET_CHATS: usize = 8;
 const SOCKET_REPLY_BUFFER: usize = 64;
@@ -44,13 +46,24 @@ pub struct SocketQuery {
     get,
     path = "/ws",
     tag = "system",
-    params(SocketQuery, ("token" = Option<String>, Query, description = "Bearer token for clients that cannot send an Authorization header")),
+    params(SocketQuery, ("ticket" = Option<String>, Query, description = "Single-use ticket from POST /api/v1/ws-ticket for clients that cannot send an Authorization header")),
     responses(
-        (status = 101, description = "Upgrades to a WebSocket streaming RuntimeEvent JSON frames, scoped to agent_id when given; accepts ping and chat messages"),
-        (status = 400, description = "Invalid query")
+        (status = 101, description = "Upgrades to a WebSocket streaming RuntimeEvent JSON frames, scoped to agent_id when given; accepts ping and chat messages. Authenticate with an Authorization bearer header or a single-use ticket from POST /api/v1/ws-ticket; the API token is never accepted in the URL"),
+        (status = 400, description = "Invalid query"),
+        (status = 403, description = "The Origin header is not an allowed Studio origin")
     )
 )]
-pub async fn websocket(State(state): State<AppState>, ApiQuery(query): ApiQuery<SocketQuery>, upgrade: WebSocketUpgrade) -> Response {
+pub async fn websocket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+    ApiQuery(query): ApiQuery<SocketQuery>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    if origin_rejected(&state.access, &headers, &uri) {
+        return ApiError::new(StatusCode::FORBIDDEN, "origin_not_allowed", "this Origin may not open the event socket; add it to MAGICKLALA_CORS_ORIGINS")
+            .into_response();
+    }
     let scope = EventScope::new(query.agent_id);
     upgrade.on_upgrade(move |socket| session(socket, state, scope))
 }

@@ -3,6 +3,7 @@ mod bridges;
 mod copilot;
 mod metered;
 mod runner;
+mod trace;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -13,17 +14,21 @@ use magicklala_graph::{RunId, RunStatus, SpellGraph, TraceEvent};
 use magicklala_store::Repository;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{RwLock, broadcast, oneshot};
 use uuid::Uuid;
 
-pub use actor::{AgentRunStats, CHANNEL_LANE_CAPACITY, CHANNEL_LANE_IDLE, DEFAULT_RUN_TIMEOUT, DispatchError, MAILBOX_CAPACITY};
-pub use bridges::{SharedEmbedder, StoreKnowledgeBridge, StoreMemoryBridge};
+pub use actor::{
+    AgentRunStats, CHANNEL_LANE_CAPACITY, CHANNEL_LANE_IDLE, DEFAULT_RUN_TIMEOUT, DispatchError, DispatchOptions, MAILBOX_CAPACITY, MAX_LANES_PER_AGENT,
+    RunCompletion,
+};
+pub use bridges::{SharedEmbedder, StoreKnowledgeBridge, StoreMemoryBridge, UNBOUND_STORE_ACCESS, UnboundAgentStore};
 pub use copilot::{CopilotEngine, CopilotError, CopilotRequest, CopilotSuggestion, GraphPatchOp, PatchRejection};
 pub use metered::{LlmCallScope, MeteredLlmGateway};
 pub use runner::{
-    AgentRelease, CORRELATION_ID_KEY, EngineReleaseRunner, ProjectLlmFactory, ReleaseOrigin, ReleaseRunner, RunScope, StoreScope, TemplateReplyRunner,
-    correlation_id, inbound_payload, ordered_replies, structural_errors, trigger_kinds, trigger_payload,
+    AgentRelease, CORRELATION_ID_KEY, EngineReleaseRunner, ProjectLlmFactory, ReleaseOrigin, ReleaseRunner, RunScope, StoreScope, SubgraphLoader,
+    TemplateReplyRunner, correlation_id, inbound_payload, ordered_replies, structural_errors, trigger_kinds, trigger_payload,
 };
+pub use trace::{BoundedTrace, TRACE_BYTE_CAP, TRACE_EVENT_CAP};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RuntimeError {
@@ -90,6 +95,8 @@ pub struct AgentSupervisor {
     runner: Arc<dyn ReleaseRunner>,
     connectors: Option<ConnectorRegistry>,
     run_timeout: Duration,
+    lane_idle: Duration,
+    max_lanes: usize,
     releases: RwLock<HashMap<Uuid, Arc<AgentRelease>>>,
     actors: RwLock<HashMap<Uuid, actor::ActorHandle>>,
     stats: Arc<Mutex<HashMap<Uuid, AgentRunStats>>>,
@@ -108,6 +115,8 @@ impl AgentSupervisor {
             runner,
             connectors: None,
             run_timeout: DEFAULT_RUN_TIMEOUT,
+            lane_idle: CHANNEL_LANE_IDLE,
+            max_lanes: MAX_LANES_PER_AGENT,
             releases: RwLock::new(HashMap::new()),
             actors: RwLock::new(HashMap::new()),
             stats: Arc::new(Mutex::new(HashMap::new())),
@@ -122,6 +131,20 @@ impl AgentSupervisor {
 
     pub fn with_run_timeout(mut self, run_timeout: Duration) -> Self {
         self.run_timeout = run_timeout;
+        self
+    }
+
+    pub fn run_timeout(&self) -> Duration {
+        self.run_timeout
+    }
+
+    pub fn with_lane_idle(mut self, lane_idle: Duration) -> Self {
+        self.lane_idle = lane_idle;
+        self
+    }
+
+    pub fn with_max_lanes_per_agent(mut self, max_lanes: usize) -> Self {
+        self.max_lanes = max_lanes.max(1);
         self
     }
 
@@ -158,6 +181,20 @@ impl AgentSupervisor {
     }
 
     pub async fn dispatch_inbound(&self, event: InboundEvent) -> Result<(), DispatchError> {
+        self.dispatch_inbound_with_options(event, DispatchOptions::default()).await
+    }
+
+    pub async fn dispatch_inbound_with_options(&self, event: InboundEvent, options: DispatchOptions) -> Result<(), DispatchError> {
+        self.enqueue(event, options, None).await
+    }
+
+    pub async fn dispatch_with_reply(&self, event: InboundEvent, options: DispatchOptions) -> Result<oneshot::Receiver<RunCompletion>, DispatchError> {
+        let (reply, completion) = oneshot::channel();
+        self.enqueue(event, options, Some(reply)).await?;
+        Ok(completion)
+    }
+
+    async fn enqueue(&self, event: InboundEvent, options: DispatchOptions, reply: Option<oneshot::Sender<RunCompletion>>) -> Result<(), DispatchError> {
         let agent_id = event.agent_id;
         match self.status(agent_id).await {
             None => return Err(RuntimeError::UnknownAgent(agent_id).into()),
@@ -165,12 +202,14 @@ impl AgentSupervisor {
             Some(_) => return Err(DispatchError::NotRunning(agent_id)),
         }
         let release = self.release(agent_id).await.ok_or(DispatchError::NoRelease(agent_id))?;
-        self.bus.publish(RuntimeEvent::Inbound { event: event.clone() });
         let mailbox = self.actors.read().await.get(&agent_id).map(actor::ActorHandle::mailbox).ok_or(DispatchError::NotRunning(agent_id))?;
-        mailbox.try_send(actor::QueuedEvent::new(event, release)).map_err(|error| match error {
-            tokio::sync::mpsc::error::TrySendError::Full(_) => DispatchError::Busy(agent_id),
-            tokio::sync::mpsc::error::TrySendError::Closed(_) => DispatchError::NotRunning(agent_id),
-        })
+        let slot = mailbox.try_reserve().map_err(|error| match error {
+            tokio::sync::mpsc::error::TrySendError::Full(()) => DispatchError::Busy(agent_id),
+            tokio::sync::mpsc::error::TrySendError::Closed(()) => DispatchError::NotRunning(agent_id),
+        })?;
+        self.bus.publish(RuntimeEvent::Inbound { event: event.clone() });
+        slot.send(actor::QueuedEvent::new(event, release, options, reply));
+        Ok(())
     }
 
     pub fn run_stats(&self, agent_id: Uuid) -> AgentRunStats {
@@ -199,6 +238,8 @@ impl AgentSupervisor {
             connectors: self.connectors.clone(),
             stats: Arc::clone(&self.stats),
             run_timeout: self.run_timeout,
+            lane_idle: self.lane_idle,
+            max_lanes: self.max_lanes,
             repository: self.repository.clone(),
         };
         let previous = actors.insert(agent_id, actor::spawn_actor(Arc::new(context)));

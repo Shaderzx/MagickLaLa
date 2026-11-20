@@ -4,7 +4,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::StreamExt;
-use magicklala_graph::{LlmGateway, LlmRequest, LlmResponse, LlmStream, NodeError, TokenUsage};
+use magicklala_graph::{EmbeddingRequest, LlmGateway, LlmRequest, LlmResponse, LlmStream, NodeError, TokenUsage};
 use magicklala_store::{AgentId, LlmRequestLog, Repository};
 use uuid::Uuid;
 
@@ -45,7 +45,7 @@ fn elapsed_ms(started: Instant) -> u64 {
 
 struct LogEntry<'a> {
     scope: LlmCallScope,
-    request: &'a LlmRequest,
+    provider: &'a str,
     model: &'a str,
     usage: TokenUsage,
     latency_ms: u64,
@@ -57,7 +57,7 @@ async fn record(repository: &dyn Repository, entry: LogEntry<'_>) {
         id: Uuid::now_v7(),
         run_id: entry.scope.run_id,
         agent_id: entry.scope.agent_id,
-        provider: entry.request.provider.clone(),
+        provider: entry.provider.to_owned(),
         model: entry.model.to_owned(),
         prompt_tokens: entry.usage.prompt_tokens,
         completion_tokens: entry.usage.completion_tokens,
@@ -78,7 +78,7 @@ impl LlmGateway for MeteredLlmGateway {
             Ok(response) => (response.model.as_str(), response.usage, "ok"),
             Err(error) => (request.model.as_str(), TokenUsage::default(), error_status(error)),
         };
-        record(self.repository.as_ref(), LogEntry { scope: self.scope, request: &request, model, usage, latency_ms, status }).await;
+        record(self.repository.as_ref(), LogEntry { scope: self.scope, provider: &request.provider, model, usage, latency_ms, status }).await;
         result
     }
 
@@ -93,7 +93,7 @@ impl LlmGateway for MeteredLlmGateway {
                     self.repository.as_ref(),
                     LogEntry {
                         scope: self.scope,
-                        request: &request,
+                        provider: &request.provider,
                         model: &request.model,
                         usage: TokenUsage::default(),
                         latency_ms: elapsed_ms(started),
@@ -121,9 +121,35 @@ impl LlmGateway for MeteredLlmGateway {
         let scope = self.scope;
         let finale = futures::stream::once(async move {
             let (usage, status) = *tally.lock().unwrap_or_else(PoisonError::into_inner);
-            record(repository.as_ref(), LogEntry { scope, request: &request, model: &request.model, usage, latency_ms: elapsed_ms(started), status }).await;
+            record(repository.as_ref(), LogEntry { scope, provider: &request.provider, model: &request.model, usage, latency_ms: elapsed_ms(started), status })
+                .await;
             None
         });
         Ok(Box::pin(chunks.map(Some).chain(finale).filter_map(futures::future::ready)))
+    }
+
+    async fn embed(&self, model: &str, text: &str) -> Result<Vec<f32>, NodeError> {
+        let started = Instant::now();
+        let result = self.inner.embed(model, text).await;
+        let status = result.as_ref().map_or_else(error_status, |_| "ok");
+        let entry = LogEntry { scope: self.scope, provider: "", model, usage: TokenUsage::default(), latency_ms: elapsed_ms(started), status };
+        record(self.repository.as_ref(), entry).await;
+        result
+    }
+
+    async fn embed_request(&self, request: EmbeddingRequest) -> Result<Vec<Vec<f32>>, NodeError> {
+        let started = Instant::now();
+        let result = self.inner.embed_request(request.clone()).await;
+        let status = result.as_ref().map_or_else(error_status, |_| "ok");
+        let entry = LogEntry {
+            scope: self.scope,
+            provider: &request.provider,
+            model: &request.model,
+            usage: TokenUsage::default(),
+            latency_ms: elapsed_ms(started),
+            status,
+        };
+        record(self.repository.as_ref(), entry).await;
+        result
     }
 }

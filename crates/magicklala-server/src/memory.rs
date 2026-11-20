@@ -276,7 +276,24 @@ impl Repository for InMemoryRepository {
 
     async fn delete_credential(&self, id: CredentialId) -> StoreResult<()> {
         let mut tables = self.tables.write().await;
+        let signing: Vec<String> =
+            tables.webhooks.values().filter(|webhook| webhook.secret_credential_id == Some(id)).map(|webhook| webhook.path.clone()).collect();
+        if !signing.is_empty() {
+            return Err(StoreError::Conflict(format!("credential {} signs webhook {}; delete those webhooks first", id.0, signing.join(", "))));
+        }
         tables.credentials.remove(&id).map(|_| ()).ok_or_else(|| StoreError::NotFound(format!("credential {}", id.0)))
+    }
+
+    async fn delete_webhook(&self, id: WebhookId) -> StoreResult<()> {
+        let mut tables = self.tables.write().await;
+        tables.webhooks.remove(&id).map(|_| ()).ok_or_else(|| StoreError::NotFound(format!("webhook {}", id.0)))
+    }
+
+    async fn clear_memories(&self, agent: AgentId) -> StoreResult<u64> {
+        let mut tables = self.tables.write().await;
+        let before = tables.memories.len();
+        tables.memories.retain(|memory| memory.agent_id != agent);
+        Ok(u64::try_from(before - tables.memories.len()).unwrap_or(u64::MAX))
     }
 
     async fn append_chat(&self, input: NewChatMessage) -> StoreResult<ChatMessage> {
@@ -402,6 +419,13 @@ impl Repository for InMemoryRepository {
         let tables = self.tables.read().await;
         tables.agent(agent)?;
         Ok(tables.runs.iter().rev().filter(|run| run.agent_id == Some(agent)).take(usize::try_from(limit).unwrap_or(usize::MAX)).cloned().collect())
+    }
+
+    async fn find_run_by_correlation(&self, agent: AgentId, correlation_id: &str) -> StoreResult<Option<ExecutionRun>> {
+        let tables = self.tables.read().await;
+        let matches =
+            |run: &&ExecutionRun| run.agent_id == Some(agent) && run.trace.get("correlation_id").and_then(serde_json::Value::as_str) == Some(correlation_id);
+        Ok(tables.runs.iter().rev().find(matches).cloned())
     }
 
     async fn log_llm_request(&self, log: LlmRequestLog) -> StoreResult<()> {
