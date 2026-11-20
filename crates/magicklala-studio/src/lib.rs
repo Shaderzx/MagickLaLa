@@ -11,7 +11,9 @@ use magicklala_graph::{
     SpellId, SpellValidator, SubgraphKey, SubgraphRef, SubgraphResolver, TraceEvent, Value, VariableDef, Wire, WireId, resolve_subgraphs_from,
 };
 use magicklala_nodes::{HttpLlmGateway, InMemoryKnowledge, InMemoryMemory, LlmGatewayConfig, default_registry};
-use magicklala_store::{NewProject, NewSpell, NewSpellRelease, Repository, SpellRecord, SpellRecordId, SpellRelease, SqliteStore};
+use magicklala_store::{
+    NewProject, NewSpell, NewSpellRelease, ProjectId, Repository, SpellRecord, SpellRecordId, SpellRelease, SqliteStore, StoreError, is_in_memory_database_url,
+};
 use rune::{App, AppSpec, Color, Cx, El, ScrollSpec, TextEdit, TextStyle, Waker, col, el, row, text, text_input};
 use serde_json::json;
 use thiserror::Error;
@@ -92,6 +94,7 @@ where
 pub struct StudioStore {
     repository: SqliteStore,
     spell_record_id: Option<SpellRecordId>,
+    project_id: Option<ProjectId>,
     persistent: bool,
     pub url: String,
 }
@@ -99,6 +102,7 @@ pub struct StudioStore {
 #[derive(Debug, Clone)]
 pub struct StudioWorkspace {
     pub record: SpellRecordId,
+    pub project: ProjectId,
     pub graph: SpellGraph,
     pub releases: Vec<SpellRelease>,
     pub active_release: Option<u32>,
@@ -110,13 +114,60 @@ impl StudioWorkspace {
             Some(release) if release.created_at > record.updated_at => (release.graph.clone(), Some(release.version)),
             _ => (record.graph, None),
         };
-        Self { record: record.id, graph, releases, active_release }
+        Self { record: record.id, project: record.project_id, graph, releases, active_release }
     }
+}
+
+pub const IN_MEMORY_DATABASE_URL: &str = "sqlite::memory:";
+
+pub fn is_in_memory_db_path(path: Option<&Path>) -> bool {
+    let Some(path) = path else { return true };
+    let text = path.to_string_lossy();
+    let trimmed = text.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    matches!(trimmed, "" | ":memory:" | "sqlite::memory:" | "sqlite://:memory:")
+        || lowered.starts_with("file::memory:")
+        || lowered.contains("mode=memory")
+        || is_in_memory_database_url(trimmed)
+}
+
+fn studio_database_url(db_path: Option<&Path>) -> String {
+    match db_path.filter(|path| !is_in_memory_db_path(Some(path))) {
+        Some(path) => format!("sqlite://{}", path.display()),
+        None => IN_MEMORY_DATABASE_URL.to_owned(),
+    }
+}
+
+async fn studio_project_record(repository: &SqliteStore, graph: SpellId) -> Result<Option<SpellRecord>, StoreError> {
+    let Some(project) = repository.list_projects().await?.into_iter().find(|project| project.name == STUDIO_PROJECT) else { return Ok(None) };
+    Ok(repository.list_spells(project.id).await?.into_iter().find(|record| record.graph.id == graph))
+}
+
+async fn sorted_releases(repository: &SqliteStore, record: SpellRecordId) -> Result<Vec<SpellRelease>, StoreError> {
+    let mut releases = repository.list_releases(record).await?;
+    releases.sort_by_key(|release| release.version);
+    Ok(releases)
+}
+
+async fn scoped_records(repository: &SqliteStore, project: Option<ProjectId>) -> Result<Vec<SpellRecord>, StoreError> {
+    if let Some(project) = project {
+        return repository.list_spells(project).await;
+    }
+    let projects = repository.list_projects().await?;
+    let scope: Vec<ProjectId> = match projects.iter().find(|project| project.name == STUDIO_PROJECT) {
+        Some(studio) => vec![studio.id],
+        None => projects.iter().map(|project| project.id).collect(),
+    };
+    let mut records = Vec::new();
+    for project in scope {
+        records.extend(repository.list_spells(project).await?);
+    }
+    Ok(records)
 }
 
 impl StudioStore {
     pub fn open(db_path: Option<&Path>) -> Result<Self, StudioError> {
-        let url = db_path.map_or_else(|| "sqlite::memory:".to_owned(), |path| format!("sqlite://{}", path.display()));
+        let url = studio_database_url(db_path);
         let target = url.clone();
         let repository = block(move || async move {
             let store = SqliteStore::connect(&target).await?;
@@ -124,7 +175,32 @@ impl StudioStore {
             Ok::<_, magicklala_store::StoreError>(store)
         })?
         .map_err(|error| StudioError::Store(error.to_string()))?;
-        Ok(Self { repository, spell_record_id: None, persistent: db_path.is_some(), url })
+        Ok(Self { repository, spell_record_id: None, project_id: None, persistent: !is_in_memory_db_path(db_path), url })
+    }
+
+    pub fn project_id(&self) -> Option<ProjectId> {
+        self.project_id
+    }
+
+    pub fn releases_of(&self, spell: &SpellGraph) -> Result<Vec<SpellRelease>, StudioError> {
+        let repository = self.repository.clone();
+        let known = self.spell_record_id;
+        let graph = spell.id;
+        block(move || async move {
+            let record = match known {
+                Some(id) => Some(id),
+                None => studio_project_record(&repository, graph).await?.map(|record| record.id),
+            };
+            match record {
+                Some(id) => sorted_releases(&repository, id).await,
+                None => Ok(Vec::new()),
+            }
+        })?
+        .map_err(|error| StudioError::Store(error.to_string()))
+    }
+
+    pub fn next_release_version(&self, spell: &SpellGraph) -> Result<u32, StudioError> {
+        Ok(self.releases_of(spell)?.iter().map(|release| release.version).max().unwrap_or(0).saturating_add(1))
     }
 
     pub fn is_persistent(&self) -> bool {
@@ -135,10 +211,10 @@ impl StudioStore {
         self.spell_record_id
     }
 
-    fn resolve_spell_record(&self, spell: &SpellGraph) -> Result<SpellRecordId, StudioError> {
+    fn resolve_spell_record(&mut self, spell: &SpellGraph) -> Result<SpellRecordId, StudioError> {
         let repository = self.repository.clone();
         let spell = spell.clone();
-        block(move || async move {
+        let record = block(move || async move {
             let project = match repository.list_projects().await?.into_iter().find(|project| project.name == STUDIO_PROJECT) {
                 Some(project) => project,
                 None => {
@@ -150,9 +226,11 @@ impl StudioStore {
                 Some(record) => record,
                 None => repository.create_spell(NewSpell { project_id: project.id, name: spell.name.clone(), graph: spell.clone() }).await?,
             };
-            Ok::<_, magicklala_store::StoreError>(record.id)
+            Ok::<_, StoreError>(record)
         })?
-        .map_err(|error| StudioError::Store(error.to_string()))
+        .map_err(|error| StudioError::Store(error.to_string()))?;
+        self.project_id = Some(record.project_id);
+        Ok(record.id)
     }
 
     pub fn publish(&mut self, spell: &SpellGraph) -> Result<SpellRelease, StudioError> {
@@ -179,6 +257,7 @@ impl StudioStore {
         let graph = spell.clone();
         let record = block(move || async move { repository.save_spell_graph(id, graph).await })?.map_err(|error| StudioError::Store(error.to_string()))?;
         self.spell_record_id = Some(record.id);
+        self.project_id = Some(record.project_id);
         Ok(record)
     }
 
@@ -200,13 +279,12 @@ impl StudioStore {
             };
             let mut newest: Option<(SpellRecord, Vec<SpellRelease>)> = None;
             for record in records {
-                let mut releases = repository.list_releases(record.id).await?;
-                releases.sort_by_key(|release| release.version);
+                let releases = sorted_releases(&repository, record.id).await?;
                 if newest.as_ref().is_none_or(|(current, current_releases)| touched(&record, &releases) > touched(current, current_releases)) {
                     newest = Some((record, releases));
                 }
             }
-            Ok::<_, magicklala_store::StoreError>(newest.map(|(record, releases)| StudioWorkspace::of(record, releases)))
+            Ok::<_, StoreError>(newest.map(|(record, releases)| StudioWorkspace::of(record, releases)))
         })?
         .map_err(|error| StudioError::Store(error.to_string()))
     }
@@ -215,6 +293,7 @@ impl StudioStore {
         let workspace = self.latest_workspace()?;
         if let Some(workspace) = &workspace {
             self.spell_record_id = Some(workspace.record);
+            self.project_id = Some(workspace.project);
         }
         Ok(workspace)
     }
@@ -247,12 +326,10 @@ impl StudioSubgraphResolver {
             return Ok(Self::default());
         };
         let repository = store.repository.clone();
+        let scope = store.project_id;
         let root = root.clone();
         let graphs = block(move || async move {
-            let mut records = Vec::new();
-            for project in repository.list_projects().await? {
-                records.extend(repository.list_spells(project.id).await?);
-            }
+            let records = scoped_records(&repository, scope).await?;
             let mut graphs = HashMap::new();
             let mut pending: VecDeque<SubgraphKey> = subgraph_keys(&root).collect();
             while let Some(key) = pending.pop_front() {
@@ -266,7 +343,7 @@ impl StudioSubgraphResolver {
                     graphs.insert(key, (SpellId(record.id.0), graph));
                 }
             }
-            Ok::<_, magicklala_store::StoreError>(graphs)
+            Ok::<_, StoreError>(graphs)
         })?
         .map_err(|error| StudioError::Store(error.to_string()))?;
         Ok(Self { graphs })
@@ -544,7 +621,9 @@ pub struct StudioApp {
     pub last_published: Option<SpellRelease>,
     pub store: Option<StudioStore>,
     pub store_error: Option<String>,
+    pub open_error: Option<String>,
     pub draft_status: Option<String>,
+    pub publish_status: Option<String>,
     pub active_release_version: Option<u32>,
     pub run_timeout: Duration,
     run_started: Option<Instant>,
@@ -557,16 +636,21 @@ impl StudioApp {
     pub fn demo() -> Self {
         let db_path = LAUNCH_DB.lock().ok().and_then(|path| path.clone());
         let run_timeout = LAUNCH_RUN_TIMEOUT.lock().ok().and_then(|timeout| *timeout).unwrap_or(DEFAULT_RUN_TIMEOUT);
-        let mut app = Self::open(&StudioConfig { db_path, run_timeout, ..StudioConfig::default() }).unwrap_or_else(|error| {
-            let mut app = Self::from_registry();
-            app.store_error = Some(error.to_string());
-            app.run_timeout = run_timeout;
-            app
-        });
+        let mut app = Self::launch(&StudioConfig { db_path, run_timeout, ..StudioConfig::default() });
         if LAUNCH_THEME.lock().ok().and_then(|theme| *theme) == Some(Theme::Light) {
             app.toggle_theme();
         }
         app
+    }
+
+    pub fn launch(config: &StudioConfig) -> Self {
+        Self::open(config).unwrap_or_else(|error| {
+            let mut app = Self::from_registry();
+            app.open_error = Some(error.to_string());
+            app.store_error = Some(error.to_string());
+            app.run_timeout = config.run_timeout;
+            app
+        })
     }
 
     pub fn open(config: &StudioConfig) -> Result<Self, StudioError> {
@@ -619,7 +703,9 @@ impl StudioApp {
             last_published: None,
             store: None,
             store_error: None,
+            open_error: None,
             draft_status: None,
+            publish_status: None,
             active_release_version: None,
             run_timeout: DEFAULT_RUN_TIMEOUT,
             run_started: None,
@@ -710,24 +796,27 @@ impl StudioApp {
     }
 
     pub fn sync_edits(&mut self) -> bool {
-        let before = (std::mem::take(&mut self.spell.nodes), std::mem::take(&mut self.spell.wires), self.spell.subgraphs.clone());
-        self.rebuild_spell();
-        let changed = before != (self.spell.nodes.clone(), self.spell.wires.clone(), self.spell.subgraphs.clone());
-        if changed {
-            self.draft_status = None;
-            self.active_release_version = None;
+        let (nodes, wires, subgraphs) = self.rebuilt_parts();
+        if nodes == self.spell.nodes && wires == self.spell.wires && subgraphs == self.spell.subgraphs {
+            return false;
         }
-        changed
+        self.spell.nodes = nodes;
+        self.spell.wires = wires;
+        self.spell.subgraphs = subgraphs;
+        self.draft_status = None;
+        self.publish_status = None;
+        self.active_release_version = None;
+        true
     }
 
-    fn rebuild_spell(&mut self) {
-        self.spell.nodes = self
+    fn rebuilt_parts(&self) -> (Vec<NodeInstance>, Vec<Wire>, Vec<SubgraphRef>) {
+        let nodes: Vec<NodeInstance> = self
             .canvas
             .nodes
             .iter()
             .map(|card| NodeInstance { id: card.id.clone(), kind: card.kind.clone(), position: card.position, config: self.node_config(&card.id, &card.kind) })
             .collect();
-        self.spell.wires = self
+        let wires = self
             .canvas
             .wires
             .iter()
@@ -739,15 +828,12 @@ impl StudioApp {
                 to_socket: wire.to_socket.clone(),
             })
             .collect();
-        let previous = std::mem::take(&mut self.spell.subgraphs);
-        let versions = &self.versions;
-        self.spell.subgraphs = self
-            .spell
-            .nodes
+        let subgraphs = nodes
             .iter()
             .filter(|node| node.kind == SUBGRAPH_KIND)
-            .filter_map(|node| subgraph_target(node, &previous, versions.contains_key(&node.id)))
+            .filter_map(|node| subgraph_target(node, &self.spell.subgraphs, self.versions.contains_key(&node.id)))
             .collect();
+        (nodes, wires, subgraphs)
     }
 
     fn root_spell(&self) -> SpellId {
@@ -1043,20 +1129,44 @@ impl StudioApp {
     }
 
     fn require_disk(&mut self, action: &str) -> Result<(), StudioError> {
+        if let Some(error) = &self.open_error {
+            let message = format!("the database passed with --db could not be opened: {error}");
+            return Err(self.refuse(message));
+        }
         if self.store.as_ref().is_some_and(StudioStore::is_persistent) {
             return Ok(());
         }
         Err(self.refuse(format!("pass --db <file.sqlite> to {action} on disk")))
     }
 
-    pub fn next_release_version(&self) -> u32 {
-        self.releases.iter().map(|release| release.version).max().unwrap_or(0).saturating_add(1)
+    pub fn next_release_version(&self) -> Result<u32, StudioError> {
+        match &self.store {
+            Some(store) => store.next_release_version(&self.spell),
+            None => Ok(self.releases.iter().map(|release| release.version).max().unwrap_or(0).saturating_add(1)),
+        }
+    }
+
+    fn refresh_releases(&mut self, published: &SpellRelease) {
+        let stored = self.store.as_ref().map(|store| store.releases_of(&self.spell));
+        self.releases = match stored {
+            Some(Ok(releases)) => releases.iter().map(|release| Release { version: release.version, nodes: release.graph.nodes.len() }).collect(),
+            _ => {
+                let mut releases = std::mem::take(&mut self.releases);
+                releases.push(Release { version: published.version, nodes: published.graph.nodes.len() });
+                releases
+            }
+        };
     }
 
     pub fn publish(&mut self) -> Result<u32, StudioError> {
         self.sync_spell();
+        self.publish_status = None;
         self.require_disk("publish releases")?;
-        let target = (self.root_spell(), Some(self.next_release_version()));
+        let next = match self.next_release_version() {
+            Ok(next) => next,
+            Err(error) => return Err(self.refuse(error.to_string())),
+        };
+        let target = (self.root_spell(), Some(next));
         if let Err(errors) = self.check_spell_with_root(target) {
             let message = format!("cannot publish an invalid spell: {}", errors.join("; "));
             self.validation = ValidationState::Invalid(errors);
@@ -1066,11 +1176,12 @@ impl StudioApp {
         let store = self.store.as_mut().ok_or_else(|| StudioError::Store("no studio store".to_owned()))?;
         let published = store.publish(&self.spell);
         let release = published.inspect_err(|error| self.store_error = Some(error.to_string()))?;
-        self.releases.push(Release { version: release.version, nodes: release.graph.nodes.len() });
+        self.refresh_releases(&release);
         self.store_error = None;
         self.draft_status = None;
         self.active_release_version = Some(release.version);
         let version = release.version;
+        self.publish_status = Some(format!("Published v{version}"));
         self.last_published = Some(release);
         Ok(version)
     }
@@ -1078,11 +1189,12 @@ impl StudioApp {
     pub fn save_draft(&mut self) -> Result<SpellRecordId, StudioError> {
         self.sync_spell();
         self.draft_status = None;
+        self.publish_status = None;
+        self.require_disk("save drafts")?;
         let version_errors = self.release_version_errors();
         if !version_errors.is_empty() {
             return Err(self.refuse(format!("cannot save the draft: {}", version_errors.join("; "))));
         }
-        self.require_disk("save drafts")?;
         let store = self.store.as_mut().ok_or_else(|| StudioError::Store("no studio store".to_owned()))?;
         let saved = store.save_draft(&self.spell);
         let record = saved.inspect_err(|error| self.store_error = Some(error.to_string()))?;
@@ -1444,7 +1556,7 @@ fn left_rail(app: &StudioApp, t: &Tones) -> El {
                 (None, true) => heading.child(label("Nothing published yet. Press Publish.", 11.5, 500.0, t.muted)),
                 (None, false) => heading,
             };
-            let heading = match (&app.store_error, &app.draft_status) {
+            let heading = match (&app.store_error, app.draft_status.as_ref().or(app.publish_status.as_ref())) {
                 (None, Some(status)) => heading.child(label(status, 11.5, 500.0, t.muted).key("draft-status")),
                 _ => heading,
             };
@@ -1637,8 +1749,30 @@ fn playground(app: &StudioApp, t: &Tones) -> El {
     col().child(messages).child(composer)
 }
 
+pub fn studio_status(app: &StudioApp) -> Option<(&str, bool)> {
+    match (&app.store_error, &app.draft_status, &app.publish_status) {
+        (Some(error), _, _) => Some((error, true)),
+        (None, Some(status), _) | (None, None, Some(status)) => Some((status, false)),
+        (None, None, None) => None,
+    }
+}
+
+fn status_badge(app: &StudioApp, t: &Tones) -> Option<El> {
+    let (message, failed) = studio_status(app)?;
+    let color = if failed { status_color(ExecutionStatus::Failed) } else { status_color(ExecutionStatus::Succeeded) };
+    Some(
+        row()
+            .key("studio-status-badge")
+            .gap(6.0)
+            .min_w(0.0)
+            .items_center()
+            .child(el().size(7.0, 7.0).radius(3.5).fill(color))
+            .child(label(message, 11.5, 600.0, if failed { color } else { t.ink }).key("studio-status").truncate()),
+    )
+}
+
 fn trace_strip(app: &StudioApp, t: &Tones) -> El {
-    let header = row().gap(10.0).items_center().child(label("TRACE", 10.5, 700.0, t.muted)).child(label(
+    let header = row().w_full().gap(10.0).items_center().child(label("TRACE", 10.5, 700.0, t.muted)).child(label(
         match (app.runs, app.is_running()) {
             (0, _) => "No runs yet. Press Run Spell.".to_owned(),
             (runs, true) => format!("run #{runs} · running · {} events · Cancel stops it", app.trace.len()),
@@ -1648,6 +1782,10 @@ fn trace_strip(app: &StudioApp, t: &Tones) -> El {
         500.0,
         t.muted,
     ));
+    let header = match status_badge(app, t) {
+        Some(badge) => header.child(el().grow(1.0).min_w(0.0)).child(badge),
+        None => header,
+    };
     let entries = app.trace.iter().fold(row().gap(6.0).flex_wrap(), |list, line| {
         list.child(
             row()

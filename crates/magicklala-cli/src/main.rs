@@ -263,7 +263,12 @@ async fn stored_spell(
         saved.extend(store.list_spells(project.id).await?.into_iter().map(|record| (project.id, record)));
     }
     if let Some(id) = spell_id {
-        return Ok(saved.iter().find(|(_, record)| record.id.0 == id).map(draft_root).ok_or_else(|| format!("spell record {id} was not found in {db}"))?);
+        let chosen = saved.iter().find(|(_, record)| record.id.0 == id).ok_or_else(|| format!("spell record {id} was not found in {db}"))?;
+        let record = &chosen.1;
+        if record.graph.id != graph.id {
+            return Err(format!("spell record {} has graph id {}, which does not match file graph id {}", record.id.0, record.graph.id.0, graph.id.0).into());
+        }
+        return Ok(draft_root(chosen));
     }
     let matching: Vec<&(ProjectId, SpellRecord)> = saved.iter().filter(|(_, record)| record.graph.id == graph.id).collect();
     match matching.as_slice() {
@@ -331,9 +336,13 @@ fn spell(command: SpellCommand) -> CliResult {
             }
         }
         SpellCommand::Run { file, stream, trace, input, llm_base_url, model, db, spell_id } => {
+            let db = db.as_deref().map(str::trim).filter(|db| !db.is_empty());
+            if spell_id.is_some() && db.is_none() {
+                return Err(format!("--spell-id requires --db <file.sqlite> (or {DATABASE_ALIAS_ENV})").into());
+            }
             let mut graph = load(&file)?;
             let runtime = tokio::runtime::Runtime::new()?;
-            let resolver = match db.as_deref().map(str::trim).filter(|db| !db.is_empty()) {
+            let resolver = match db {
                 Some(db) => Some(runtime.block_on(stored_subgraphs(db, &graph, spell_id, &registry))?),
                 None => None,
             };

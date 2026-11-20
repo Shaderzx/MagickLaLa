@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use magicklala_canvas::{ExecutionStatus, SocketRef, category_accent};
 use magicklala_graph::{NodeCatalog, NodeId, NodeInstance, SocketType, SpellGraph, SpellId, SpellValidator, Wire, WireId};
+use magicklala_store::{NewProject, NewSpell, Repository, SqliteStore, StoreError};
 use magicklala_studio::{
     PALETTE_CATEGORY_ORDER, PROMPT_EDITOR_PADDING, StudioApp, StudioConfig, StudioStore, Theme, ValidationState, palette_categories, prompt_font,
     registry_specs, render_headless_snapshot_themed, studio_view,
@@ -1065,6 +1066,156 @@ fn subgraph_collision(db_path: &Path) -> Result<serde_json::Value, String> {
     Ok(json!({ "childReply": child_reply, "run": run, "statuses": statuses, "trace": trace }))
 }
 
+fn shown_status(rt: &Runtime<StudioApp>) -> serde_json::Value {
+    let Some(status) = rt.elements().into_iter().find(|element| element.key.as_deref() == Some("studio-status") && !element.exiting) else {
+        return serde_json::Value::Null;
+    };
+    let [x, y, w, h] = status.rect;
+    let within = |[left, top, width, height]: [f32; 4]| x >= left - 0.5 && y >= top - 0.5 && x + w <= left + width + 0.5 && y + h <= top + height + 0.5;
+    json!({
+        "text": status.text,
+        "insideTrace": rect(rt, "trace-strip").is_some_and(within),
+        "onScreen": w > 0.0 && h > 0.0 && rect(rt, "studio").is_some_and(within),
+    })
+}
+
+fn status_view(rt: &Runtime<StudioApp>) -> serde_json::Value {
+    json!({
+        "leftTab": format!("{:?}", rt.state.left_tab),
+        "status": rt.state.draft_status,
+        "storeError": rt.state.store_error,
+        "shown": shown_status(rt),
+    })
+}
+
+fn headless(app: StudioApp) -> Runtime<StudioApp> {
+    let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt
+}
+
+fn memory_db(forms: &[String]) -> Result<serde_json::Value, String> {
+    let mut reports = Vec::new();
+    for form in forms {
+        let config = StudioConfig { db_path: Some(PathBuf::from(form)), ..StudioConfig::default() };
+        let mut rt = headless(StudioApp::open(&config).map_err(|error| format!("{form}: {error}"))?);
+        let persistent = rt.state.store.as_ref().map(StudioStore::is_persistent);
+        click(&mut rt, "save")?;
+        let (status, save_error) = (rt.state.draft_status.clone(), rt.state.store_error.clone());
+        click(&mut rt, "publish")?;
+        reports.push(json!({
+            "db": form,
+            "persistent": persistent,
+            "status": status,
+            "saveError": save_error,
+            "publishError": rt.state.store_error,
+            "releases": release_versions(&rt.state),
+        }));
+    }
+    Ok(json!({ "forms": reports }))
+}
+
+fn visible_status(db_path: &Path) -> Result<serde_json::Value, String> {
+    let mut memory = headless(StudioApp::open(&StudioConfig::default()).map_err(|error| error.to_string())?);
+    click(&mut memory, "save")?;
+    let no_db = status_view(&memory);
+    let mut rt = studio_at(db_path)?;
+    click(&mut rt, "save")?;
+    let saved = status_view(&rt);
+    click(&mut rt, "publish")?;
+    let mut published = status_view(&rt);
+    published["version"] = json!(rt.state.last_published.as_ref().map(|release| release.version));
+    click(&mut rt, "save")?;
+    let resaved = status_view(&rt);
+    type_prompt(&mut rt, &NodeId::from("llm"), "edited after the save for {{content}}")?;
+    rt.update(|app, _| app.sync_spell());
+    rt.frame(0.0);
+    let edited = status_view(&rt);
+    Ok(json!({ "noDb": no_db, "saved": saved, "published": published, "resaved": resaved, "edited": edited }))
+}
+
+fn unopenable_db(db_path: &Path) -> Result<serde_json::Value, String> {
+    let mut rt = headless(StudioApp::launch(&StudioConfig { db_path: Some(db_path.to_path_buf()), ..StudioConfig::default() }));
+    let persistent = rt.state.store.as_ref().map(StudioStore::is_persistent);
+    click(&mut rt, "save")?;
+    let (status, save_error) = (rt.state.draft_status.clone(), rt.state.store_error.clone());
+    click(&mut rt, "publish")?;
+    Ok(json!({ "persistent": persistent, "status": status, "saveError": save_error, "publishError": rt.state.store_error, "shown": shown_status(&rt) }))
+}
+
+fn reply_spell(name: &str, id: SpellId, reply: &str) -> SpellGraph {
+    let mut spell = SpellGraph::new(name);
+    spell.id = id;
+    spell.nodes =
+        vec![studio_node("start", "event/on_start", 0.0, serde_json::Value::Null), studio_node("send", "io/send_message", 280.0, json!({ "content": reply }))];
+    spell.wires = vec![studio_wire("w_flow", ("start", "out"), ("send", "in"))];
+    spell
+}
+
+fn project_scope(db_path: &Path) -> Result<serde_json::Value, String> {
+    let (one_reply, two_reply) = ("from project 1", "from project 2");
+    let shared = SpellGraph::new("shared child").id;
+    let parent = calling_spell("parent two", "event/on_message", shared);
+    let url = format!("sqlite://{}", db_path.display());
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
+    runtime
+        .block_on(async {
+            let store = SqliteStore::connect(&url).await?;
+            store.migrate().await?;
+            let project = |name: &str| NewProject { name: name.to_owned(), description: String::new() };
+            let one = store.create_project(project("Project 1")).await?;
+            let two = store.create_project(project("Project 2")).await?;
+            let spell = |project_id, name: &str, graph: SpellGraph| NewSpell { project_id, name: name.to_owned(), graph };
+            store.create_spell(spell(one.id, "child one", reply_spell("child one", shared, one_reply))).await?;
+            store.create_spell(spell(two.id, "child two", reply_spell("child two", shared, two_reply))).await?;
+            let record = store.create_spell(spell(two.id, "parent two", parent.clone())).await?;
+            store.save_spell_graph(record.id, parent.clone()).await?;
+            Ok::<_, StoreError>(())
+        })
+        .map_err(|error| error.to_string())?;
+    drop(runtime);
+    let mut rt = studio_at(db_path)?;
+    let opened = json!({ "recordId": rt.state.spell_record_id(), "spellId": rt.state.spell.id });
+    let checked = validation_of(&mut rt)?;
+    let validation = json!({ "validation": checked["validation"], "errors": checked["errors"] });
+    let run = run_once(&mut rt)?;
+    Ok(json!({ "sharedId": shared, "replies": { "one": one_reply, "two": two_reply }, "opened": opened, "validation": validation, "run": run }))
+}
+
+fn out_of_band_release(db_path: &Path) -> Result<serde_json::Value, String> {
+    let mut a = SpellGraph::new("Release A");
+    a.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("send", "io/send_message", 280.0, json!({ "content": "from A" })),
+    ];
+    a.wires = vec![studio_wire("w_flow", ("trigger", "out"), ("send", "in"))];
+    StudioStore::open(Some(db_path)).and_then(|mut store| store.publish(&a)).map_err(|error| error.to_string())?;
+    let mut rt = studio_at(db_path)?;
+    let record = rt.state.spell_record_id().ok_or("Studio did not open the A record")?;
+    let opened = json!({ "recordId": record, "activeRelease": rt.state.root_subgraph().1, "releases": release_versions(&rt.state) });
+    let outside = StudioStore::open(Some(db_path)).and_then(|mut store| store.publish(&a)).map_err(|error| error.to_string())?;
+    click(&mut rt, "palette-flow-subgraph")?;
+    let call = rt
+        .state
+        .canvas
+        .nodes
+        .last()
+        .filter(|card| card.kind == "flow/subgraph")
+        .map(|card| card.id.clone())
+        .ok_or("palette did not add a flow/subgraph node")?;
+    type_prompt(&mut rt, &call, &record.0.to_string())?;
+    type_release_version(&mut rt, &call, &outside.version.to_string())?;
+    connect(&mut rt, ("trigger", "out"), (&call.0, "in"))?;
+    let edited = json!({ "subgraphs": rt.state.spell.subgraphs });
+    click(&mut rt, "publish")?;
+    let published = json!({
+        "version": rt.state.last_published.as_ref().map(|release| release.version),
+        "storeError": rt.state.store_error,
+        "validation": rt.state.validation.label(),
+        "releases": release_versions(&rt.state),
+    });
+    Ok(json!({ "recordId": record, "callNode": call.0, "opened": opened, "outside": { "version": outside.version }, "edited": edited, "published": published }))
+}
 fn number(raw: Option<&String>, name: &str) -> Result<u64, String> {
     raw.ok_or_else(|| format!("missing {name}"))?.parse().map_err(|error| format!("{name}: {error}"))
 }
@@ -1078,13 +1229,18 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("draft-reopen") => draft_reopen(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("save-guards") => save_guards(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("release-identity") => release_identity(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("memory-db") => memory_db(&args[1..]),
+        Some("visible-status") => visible_status(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("unopenable-db") => unopenable_db(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("project-scope") => project_scope(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("out-of-band-release") => out_of_band_release(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("publish-renamed") => {
             let db = args.get(1).ok_or("missing database path")?;
             publish_renamed(Path::new(db), args.get(2).ok_or("missing new spell name")?)
         }
         _ => match args {
             [desktop, compact, db_path] => probe(PathBuf::from(desktop), PathBuf::from(compact), PathBuf::from(db_path)),
-            _ => Err("usage: studio_probe <desktop.png> <compact.png> <studio.sqlite> | cancel-run <delay-ms> <deadline-ms> | publish-renamed <studio.sqlite> <name> | subgraph <studio.sqlite> | subgraph-ref-edit <studio.sqlite> | subgraph-collision <studio.sqlite> | draft-reopen <studio.sqlite> | save-guards <studio.sqlite> | release-identity <studio.sqlite>".to_owned()),
+            _ => Err("usage: studio_probe <desktop.png> <compact.png> <studio.sqlite> | cancel-run <delay-ms> <deadline-ms> | publish-renamed <studio.sqlite> <name> | subgraph <studio.sqlite> | subgraph-ref-edit <studio.sqlite> | subgraph-collision <studio.sqlite> | draft-reopen <studio.sqlite> | save-guards <studio.sqlite> | release-identity <studio.sqlite> | memory-db <db>... | visible-status <studio.sqlite> | unopenable-db <path> | project-scope <studio.sqlite> | out-of-band-release <studio.sqlite>".to_owned()),
         },
     }
 }
