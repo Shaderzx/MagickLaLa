@@ -6,6 +6,8 @@ import { createServer as createHttpServer, type IncomingMessage, type ServerResp
 import { createServer as createNetServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
@@ -121,6 +123,99 @@ async function waitHealthy(baseUrl: string) {
   await expect.poll(() => fetch(`${baseUrl}/health`).then((response) => response.status, () => 0), { timeout: 30_000 }).toBe(200);
 }
 
+type Scripted = { prompt: string; authorization: string | undefined; response: ServerResponse };
+
+async function startScriptedLlm(answer: (call: Scripted, calls: Scripted[]) => Promise<void>) {
+  const calls: Scripted[] = [];
+  const server = createHttpServer(async (request, response) => {
+    if (request.method !== 'POST' || request.url !== '/v1/chat/completions') {
+      response.writeHead(404).end();
+      return;
+    }
+    const chat = await readChat(request);
+    const call = { prompt: userPrompt(chat), authorization: request.headers.authorization, response };
+    calls.push(call);
+    try {
+      await answer(call, calls);
+    } catch (error) {
+      if (!response.headersSent) response.writeHead(500, { 'content-type': 'application/json' }).end(JSON.stringify({ error: { message: String(error) } }));
+    }
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { port } = server.address() as AddressInfo;
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    calls,
+    close: async () => {
+      server.closeAllConnections();
+      server.close();
+      await once(server, 'close');
+    },
+  };
+}
+
+function refuse(response: ServerResponse, message: string) {
+  response.writeHead(500, { 'content-type': 'application/json' });
+  response.end(JSON.stringify({ error: { message } }));
+}
+
+function keylessEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of ['MAGICKLALA_MASTER_KEY', 'MAGICKLALA_VAULT_KEY', 'MAGICKLALA_LLM_API_KEY', 'OPENAI_API_KEY', 'MAGICKLALA_API_TOKEN']) delete env[key];
+  return env;
+}
+
+async function launchStack(llmBaseUrl: string, extraEnv: Record<string, string> = {}) {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-stack-'));
+  const dbPath = join(dir, 'stack.db');
+  const port = await freePort();
+  const child = spawn(binary, ['serve', '--bind', `127.0.0.1:${port}`, '--database-url', `sqlite://${dbPath}`], {
+    cwd: dir,
+    env: { ...keylessEnv(), MAGICKLALA_MASTER_KEY: masterKey, MAGICKLALA_LLM_BASE_URL: llmBaseUrl, ...extraEnv },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdout?.resume();
+  child.stderr?.resume();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const stop = async () => {
+    await stopProcess(child);
+    await rm(dir, { recursive: true, force: true });
+  };
+  try {
+    await waitHealthy(baseUrl);
+  } catch (error) {
+    await stop();
+    throw error;
+  }
+  return { baseUrl, wsUrl: `ws://127.0.0.1:${port}/ws`, dbPath, api: client(baseUrl), stop };
+}
+
+async function helloLlmGraph(configure: (graph: any) => void = () => {}) {
+  const graph = JSON.parse(await readFile(join(repoRoot, 'examples', 'hello_llm.json'), 'utf8'));
+  graph.id = randomUUID();
+  configure(graph);
+  return graph;
+}
+
+async function runningLlmAgent(api: ReturnType<typeof client>, projectId: string, label: string, graph: unknown) {
+  const spell = await api('/api/v1/spells', { project_id: projectId, name: `${label} spell`, graph });
+  expect(spell.status).toBe(201);
+  const agent = await api('/api/v1/agents', { project_id: projectId, name: `${label} agent` });
+  expect(agent.status).toBe(201);
+  expect((await api(`/api/v1/agents/${agent.body.id}/releases`, { spell_id: spell.body.id })).status).toBe(201);
+  expect((await api(`/api/v1/agents/${agent.body.id}/start`, {})).body.status.state).toBe('running');
+  return { spell: spell.body, agent: agent.body };
+}
+
+function storedRun(dbPath: string, runId: string) {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    return db.prepare('SELECT status, error, spell_id, agent_id FROM execution_runs WHERE run_id = ?').get(runId) as Record<string, string | null> | undefined;
+  } finally {
+    db.close();
+  }
+}
 test.beforeAll(async () => {
   await run('cargo', ['build', '-q', '-p', 'magicklala-cli'], { cwd: repoRoot, timeout: 900_000, maxBuffer: 64 * 1024 * 1024 });
 });
@@ -270,6 +365,150 @@ test('two concurrent chats to one running agent on the same channel each get the
     await stopProcess(serve.child);
     await llm.close();
     await rm(dir, { recursive: true, force: true });
+  }
+});
+test('Overlapping chats on two channels each get their own correlated outcome: the failing run answers 502 with its error while the sibling answers 200', async () => {
+  const bothArrived = Promise.withResolvers<void>();
+  const failingSettled = Promise.withResolvers<void>();
+  const llm = await startScriptedLlm(async (call, calls) => {
+    if (calls.length === 2) bothArrived.resolve();
+    await bothArrived.promise;
+    if (call.prompt.includes('fail')) return refuse(call.response, 'loopback refused this prompt');
+    await failingSettled.promise;
+    completion(call.response, `loopback answer about ${call.prompt}`);
+  });
+  const stack = await launchStack(llm.baseUrl);
+  try {
+    const project = await stack.api('/api/v1/projects', { name: 'Crosstalk' });
+    const { agent } = await runningLlmAgent(stack.api, project.body.id, 'crosstalk', await helloLlmGraph());
+    const failing = stack.api(`/api/v1/agents/${agent.id}/chat`, { content: 'please fail', channel: 'alpha' }).finally(() => failingSettled.resolve());
+    const succeeding = stack.api(`/api/v1/agents/${agent.id}/chat`, { content: 'please succeed', channel: 'beta' });
+    const [failed, succeeded] = await Promise.all([failing, succeeding]);
+    expect(failed.status).toBe(502);
+    expect(failed.body.code).toBe('run_failed');
+    expect(failed.body.error).toContain('loopback refused this prompt');
+    expect(succeeded.status).toBe(200);
+    expect(succeeded.body.reply.content).toBe('loopback answer about please succeed');
+    await expect.poll(async () => (await stack.api(`/api/v1/agents/${agent.id}/runs`)).body.length, { timeout: 20_000 }).toBe(2);
+    const runs = (await stack.api(`/api/v1/agents/${agent.id}/runs`)).body as { status: string; trace: { channel: string; correlation_id: string } }[];
+    expect(Object.fromEntries(runs.map((item) => [item.trace.channel, item.status]))).toEqual({ alpha: 'failed', beta: 'succeeded' });
+    expect(runs.find((item) => item.trace.channel === 'beta')?.trace.correlation_id).toBe(succeeded.body.reply.metadata.correlation_id);
+  } finally {
+    await stack.stop();
+    await llm.close();
+  }
+});
+
+test('An LLM node with credential_id authorizes with its own project\'s sealed secret in spell runs and agent chats and refuses another project\'s credential', async () => {
+  const llm = await startScriptedLlm(async (call) => completion(call.response, `loopback answer about ${call.prompt}`));
+  const stack = await launchStack(llm.baseUrl);
+  try {
+    const home = await stack.api('/api/v1/projects', { name: 'Vault home' });
+    const away = await stack.api('/api/v1/projects', { name: 'Vault away' });
+    const homeSecret = `sk-home-${randomUUID()}`;
+    const awaySecret = `sk-away-${randomUUID()}`;
+    const homeKey = await stack.api('/api/v1/credentials', { project_id: home.body.id, name: 'llm', provider: 'openai', secret: homeSecret });
+    const awayKey = await stack.api('/api/v1/credentials', { project_id: away.body.id, name: 'llm', provider: 'openai', secret: awaySecret });
+    expect([homeKey.status, awayKey.status]).toEqual([201, 201]);
+    const withCredential = (credentialId: string) =>
+      helloLlmGraph((graph) => {
+        graph.nodes.find((node: { id: string }) => node.id === 'reply').config.credential_id = credentialId;
+        graph.nodes.reverse();
+      });
+    const homeSpell = await stack.api('/api/v1/spells', { project_id: home.body.id, name: 'Vault spell', graph: await withCredential(homeKey.body.id) });
+    const ran = await stack.api(`/api/v1/spells/${homeSpell.body.id}/run`, { input: 'vault spell question' });
+    expect(ran.status).toBe(200);
+    expect(ran.body.summary.status).toBe('succeeded');
+    expect(llm.calls.map((call) => [call.prompt, call.authorization])).toEqual([['vault spell question', `Bearer ${homeSecret}`]]);
+    const { agent } = await runningLlmAgent(stack.api, home.body.id, 'vault', await withCredential(homeKey.body.id));
+    const chat = await stack.api(`/api/v1/agents/${agent.id}/chat`, { content: 'vault agent question' });
+    expect(chat.status).toBe(200);
+    expect(chat.body.reply.content).toBe('loopback answer about vault agent question');
+    expect(llm.calls.at(-1)?.authorization).toBe(`Bearer ${homeSecret}`);
+    const thief = await stack.api('/api/v1/spells', { project_id: home.body.id, name: 'Thief spell', graph: await withCredential(awayKey.body.id) });
+    const stolen = await stack.api(`/api/v1/spells/${thief.body.id}/run`, { input: 'cross project question' });
+    expect(stolen.status).toBe(422);
+    expect(stolen.body.summary.status).toBe('failed');
+    expect(stolen.body.error).toContain(`credential ${awayKey.body.id}`);
+    expect(llm.calls.map((call) => call.prompt)).not.toContain('cross project question');
+    expect(llm.calls.map((call) => call.authorization)).not.toContain(`Bearer ${awaySecret}`);
+  } finally {
+    await stack.stop();
+    await llm.close();
+  }
+});
+
+test('A failing POST /api/v1/spells/{id}/run answers 422 with the failed summary and records the failed run in SQLite', async () => {
+  const llm = await startScriptedLlm(async (call) => refuse(call.response, 'loopback is down for maintenance'));
+  const stack = await launchStack(llm.baseUrl);
+  try {
+    const project = await stack.api('/api/v1/projects', { name: 'Failing runs' });
+    const spell = await stack.api('/api/v1/spells', { project_id: project.body.id, name: 'Doomed', graph: await helloLlmGraph() });
+    const failed = await stack.api(`/api/v1/spells/${spell.body.id}/run`, { input: 'will this work?' });
+    expect(failed.status).toBe(422);
+    expect(failed.body.code).toBe('spell_failed');
+    expect(failed.body.summary.status).toBe('failed');
+    expect(failed.body.error).toContain('loopback is down for maintenance');
+    expect(failed.body.trace.at(-1).event).toBe('run_finished');
+    expect(storedRun(stack.dbPath, failed.body.summary.run_id)).toEqual({ status: 'failed', error: failed.body.summary.error, spell_id: spell.body.id, agent_id: null });
+  } finally {
+    await stack.stop();
+    await llm.close();
+  }
+});
+
+test('A spell run that outlives MAGICKLALA_SPELL_RUN_TIMEOUT_MS answers 504 and records a timed_out run in SQLite', async () => {
+  const released = Promise.withResolvers<void>();
+  const llm = await startScriptedLlm(async (call) => {
+    await released.promise;
+    completion(call.response, 'too late');
+  });
+  const stack = await launchStack(llm.baseUrl, { MAGICKLALA_SPELL_RUN_TIMEOUT_MS: '1500' });
+  try {
+    const project = await stack.api('/api/v1/projects', { name: 'Slow runs' });
+    const spell = await stack.api('/api/v1/spells', { project_id: project.body.id, name: 'Slow', graph: await helloLlmGraph() });
+    const timedOut = await stack.api(`/api/v1/spells/${spell.body.id}/run`, { input: 'take your time' });
+    expect(timedOut.status).toBe(504);
+    expect(timedOut.body.code).toBe('run_timeout');
+    expect(storedRun(stack.dbPath, timedOut.body.run_id)).toMatchObject({ status: 'timed_out', spell_id: spell.body.id, agent_id: null });
+  } finally {
+    released.resolve();
+    await stack.stop();
+    await llm.close();
+  }
+});
+
+test('A WebSocket chat waiting on a slow run never blocks pings on the same socket and still delivers its reply', async () => {
+  const frames: { type: string; reply?: { content: string } }[] = [];
+  const promptArrived = Promise.withResolvers<string>();
+  const pongSeen = Promise.withResolvers<void>();
+  const llm = await startScriptedLlm(async (call) => {
+    promptArrived.resolve(call.prompt);
+    await pongSeen.promise;
+    completion(call.response, `loopback answer about ${call.prompt}`);
+  });
+  const stack = await launchStack(llm.baseUrl);
+  let socket: WebSocket | undefined;
+  try {
+    const project = await stack.api('/api/v1/projects', { name: 'Socket chat' });
+    const { agent } = await runningLlmAgent(stack.api, project.body.id, 'socket', await helloLlmGraph());
+    socket = new WebSocket(stack.wsUrl);
+    socket.addEventListener('message', (message) => {
+      const frame = JSON.parse(String(message.data));
+      frames.push(frame);
+      if (frame.type === 'pong') pongSeen.resolve();
+    });
+    await once(socket as unknown as EventTarget, 'open');
+    socket.send(JSON.stringify({ type: 'chat', agent_id: agent.id, content: 'slow socket question' }));
+    expect(await promptArrived.promise).toBe('slow socket question');
+    socket.send(JSON.stringify({ type: 'ping' }));
+    await expect.poll(() => frames.some((frame) => frame.type === 'pong'), { timeout: 10_000 }).toBe(true);
+    await expect.poll(() => frames.find((frame) => frame.type === 'chat_accepted')?.reply?.content, { timeout: 20_000 }).toBe('loopback answer about slow socket question');
+  } finally {
+    pongSeen.resolve();
+    socket?.close();
+    await stack.stop();
+    await llm.close();
   }
 });
 for (const [width, height] of [[960, 640], [1280, 800]]) {
