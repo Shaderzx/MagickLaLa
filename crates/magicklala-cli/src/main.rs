@@ -6,8 +6,8 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use magicklala_graph::{EngineServices, NodeCatalog, NodeId, RunTrigger, SpellEngine, SpellGraph, SpellValidator, TraceEvent, Value};
 use magicklala_nodes::{HttpLlmGateway, InMemoryKnowledge, InMemoryMemory, LlmGatewayConfig, default_registry};
-use magicklala_server::{API_TOKEN_ENV, AppState, ServerConfig, Wiring};
-use magicklala_store::{AesGcmVault, CryptoVault, MASTER_KEY_ENV, Repository, SqliteStore};
+use magicklala_server::{ALLOWED_HOSTS_ENV, API_TOKEN_ENV, AppState, ServerConfig, Wiring};
+use magicklala_store::{AesGcmVault, CryptoVault, MASTER_KEY_ENV, Repository, SqliteStore, is_in_memory_database_url};
 
 const VAULT_KEY_ENV: &str = "MAGICKLALA_VAULT_KEY";
 const EMBEDDER_URL_ENV: &str = "MAGICKLALA_EMBEDDER_URL";
@@ -29,10 +29,14 @@ enum Command {
         bind: std::net::SocketAddr,
         #[arg(long, visible_alias = "db", env = "MAGICKLALA_DATABASE_URL")]
         database_url: Option<String>,
+        #[arg(long)]
+        insecure_no_auth: bool,
     },
     Studio {
         #[arg(long, value_name = "PATH")]
         snap: Option<PathBuf>,
+        #[arg(long, value_name = "PATH", env = "MAGICKLALA_DB")]
+        db: Option<PathBuf>,
         #[arg(long, default_value_t = 1280.0)]
         width: f32,
         #[arg(long, default_value_t = 800.0)]
@@ -129,11 +133,16 @@ fn main() -> ExitCode {
 
 fn dispatch(cli: Cli) -> CliResult {
     match cli.command {
-        Command::Studio { snap: Some(path), width, height } => Ok(magicklala_studio::render_headless_snapshot_sized(&path, (width, height))?),
-        Command::Studio { snap: None, width, height } => {
-            Ok(magicklala_studio::run_studio(magicklala_studio::StudioConfig { size: (width, height), ..Default::default() })?)
+        Command::Studio { snap: Some(path), width, height, .. } => Ok(magicklala_studio::render_headless_snapshot_sized(&path, (width, height))?),
+        Command::Studio { snap: None, width, height, db } => {
+            let db_path = db.map(|path| studio_db_path(&path));
+            Ok(magicklala_studio::run_studio(magicklala_studio::StudioConfig { size: (width, height), db_path, ..Default::default() })?)
         }
-        Command::Serve { bind, database_url } => block_on(serve(ServerConfig::from_env(bind, database_url_or_default(database_url)))),
+        Command::Serve { bind, database_url, insecure_no_auth } => {
+            let config = ServerConfig::from_env(bind, database_url_or_default(database_url));
+            refuse_open_bind(&config, insecure_no_auth)?;
+            block_on(serve(config))
+        }
         Command::Spell { command } => spell(command),
         Command::Agent { server, token, command } => block_on(agent(server, token, command)),
     }
@@ -152,15 +161,28 @@ fn database_url_or_default(argument: Option<String>) -> String {
     }
 }
 
-fn is_in_memory(database_url: &str) -> bool {
-    database_url.contains(":memory:") || database_url.contains("mode=memory")
+fn studio_db_path(raw: &Path) -> PathBuf {
+    let text = raw.to_string_lossy();
+    let stripped = text.strip_prefix("sqlite://").or_else(|| text.strip_prefix("sqlite:")).unwrap_or(&text);
+    PathBuf::from(stripped)
+}
+
+fn refuse_open_bind(config: &ServerConfig, insecure_no_auth: bool) -> CliResult {
+    if config.bind.ip().is_loopback() || config.access.requires_token() || insecure_no_auth {
+        return Ok(());
+    }
+    Err(format!(
+        "refusing to serve on non-loopback address {} without {API_TOKEN_ENV}: anyone who can reach it would control every agent; set {API_TOKEN_ENV}, bind to 127.0.0.1, or pass --insecure-no-auth to accept the risk",
+        config.bind
+    )
+    .into())
 }
 
 fn vault(database_url: &str) -> Result<Arc<dyn CryptoVault>, Box<dyn std::error::Error>> {
     let fallback = std::env::var(VAULT_KEY_ENV).ok().filter(|key| !key.trim().is_empty());
     match AesGcmVault::from_env_or_key(fallback.as_deref()) {
         Ok(vault) => Ok(Arc::new(vault)),
-        Err(_) if is_in_memory(database_url) => {
+        Err(_) if is_in_memory_database_url(database_url) => {
             eprintln!("warning: neither {MASTER_KEY_ENV} nor {VAULT_KEY_ENV} is set; the in-memory store seals credentials with an ephemeral key");
             Ok(Arc::new(AesGcmVault::new(&AppState::ephemeral_vault_key())))
         }
@@ -197,9 +219,18 @@ async fn serve(config: ServerConfig) -> CliResult {
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     let address = listener.local_addr()?;
     if !address.ip().is_loopback() && !config.access.requires_token() {
-        eprintln!("warning: serving on non-loopback address {address} without {API_TOKEN_ENV}; anyone who can reach it controls every agent");
+        eprintln!(
+            "warning: serving on non-loopback address {address} without {API_TOKEN_ENV} because --insecure-no-auth was passed; anyone who can reach it controls every agent"
+        );
     }
-    eprintln!("magicklala server listening on http://{address} (store: sqlite {})", config.database_url);
+    if address.ip().is_unspecified() && config.access.allowed_hosts.is_empty() {
+        eprintln!("warning: bound to {address}; only loopback Host headers are accepted until {ALLOWED_HOSTS_ENV} lists the names clients use");
+    }
+    let booted = state.boot_enabled_agents().await;
+    for (agent, reason) in &booted.failed {
+        eprintln!("warning: enabled agent {agent} did not boot: {reason}");
+    }
+    eprintln!("magicklala server listening on http://{address} (store: sqlite {}, booted {} agent(s))", config.database_url, booted.started.len());
     Ok(magicklala_server::serve_on(listener, state).await?)
 }
 

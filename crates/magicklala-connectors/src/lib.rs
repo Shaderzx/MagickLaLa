@@ -26,7 +26,10 @@ pub use signature::{sign_hmac_sha256, verify_hmac_sha256};
 pub use slack::{SLACK_DEFAULT_BASE_URL, SLACK_MAX_CLOCK_SKEW_SECONDS, SlackConnector, SlackInbound};
 pub use studio::{StudioChatConnector, StudioReply};
 pub use tick::{MIN_TICK_INTERVAL_MS, TickConnector};
-pub use webhook::{MAX_WEBHOOK_BODY_BYTES, WEBHOOK_SIGNATURE_HEADER, WebhookConnector};
+pub use webhook::{
+    MAX_WEBHOOK_BODY_BYTES, WEBHOOK_MAX_SKEW_SECS, WEBHOOK_SIGNATURE_HEADER, WEBHOOK_TIMESTAMP_HEADER, WebhookConnector, parse_webhook_timestamp,
+    signed_webhook_message,
+};
 
 #[derive(Debug, Error)]
 pub enum ConnectorError {

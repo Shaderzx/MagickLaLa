@@ -696,9 +696,10 @@ test('A direct spell run reaches memory and knowledge only through an agent of t
   expect(foreign.body.code).toBe('agent_not_in_project');
   const unknown = await server.api(`/api/v1/spells/${writer.body.id}/run`, { body: { input: 'ghost note', agent_id: randomUUID() } });
   expect(unknown.status).toBe(404);
-  const foreignRead = await server.api(`/api/v1/spells/${reader.body.id}/run`, { body: { input: 'away confidential roadmap', agent_id: awayAgent.body.id } });
+  const foreignRead = await server.api(`/api/v1/spells/${reader.body.id}/run`, { body: { input: 'roadmap', agent_id: awayAgent.body.id } });
   expect(foreignRead.status).toBe(403);
-  const unboundRead = await server.api(`/api/v1/spells/${reader.body.id}/run`, { body: { input: 'away confidential roadmap' } });
+  expect(foreignRead.text).not.toContain('away confidential roadmap');
+  const unboundRead = await server.api(`/api/v1/spells/${reader.body.id}/run`, { body: { input: 'roadmap' } });
   expect(unboundRead.status).toBe(422);
   expect(unboundRead.text).not.toContain('away confidential roadmap');
 

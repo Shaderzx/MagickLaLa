@@ -8,7 +8,20 @@ use crate::state::ConnectorRuntimeState;
 use crate::{Connector, ConnectorConfig, ConnectorError, ConnectorStatus, InboundEvent, InboundRejection, OutboundAction};
 
 pub const WEBHOOK_SIGNATURE_HEADER: &str = "X-MagickLaLa-Signature";
+pub const WEBHOOK_TIMESTAMP_HEADER: &str = "X-MagickLaLa-Timestamp";
+pub const WEBHOOK_MAX_SKEW_SECS: i64 = 300;
 pub const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
+
+pub fn signed_webhook_message(timestamp: i64, body: &[u8]) -> Vec<u8> {
+    let mut message = format!("{timestamp}.").into_bytes();
+    message.extend_from_slice(body);
+    message
+}
+
+pub fn parse_webhook_timestamp(raw: Option<&str>) -> Result<i64, String> {
+    let raw = raw.map(str::trim).filter(|value| !value.is_empty()).ok_or_else(|| format!("missing {WEBHOOK_TIMESTAMP_HEADER} header"))?;
+    raw.parse::<i64>().map_err(|_| format!("{WEBHOOK_TIMESTAMP_HEADER} must be unix seconds, got {raw:?}"))
+}
 
 pub struct WebhookConnector {
     config: ConnectorConfig,
@@ -39,6 +52,20 @@ impl WebhookConnector {
             Ok(())
         } else {
             Err(InboundRejection::Unauthorized(format!("{WEBHOOK_SIGNATURE_HEADER} signature does not match the payload")))
+        }
+    }
+
+    pub fn verify_timestamped(secret: &str, timestamp: i64, body: &[u8], signature: &str, now_unix: i64, max_skew_secs: i64) -> Result<(), String> {
+        let skew = now_unix.abs_diff(timestamp);
+        if skew > max_skew_secs.unsigned_abs() {
+            return Err(format!("{WEBHOOK_TIMESTAMP_HEADER} timestamp is {skew} s away from server time; the limit is {max_skew_secs} s"));
+        }
+        let provided = signature.trim();
+        let digest = provided.strip_prefix("sha256=").unwrap_or(provided);
+        if verify_hmac_sha256(secret.as_bytes(), &signed_webhook_message(timestamp, body), digest) {
+            Ok(())
+        } else {
+            Err(format!("{WEBHOOK_SIGNATURE_HEADER} signature does not match timestamp.body"))
         }
     }
 

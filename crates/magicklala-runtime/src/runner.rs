@@ -184,7 +184,7 @@ pub fn structural_errors(graph: &SpellGraph) -> Vec<ValidationError> {
     errors
 }
 
-const REPLY_OUTPUT_SUFFIXES: [&str; 2] = [".sent", ".reply"];
+const REPLY_OUTPUT_SOCKETS: [&str; 2] = ["sent", "reply"];
 const MESSAGE_TRIGGER_KINDS: [&str; 2] = ["event/on_message", "core/on_message"];
 const START_TRIGGER_KIND: &str = "event/on_start";
 
@@ -235,6 +235,11 @@ pub fn trigger_payload(event: &InboundEvent) -> Value {
 
 pub type ProjectLlmFactory = Arc<dyn Fn(ProjectId) -> Arc<dyn LlmGateway> + Send + Sync>;
 
+#[async_trait]
+pub trait SubgraphLoader: Send + Sync {
+    async fn load(&self, project: ProjectId, graph: &SpellGraph) -> Arc<dyn SubgraphResolver>;
+}
+
 #[derive(Clone)]
 pub struct StoreScope {
     pub repository: Arc<dyn Repository>,
@@ -247,23 +252,20 @@ struct ScopedEngine {
     base: EngineServices,
     store: StoreScope,
     subgraphs: Option<Arc<dyn SubgraphResolver>>,
+    subgraph_loader: Option<Arc<dyn SubgraphLoader>>,
     project_llm: Option<ProjectLlmFactory>,
 }
 
 impl ScopedEngine {
-    async fn agent_llm(&self, agent: AgentId) -> Option<Arc<dyn LlmGateway>> {
-        let factory = self.project_llm.as_ref()?;
-        let project = self.store.repository.get_agent(agent).await.ok()?.project_id;
-        Some(factory(project))
+    async fn agent_project(&self, agent: AgentId) -> Option<ProjectId> {
+        self.store.repository.get_agent(agent).await.ok().map(|agent| agent.project_id)
     }
 
-    async fn services(&self, agent_id: Uuid, run_id: RunId) -> EngineServices {
+    async fn services(&self, agent_id: Uuid, run_id: RunId, project: Option<ProjectId>) -> EngineServices {
         let agent = AgentId(agent_id);
         let repository = &self.store.repository;
-        let upstream = match self.agent_llm(agent).await {
-            Some(llm) => Some(llm),
-            None => self.store.llm.clone(),
-        };
+        let project_llm = self.project_llm.as_ref().zip(project).map(|(factory, project)| factory(project));
+        let upstream = project_llm.or_else(|| self.store.llm.clone());
         let llm = upstream.map_or_else(
             || self.base.llm.clone(),
             |llm| {
@@ -285,11 +287,21 @@ impl ScopedEngine {
         EngineServices { llm, memory, knowledge }
     }
 
-    async fn engine(&self, agent_id: Uuid, run_id: RunId, step_limit: u64) -> SpellEngine {
-        let engine =
-            SpellEngine::new(Arc::clone(&self.catalog), self.services(agent_id, run_id).await).with_step_limit(step_limit).with_agent_id(agent_id.to_string());
-        match &self.subgraphs {
-            Some(resolver) => engine.with_subgraph_resolver(Arc::clone(resolver)),
+    async fn resolver(&self, project: Option<ProjectId>, graph: &SpellGraph) -> Option<Arc<dyn SubgraphResolver>> {
+        if let Some((loader, project)) = self.subgraph_loader.as_ref().zip(project) {
+            return Some(loader.load(project, graph).await);
+        }
+        self.subgraphs.clone()
+    }
+
+    async fn engine(&self, agent_id: Uuid, run_id: RunId, step_limit: u64, graph: &SpellGraph) -> SpellEngine {
+        let project = self.agent_project(AgentId(agent_id)).await;
+        let engine = SpellEngine::new(Arc::clone(&self.catalog), self.services(agent_id, run_id, project).await)
+            .with_step_limit(step_limit)
+            .with_agent_id(agent_id.to_string())
+            .with_run_id(run_id);
+        match self.resolver(project, graph).await {
+            Some(resolver) => engine.with_subgraph_resolver(resolver),
             None => engine,
         }
     }
@@ -318,12 +330,31 @@ impl EventEmitter for FinishOrder {
     }
 }
 
-pub fn ordered_replies(summary: &RunSummary, finish_order: &[NodeId]) -> Vec<String> {
-    finish_order
+fn activation_replies(summary: &RunSummary) -> Vec<String> {
+    summary
+        .activations
         .iter()
-        .flat_map(|node| REPLY_OUTPUT_SUFFIXES.iter().filter_map(move |suffix| summary.outputs.get(&format!("{}{suffix}", node.0))))
+        .flat_map(|activation| REPLY_OUTPUT_SOCKETS.iter().filter_map(|socket| activation.outputs.get(*socket)))
         .filter_map(|value| value.as_str().map(str::to_owned))
         .collect()
+}
+
+fn finished_replies(summary: &RunSummary, finish_order: &[NodeId]) -> Vec<String> {
+    finish_order
+        .iter()
+        .flat_map(|node| REPLY_OUTPUT_SOCKETS.iter().filter_map(move |socket| summary.outputs.get(&format!("{}.{socket}", node.0))))
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect()
+}
+
+pub fn ordered_replies(summary: &RunSummary, finish_order: &[NodeId]) -> Vec<String> {
+    if summary.activations.is_empty() { finished_replies(summary, finish_order) } else { activation_replies(summary) }
+}
+
+fn missing_trigger(kind: ConnectorKind) -> SpellError {
+    let kind_name = serde_json::to_value(kind).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default();
+    let accepted: Vec<&str> = trigger_kinds(kind).iter().copied().chain([START_TRIGGER_KIND]).collect();
+    SpellError::Internal(format!("spell has no trigger for {kind_name} events: add one of {}", accepted.join(", ")))
 }
 
 pub struct EngineReleaseRunner {
@@ -339,7 +370,8 @@ impl EngineReleaseRunner {
 
     pub fn scoped(catalog: Arc<dyn NodeCatalog>, base: EngineServices, store: StoreScope) -> Self {
         let engine = Arc::new(SpellEngine::new(Arc::clone(&catalog), base.clone()));
-        Self { engine, scoped: Some(ScopedEngine { catalog, base, store, subgraphs: None, project_llm: None }), allow_private_http: None }
+        let scoped = ScopedEngine { catalog, base, store, subgraphs: None, subgraph_loader: None, project_llm: None };
+        Self { engine, scoped: Some(scoped), allow_private_http: None }
     }
 
     pub fn with_project_llm(mut self, factory: ProjectLlmFactory) -> Self {
@@ -361,6 +393,13 @@ impl EngineReleaseRunner {
         self
     }
 
+    pub fn with_subgraph_loader(mut self, loader: Arc<dyn SubgraphLoader>) -> Self {
+        if let Some(scoped) = &mut self.scoped {
+            scoped.subgraph_loader = Some(loader);
+        }
+        self
+    }
+
     pub fn is_scoped(&self) -> bool {
         self.scoped.is_some()
     }
@@ -369,16 +408,11 @@ impl EngineReleaseRunner {
         let validator = self.engine.validator();
         let triggers: Vec<&NodeInstance> = graph.nodes.iter().filter(|node| validator.spec(&node.kind).is_some_and(|spec| spec.is_trigger)).collect();
         let wanted = trigger_kinds(kind);
-        triggers
-            .iter()
-            .find(|node| wanted.contains(&node.kind.as_str()))
-            .or_else(|| triggers.iter().find(|node| node.kind == START_TRIGGER_KIND))
-            .or_else(|| triggers.first())
-            .copied()
+        triggers.iter().find(|node| wanted.contains(&node.kind.as_str())).or_else(|| triggers.iter().find(|node| node.kind == START_TRIGGER_KIND)).copied()
     }
 
     fn trigger(&self, graph: &SpellGraph, event: &InboundEvent) -> Result<RunTrigger, SpellError> {
-        let node = self.trigger_node(graph, event.kind).ok_or(SpellError::Validation(vec![ValidationError::NoTrigger]))?;
+        let node = self.trigger_node(graph, event.kind).ok_or_else(|| missing_trigger(event.kind))?;
         let socket =
             self.engine.validator().spec(&node.kind).and_then(|spec| spec.outputs.first()).map_or_else(|| "out".to_owned(), |socket| socket.name.clone());
         Ok(RunTrigger { node: node.id.clone(), socket, payload: trigger_payload(event) })
@@ -404,7 +438,7 @@ impl ReleaseRunner for EngineReleaseRunner {
         let binding = RunBinding { agent_id: Some(release.agent_id.to_string()), allow_private_http: self.allow_private_http, run_id: Some(scope.run_id) };
         let summary = match &self.scoped {
             Some(scoped) => {
-                let engine = scoped.engine(release.agent_id, scope.run_id, self.engine.step_limit()).await;
+                let engine = scoped.engine(release.agent_id, scope.run_id, self.engine.step_limit(), &release.graph).await;
                 engine.run_bound(&release.graph, trigger, emitter, scope.cancellation, binding).await?
             }
             None => self.engine.run_bound(&release.graph, trigger, emitter, scope.cancellation, binding).await?,
