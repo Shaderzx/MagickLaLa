@@ -152,6 +152,7 @@ impl ReleaseRunner for TemplateReplyRunner {
             outputs,
             activations: Vec::new(),
             activations_truncated: false,
+            replies: Vec::new(),
             error: None,
         };
         events.emit(TraceEvent::RunFinished { run_id, summary });
@@ -348,7 +349,13 @@ fn finished_replies(summary: &RunSummary, finish_order: &[NodeId]) -> Vec<String
 }
 
 pub fn ordered_replies(summary: &RunSummary, finish_order: &[NodeId]) -> Vec<String> {
-    if summary.activations.is_empty() { finished_replies(summary, finish_order) } else { activation_replies(summary) }
+    if !summary.replies.is_empty() {
+        summary.replies.clone()
+    } else if summary.activations.is_empty() {
+        finished_replies(summary, finish_order)
+    } else {
+        activation_replies(summary)
+    }
 }
 
 fn missing_trigger(kind: ConnectorKind) -> SpellError {

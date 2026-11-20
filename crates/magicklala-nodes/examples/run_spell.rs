@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use magicklala_graph::{
-    CredentialResolver, EngineServices, EventEmitter, NodeCatalog, NodeError, RunId, RunTrigger, SpellEngine, SpellGraph, SpellValidator, TraceEvent, Value,
+    CredentialResolver, EngineServices, EventEmitter, NodeCatalog, NodeError, RunId, RunTrigger, SpellEngine, SpellGraph, SpellId, SpellValidator,
+    SubgraphResolver, TraceEvent, Value,
 };
 use magicklala_nodes::{HttpLlmGateway, InMemoryKnowledge, InMemoryMemory, default_registry};
 
@@ -38,8 +39,31 @@ fn credentials_from_env() -> Result<Option<Arc<dyn CredentialResolver>>, String>
     Ok(Some(Arc::new(FileCredentials(secrets))))
 }
 
+struct FileSubgraphs(BTreeMap<SpellId, SpellGraph>);
+
+impl SubgraphResolver for FileSubgraphs {
+    fn resolve(&self, spell_id: SpellId, _release_version: Option<u32>) -> Option<SpellGraph> {
+        self.0.get(&spell_id).cloned()
+    }
+}
+
+fn load_subgraphs(paths: &[String]) -> Result<Option<Arc<dyn SubgraphResolver>>, String> {
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let mut graphs = BTreeMap::new();
+    for path in paths {
+        let source = std::fs::read_to_string(path).map_err(|error| format!("cannot read {path}: {error}"))?;
+        let graph: SpellGraph = serde_json::from_str(&source).map_err(|error| format!("invalid subgraph {path}: {error}"))?;
+        graphs.insert(graph.id, graph);
+    }
+    Ok(Some(Arc::new(FileSubgraphs(graphs))))
+}
+
 struct Arguments {
     spell: String,
+    step_limit: Option<u64>,
+    subgraphs: Vec<String>,
     payload: serde_json::Value,
     trigger: Option<String>,
     run_id: Option<RunId>,
@@ -52,6 +76,8 @@ fn parse_arguments() -> Result<Arguments, String> {
     let mut trigger = None;
     let mut run_id = None;
     let mut validate_only = false;
+    let mut step_limit = None;
+    let mut subgraphs = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -65,12 +91,19 @@ fn parse_arguments() -> Result<Arguments, String> {
                 run_id = Some(serde_json::from_value::<RunId>(serde_json::Value::String(raw)).map_err(|error| format!("--run-id is not a UUID: {error}"))?);
             }
             "--validate" => validate_only = true,
+            "--step-limit" => {
+                let raw = args.next().ok_or("--step-limit needs a number")?;
+                step_limit = Some(raw.parse::<u64>().map_err(|error| format!("--step-limit is not a number: {error}"))?);
+            }
+            "--subgraph" => subgraphs.push(args.next().ok_or("--subgraph needs a spell file")?),
             other if spell.is_none() => spell = Some(other.to_owned()),
             other => return Err(format!("unexpected argument {other}")),
         }
     }
-    let spell = spell.ok_or("usage: run_spell <spell.json> [--payload <json>] [--trigger <node>] [--run-id <uuid>] [--validate]")?;
-    Ok(Arguments { spell, payload, trigger, run_id, validate_only })
+    let spell = spell.ok_or(
+        "usage: run_spell <spell.json> [--payload <json>] [--trigger <node>] [--run-id <uuid>] [--step-limit <n>] [--subgraph <spell.json>]... [--validate]",
+    )?;
+    Ok(Arguments { spell, step_limit, subgraphs, payload, trigger, run_id, validate_only })
 }
 
 async fn run(arguments: Arguments) -> Result<ExitCode, String> {
@@ -105,9 +138,20 @@ async fn run(arguments: Arguments) -> Result<ExitCode, String> {
         Some(run_id) => engine.with_run_id(run_id),
         None => engine,
     };
+    let engine = match arguments.step_limit {
+        Some(step_limit) => engine.with_step_limit(step_limit),
+        None => engine,
+    };
+    let engine = match load_subgraphs(&arguments.subgraphs)? {
+        Some(resolver) => engine.with_subgraph_resolver(resolver),
+        None => engine,
+    };
     let trigger = RunTrigger { node: trigger_node.as_str().into(), socket: "out".to_owned(), payload: Value::from(arguments.payload) };
     match engine.run(&graph, trigger, Arc::new(StdoutEmitter)).await {
-        Ok(_) => Ok(ExitCode::SUCCESS),
+        Ok(summary) => {
+            println!("{}", serde_json::json!({ "run_summary": summary }));
+            Ok(ExitCode::SUCCESS)
+        }
         Err(error) => {
             eprintln!("{error}");
             Ok(ExitCode::from(1))

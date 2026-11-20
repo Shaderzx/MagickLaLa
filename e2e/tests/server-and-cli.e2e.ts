@@ -739,7 +739,15 @@ test('Publishing a release rejects a spell whose subgraph reference is missing, 
   const child = echoSpell('subgraph child');
   const childSpell = await server.api('/api/v1/spells', { body: { project_id: project.id, name: 'subgraph child', graph: child } });
   expect(childSpell.status).toBe(201);
-  const withSubgraph = (name: string, spellId: string) => ({ ...echoSpell(name), subgraphs: [{ node_id: 'send', spell_id: spellId }] });
+  const withSubgraph = (name: string, spellId: string) => {
+    const caller = echoSpell(name);
+    return {
+      ...caller,
+      nodes: [...caller.nodes, { id: 'call', kind: 'flow/subgraph', position: [560, 0], config: {} }],
+      wires: [...caller.wires, { id: 'w_call', from_node: 'send', from_socket: 'out', to_node: 'call', to_socket: 'in' }],
+      subgraphs: [{ node_id: 'call', spell_id: spellId }],
+    };
+  };
   const publish = async (name: string, graph: object) => {
     const spell = await server.api('/api/v1/spells', { body: { project_id: project.id, name, graph } });
     return server.api(`/api/v1/agents/${agent.id}/releases`, { body: { spell_id: spell.body.id } });

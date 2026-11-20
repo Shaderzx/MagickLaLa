@@ -8,8 +8,9 @@ mod validator;
 mod value;
 
 pub use engine::{
-    DEFAULT_WHILE_LOOP_MAX_ITERATIONS, DO_ONCE_KIND, EngineServices, MAX_ACTIVATION_LOG_BYTES, NodeCatalog, RunBinding, RunTrigger, SpellEngine,
-    SubgraphResolver, TRIGGER_PAYLOAD_SOCKET, WAIT_FOR_ALL_KIND, WHILE_LOOP_KIND,
+    DEFAULT_WHILE_LOOP_MAX_ITERATIONS, DO_ONCE_KIND, EngineServices, MAX_ACTIVATION_LOG_BYTES, MAX_REPLIES, MAX_REPLY_BYTES, MAX_SUBGRAPH_DEPTH, NodeCatalog,
+    REPLY_SOCKETS, RunBinding, RunTrigger, START_TRIGGER_KIND, SUBGRAPH_KIND, SpellEngine, SubgraphResolver, TRIGGER_PAYLOAD_SOCKET, WAIT_FOR_ALL_KIND,
+    WHILE_LOOP_KIND,
 };
 pub use error::{NodeError, SpellError, ValidationError};
 pub use ir::{NodeId, NodeInstance, SPELL_SCHEMA_VERSION, SpellGraph, SpellId, SubgraphRef, VariableDef, Wire, WireId};

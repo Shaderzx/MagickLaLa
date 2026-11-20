@@ -72,7 +72,27 @@ pub struct RunSummary {
     pub activations: Vec<EmittedOutput>,
     #[serde(default)]
     pub activations_truncated: bool,
+    #[serde(default)]
+    pub replies: Vec<String>,
     pub error: Option<String>,
+}
+
+impl RunSummary {
+    pub fn slim(&self) -> Self {
+        Self {
+            run_id: self.run_id,
+            spell_id: self.spell_id,
+            started_at: self.started_at,
+            finished_at: self.finished_at,
+            status: self.status,
+            nodes_executed: self.nodes_executed,
+            outputs: BTreeMap::new(),
+            activations: Vec::new(),
+            activations_truncated: self.activations_truncated,
+            replies: Vec::new(),
+            error: self.error.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
