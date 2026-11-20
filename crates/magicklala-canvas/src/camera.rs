@@ -14,8 +14,8 @@ impl Default for Camera {
 }
 
 impl Camera {
-    pub const MIN_ZOOM: f32 = 0.2;
-    pub const MAX_ZOOM: f32 = 3.0;
+    pub const MIN_ZOOM: f32 = 0.4;
+    pub const MAX_ZOOM: f32 = 2.2;
 
     pub fn world_to_screen(&self, world: [f32; 2]) -> [f32; 2] {
         [world[0] * self.zoom + self.pan_x, world[1] * self.zoom + self.pan_y]
@@ -30,10 +30,26 @@ impl Camera {
         self.pan_y += dy;
     }
 
+    pub fn pan(&mut self, dx: f32, dy: f32) {
+        self.pan_by(dx, dy);
+    }
+
     pub fn zoom_at(&mut self, pointer: [f32; 2], factor: f32) {
         let anchor = self.screen_to_world(pointer);
         self.zoom = (self.zoom * factor).clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
         self.pan_x = pointer[0] - anchor[0] * self.zoom;
         self.pan_y = pointer[1] - anchor[1] * self.zoom;
+    }
+
+    pub fn zoom_by(&mut self, factor: f32, pivot: [f32; 2]) {
+        self.zoom_at(pivot, factor);
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn zoom_percent(&self) -> u32 {
+        (self.zoom * 100.0).round() as u32
     }
 }

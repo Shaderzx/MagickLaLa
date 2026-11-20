@@ -32,10 +32,30 @@ function pngFacts(bytes: Buffer) {
     offset += 12 + length;
   }
   const raw = inflateSync(Buffer.concat(chunks));
-  const counts = new Array<number>(256).fill(0);
-  for (const byte of raw) counts[byte] += 1;
-  const entropy = counts.reduce((sum, count) => (count === 0 ? sum : sum - (count / raw.length) * Math.log2(count / raw.length)), 0);
-  return { width, height, entropy };
+  const channels = { 0: 1, 2: 3, 4: 2, 6: 4 }[bytes[25]] ?? 4;
+  const stride = width * channels;
+  const pixels = Buffer.alloc(stride * height);
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[y * (stride + 1)];
+    const line = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+    for (let x = 0; x < stride; x += 1) {
+      const left = x >= channels ? pixels[y * stride + x - channels] : 0;
+      const up = y > 0 ? pixels[(y - 1) * stride + x] : 0;
+      const upLeft = y > 0 && x >= channels ? pixels[(y - 1) * stride + x - channels] : 0;
+      const estimate = left + up - upLeft;
+      const nearest = [left, up, upLeft].sort((a, b) => Math.abs(estimate - a) - Math.abs(estimate - b))[0];
+      const predictor = [0, left, up, (left + up) >> 1, Math.abs(estimate - left) <= Math.abs(estimate - up) && Math.abs(estimate - left) <= Math.abs(estimate - upLeft) ? left : Math.abs(estimate - up) <= Math.abs(estimate - upLeft) ? up : nearest][filter];
+      pixels[y * stride + x] = (line[x] + predictor) & 0xff;
+    }
+  }
+  const colors = new Map<number, number>();
+  for (let offset = 0; offset < pixels.length; offset += channels) {
+    const color = pixels.readUIntBE(offset, Math.min(channels, 3));
+    colors.set(color, (colors.get(color) ?? 0) + 1);
+  }
+  const total = pixels.length / channels;
+  const entropy = [...colors.values()].reduce((sum, count) => sum - (count / total) * Math.log2(count / total), 0);
+  return { width, height, distinctColors: colors.size, entropy };
 }
 
 test('studio probe drives spawn, drag, validate, run trace and theme toggle, then renders desktop and compact PNGs headlessly', async () => {
@@ -83,6 +103,7 @@ test('studio probe drives spawn, drag, validate, run trace and theme toggle, the
       const facts = pngFacts(bytes);
       expect(facts.width / facts.height).toBeCloseTo(width / height, 2);
       expect(facts.width).toBeGreaterThanOrEqual(width);
+      expect(facts.distinctColors).toBeGreaterThan(200);
       expect(facts.entropy).toBeGreaterThan(1.5);
     }
   } finally {
