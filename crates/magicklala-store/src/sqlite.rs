@@ -98,6 +98,13 @@ impl SqliteStore {
         Ok(release)
     }
 
+    pub async fn is_on_disk(&self) -> StoreResult<bool> {
+        let rows = sqlx::query("PRAGMA database_list").fetch_all(&self.pool).await?;
+        Ok(rows.iter().any(|row| {
+            row.try_get::<String, _>("name").ok().as_deref() == Some("main") && row.try_get::<String, _>("file").ok().is_some_and(|file| !file.is_empty())
+        }))
+    }
+
     pub async fn journal_mode(&self) -> StoreResult<String> {
         Ok(sqlx::query_scalar("PRAGMA journal_mode").fetch_one(&self.pool).await?)
     }

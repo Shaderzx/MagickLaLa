@@ -11,9 +11,7 @@ use magicklala_graph::{
     SpellId, SpellValidator, SubgraphKey, SubgraphRef, SubgraphResolver, TraceEvent, Value, VariableDef, Wire, WireId, resolve_subgraphs_from,
 };
 use magicklala_nodes::{HttpLlmGateway, InMemoryKnowledge, InMemoryMemory, LlmGatewayConfig, default_registry};
-use magicklala_store::{
-    NewProject, NewSpell, NewSpellRelease, ProjectId, Repository, SpellRecord, SpellRecordId, SpellRelease, SqliteStore, StoreError, is_in_memory_database_url,
-};
+use magicklala_store::{NewProject, NewSpell, NewSpellRelease, ProjectId, Repository, SpellRecord, SpellRecordId, SpellRelease, SqliteStore, StoreError};
 use rune::{App, AppSpec, Color, Cx, El, ScrollSpec, TextEdit, TextStyle, Waker, col, el, row, text, text_input};
 use serde_json::json;
 use thiserror::Error;
@@ -120,21 +118,25 @@ impl StudioWorkspace {
 
 pub const IN_MEMORY_DATABASE_URL: &str = "sqlite::memory:";
 
-pub fn is_in_memory_db_path(path: Option<&Path>) -> bool {
-    let Some(path) = path else { return true };
-    let text = path.to_string_lossy();
-    let trimmed = text.trim();
-    let lowered = trimmed.to_ascii_lowercase();
-    matches!(trimmed, "" | ":memory:" | "sqlite::memory:" | "sqlite://:memory:")
-        || lowered.starts_with("file::memory:")
-        || lowered.contains("mode=memory")
-        || is_in_memory_database_url(trimmed)
+fn escaped_file_path(path: &str) -> String {
+    path.chars()
+        .map(|character| match character {
+            '%' => "%25".to_owned(),
+            '?' => "%3F".to_owned(),
+            '#' => "%23".to_owned(),
+            other => other.to_string(),
+        })
+        .collect()
 }
 
 fn studio_database_url(db_path: Option<&Path>) -> String {
-    match db_path.filter(|path| !is_in_memory_db_path(Some(path))) {
-        Some(path) => format!("sqlite://{}", path.display()),
-        None => IN_MEMORY_DATABASE_URL.to_owned(),
+    let text = db_path.map(|path| path.to_string_lossy().into_owned()).unwrap_or_default();
+    let trimmed = text.trim();
+    match trimmed {
+        "" | ":memory:" => IN_MEMORY_DATABASE_URL.to_owned(),
+        _ if trimmed.starts_with("sqlite:") => trimmed.to_owned(),
+        _ if trimmed.starts_with("file:") => format!("sqlite:{trimmed}"),
+        _ => format!("sqlite://{}", escaped_file_path(trimmed)),
     }
 }
 
@@ -153,29 +155,24 @@ async fn scoped_records(repository: &SqliteStore, project: Option<ProjectId>) ->
     if let Some(project) = project {
         return repository.list_spells(project).await;
     }
-    let projects = repository.list_projects().await?;
-    let scope: Vec<ProjectId> = match projects.iter().find(|project| project.name == STUDIO_PROJECT) {
-        Some(studio) => vec![studio.id],
-        None => projects.iter().map(|project| project.id).collect(),
+    let Some(studio) = repository.list_projects().await?.into_iter().find(|project| project.name == STUDIO_PROJECT) else {
+        return Ok(Vec::new());
     };
-    let mut records = Vec::new();
-    for project in scope {
-        records.extend(repository.list_spells(project).await?);
-    }
-    Ok(records)
+    repository.list_spells(studio.id).await
 }
 
 impl StudioStore {
     pub fn open(db_path: Option<&Path>) -> Result<Self, StudioError> {
         let url = studio_database_url(db_path);
         let target = url.clone();
-        let repository = block(move || async move {
+        let (repository, persistent) = block(move || async move {
             let store = SqliteStore::connect(&target).await?;
             store.migrate().await?;
-            Ok::<_, magicklala_store::StoreError>(store)
+            let persistent = store.is_on_disk().await?;
+            Ok::<_, magicklala_store::StoreError>((store, persistent))
         })?
         .map_err(|error| StudioError::Store(error.to_string()))?;
-        Ok(Self { repository, spell_record_id: None, project_id: None, persistent: !is_in_memory_db_path(db_path), url })
+        Ok(Self { repository, spell_record_id: None, project_id: None, persistent, url })
     }
 
     pub fn project_id(&self) -> Option<ProjectId> {
@@ -805,6 +802,7 @@ impl StudioApp {
         self.spell.subgraphs = subgraphs;
         self.draft_status = None;
         self.publish_status = None;
+        self.store_error = None;
         self.active_release_version = None;
         true
     }

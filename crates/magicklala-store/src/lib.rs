@@ -36,8 +36,34 @@ pub fn is_in_memory_database_url(url: &str) -> bool {
     let url = url.trim();
     let target = url.strip_prefix("sqlite:").unwrap_or(url);
     let target = target.strip_prefix("//").unwrap_or(target);
+    let target = target.strip_prefix("file:").unwrap_or(target);
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    path == ":memory:" || query.split('&').filter_map(|pair| pair.split_once('=')).any(|(key, value)| key == "mode" && value == "memory")
+    path == ":memory:"
+        || query.split('&').filter_map(|pair| pair.split_once('=')).any(|(key, value)| form_decoded(key) == "mode" && form_decoded(value) == "memory")
+}
+
+fn form_decoded(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let escaped = bytes
+            .get(index + 1..index + 3)
+            .filter(|digits| bytes[index] == b'%' && digits.iter().all(u8::is_ascii_hexdigit))
+            .and_then(|digits| std::str::from_utf8(digits).ok())
+            .and_then(|digits| u8::from_str_radix(digits, 16).ok());
+        match escaped {
+            Some(byte) => {
+                decoded.push(byte);
+                index += 3;
+            }
+            None => {
+                decoded.push(if bytes[index] == b'+' { b' ' } else { bytes[index] });
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 pub fn normalize_webhook_path(raw: &str) -> StoreResult<String> {

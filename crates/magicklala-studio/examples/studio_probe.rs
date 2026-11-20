@@ -1216,6 +1216,85 @@ fn out_of_band_release(db_path: &Path) -> Result<serde_json::Value, String> {
     });
     Ok(json!({ "recordId": record, "callNode": call.0, "opened": opened, "outside": { "version": outside.version }, "edited": edited, "published": published }))
 }
+fn added_subgraph_call(rt: &mut Runtime<StudioApp>, callee: &str) -> Result<NodeId, String> {
+    click(rt, "palette-flow-subgraph")?;
+    let call = rt
+        .state
+        .canvas
+        .nodes
+        .last()
+        .filter(|card| card.kind == "flow/subgraph")
+        .map(|card| card.id.clone())
+        .ok_or("palette did not add a flow/subgraph node")?;
+    type_prompt(rt, &call, callee)?;
+    connect(rt, ("trigger", "out"), (&call.0, "in"))?;
+    Ok(call)
+}
+
+fn foreign_child(db_path: &Path) -> Result<serde_json::Value, String> {
+    let mut rt = studio_at(db_path)?;
+    let opened_project = rt.state.store.as_ref().and_then(StudioStore::project_id);
+    let url = format!("sqlite://{}", db_path.display());
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
+    let child = runtime
+        .block_on(async {
+            let store = SqliteStore::connect(&url).await?;
+            store.migrate().await?;
+            let other = store.create_project(NewProject { name: "Other".to_owned(), description: String::new() }).await?;
+            let graph = reply_spell("foreign child", SpellGraph::new("foreign child").id, "from Other");
+            store.create_spell(NewSpell { project_id: other.id, name: "foreign child".to_owned(), graph }).await
+        })
+        .map_err(|error| error.to_string())?;
+    drop(runtime);
+    let call = added_subgraph_call(&mut rt, &child.id.0.to_string())?;
+    let edited = json!({ "subgraphs": rt.state.spell.subgraphs });
+    let checked = validation_of(&mut rt)?;
+    let validation = json!({ "validation": checked["validation"], "errors": checked["errors"] });
+    click(&mut rt, "publish")?;
+    let published = json!({
+        "version": rt.state.last_published.as_ref().map(|release| release.version),
+        "storeError": rt.state.store_error,
+        "releases": release_versions(&rt.state),
+    });
+    Ok(json!({
+        "openedProject": opened_project,
+        "childRecordId": child.id,
+        "callNode": call.0,
+        "edited": edited,
+        "validation": validation,
+        "published": published,
+    }))
+}
+
+fn edited_llm(rt: &mut Runtime<StudioApp>, prompt: &str) -> Result<serde_json::Value, String> {
+    type_prompt(rt, &NodeId::from("llm"), prompt)?;
+    rt.update(|app, _| app.sync_spell());
+    rt.frame(0.0);
+    let mut view = status_view(rt);
+    view["openError"] = json!(rt.state.open_error);
+    Ok(view)
+}
+
+fn edit_clears_store_error(db_path: &Path, unopenable: &Path) -> Result<serde_json::Value, String> {
+    let mut rt = studio_at(db_path)?;
+    added_subgraph_call(&mut rt, &SpellGraph::new("missing child").id.0.to_string())?;
+    click(&mut rt, "publish")?;
+    let refused = status_view(&rt);
+    let refused_edited = edited_llm(&mut rt, "edited after the refused publish for {{content}}")?;
+    let mut blocked = headless(StudioApp::launch(&StudioConfig { db_path: Some(unopenable.to_path_buf()), ..StudioConfig::default() }));
+    click(&mut blocked, "save")?;
+    let unopenable_saved = status_view(&blocked);
+    let unopenable_edited = edited_llm(&mut blocked, "edited after the refused save for {{content}}")?;
+    click(&mut blocked, "save")?;
+    let unopenable_saved_again = status_view(&blocked);
+    Ok(json!({
+        "refused": refused,
+        "refusedEdited": refused_edited,
+        "unopenable": unopenable_saved,
+        "unopenableEdited": unopenable_edited,
+        "unopenableSavedAgain": unopenable_saved_again,
+    }))
+}
 fn number(raw: Option<&String>, name: &str) -> Result<u64, String> {
     raw.ok_or_else(|| format!("missing {name}"))?.parse().map_err(|error| format!("{name}: {error}"))
 }
@@ -1233,6 +1312,11 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("visible-status") => visible_status(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("unopenable-db") => unopenable_db(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("project-scope") => project_scope(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("foreign-child") => foreign_child(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("edit-clears-store-error") => {
+            let db = args.get(1).ok_or("missing database path")?;
+            edit_clears_store_error(Path::new(db), Path::new(args.get(2).ok_or("missing unopenable database path")?))
+        }
         Some("out-of-band-release") => out_of_band_release(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("publish-renamed") => {
             let db = args.get(1).ok_or("missing database path")?;
