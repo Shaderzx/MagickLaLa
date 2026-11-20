@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use magicklala_graph::{NodeContext, NodeError, NodeOutcome, Value};
 use rhai::{Dynamic, Engine, Scope};
 use tokio_util::sync::CancellationToken;
@@ -7,7 +10,7 @@ use crate::nodes::{config_list, config_text, config_u64, value};
 const DEFAULT_MAX_OPERATIONS: u64 = 100_000;
 const MAX_ALLOWED_OPERATIONS: u64 = 10_000_000;
 
-fn sandboxed_engine(max_operations: u64, cancellation: CancellationToken) -> Engine {
+fn sandboxed_engine(max_operations: u64, cancellation: CancellationToken, aborted: Arc<AtomicBool>) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_operations(max_operations);
     engine.set_max_expr_depths(64, 32);
@@ -18,7 +21,14 @@ fn sandboxed_engine(max_operations: u64, cancellation: CancellationToken) -> Eng
     engine.set_max_modules(0);
     engine.on_print(|_| {});
     engine.on_debug(|_, _, _| {});
-    engine.on_progress(move |_| if cancellation.is_cancelled() { Some(Dynamic::UNIT) } else { None });
+    engine.on_progress(move |_| {
+        if cancellation.is_cancelled() {
+            aborted.store(true, Ordering::SeqCst);
+            Some(Dynamic::UNIT)
+        } else {
+            None
+        }
+    });
     engine
 }
 
@@ -28,13 +38,18 @@ fn evaluate(
     max_operations: u64,
     cancellation: CancellationToken,
 ) -> Result<serde_json::Value, NodeError> {
-    let engine = sandboxed_engine(max_operations, cancellation);
+    let aborted = Arc::new(AtomicBool::new(false));
+    let engine = sandboxed_engine(max_operations, cancellation, Arc::clone(&aborted));
     let mut scope = Scope::new();
     for (name, json) in bindings {
         let dynamic = rhai::serde::to_dynamic(json).map_err(|error| NodeError::Script(error.to_string()))?;
         scope.push_dynamic(name, dynamic);
     }
-    let result: Dynamic = engine.eval_with_scope(&mut scope, script).map_err(|error| NodeError::Script(error.to_string()))?;
+    let evaluated = engine.eval_with_scope::<Dynamic>(&mut scope, script);
+    if aborted.load(Ordering::SeqCst) {
+        return Err(NodeError::Cancelled);
+    }
+    let result = evaluated.map_err(|error| NodeError::Script(error.to_string()))?;
     rhai::serde::from_dynamic(&result).map_err(|error| NodeError::Script(error.to_string()))
 }
 

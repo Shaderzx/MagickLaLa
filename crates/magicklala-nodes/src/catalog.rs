@@ -70,6 +70,7 @@ impl Def {
         .field("model", FieldKind::Model { provider: None }, Some(json!("gpt-4o-mini")), false)
         .field("temperature", FieldKind::Number { min: Some(0.0), max: Some(2.0) }, None, false)
         .field("max_tokens", FieldKind::Number { min: Some(1.0), max: None }, None, false)
+        .field("credential_id", FieldKind::Credential { provider: "llm".to_owned() }, None, false)
     }
 
     fn build(self, op: Op) -> Arc<dyn NodeExecutor> {
@@ -167,6 +168,7 @@ fn flow() -> Vec<Arc<dyn NodeExecutor>> {
             .required("condition", SocketType::Bool)
             .output("body", SocketType::Flow)
             .output("completed", SocketType::Flow)
+            .field("max_iterations", FieldKind::Number { min: Some(1.0), max: None }, Some(json!(1000)), false)
             .build(Op::WhileLoop),
         Def::new("flow/do_once", "Do Once", "flow", "Lets flow through only the first time until reset")
             .flow_in()

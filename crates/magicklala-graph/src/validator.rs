@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{NodeId, NodeSpec, SPELL_SCHEMA_VERSION, SpellGraph, ValidationError};
+use crate::{NodeId, NodeSpec, SPELL_SCHEMA_VERSION, SpellGraph, ValidationError, WAIT_FOR_ALL_KIND, Wire, WireId};
+
+const CONDITIONAL_KINDS: [&str; 2] = ["flow/branch", "flow/switch"];
 
 pub struct SpellValidator {
     specs: BTreeMap<String, NodeSpec>,
@@ -30,6 +32,7 @@ impl SpellValidator {
         check_variables(graph, &mut errors);
         let value_edges = self.check_wires(graph, &mut errors);
         self.check_required_inputs(graph, &mut errors);
+        self.check_exclusive_joins(graph, &mut errors);
         for cycle in find_cycles(graph, &value_edges) {
             errors.push(ValidationError::ValueCycle(cycle));
         }
@@ -105,6 +108,52 @@ impl SpellValidator {
             value_edges.entry(&wire.from_node).or_default().push(&wire.to_node);
         }
         value_edges
+    }
+
+    fn incoming_flow<'g>(&self, graph: &'g SpellGraph, node: &'g NodeId) -> Vec<&'g Wire> {
+        let Some(spec) = self.spec_of(graph, node) else {
+            return Vec::new();
+        };
+        graph.wires_into(node).filter(|wire| spec.resolve_input(&wire.to_socket).is_some_and(|socket| socket.ty.is_flow())).collect()
+    }
+
+    fn conditional_guard<'g>(&self, graph: &'g SpellGraph, wire: &'g Wire) -> Option<(&'g NodeId, &'g str)> {
+        let mut current = wire;
+        let mut visited = BTreeSet::new();
+        loop {
+            let source = graph.node(&current.from_node)?;
+            if CONDITIONAL_KINDS.contains(&source.kind.as_str()) {
+                return Some((&current.from_node, current.from_socket.as_str()));
+            }
+            if !visited.insert(&current.from_node) {
+                return None;
+            }
+            match self.incoming_flow(graph, &current.from_node).as_slice() {
+                [only] => current = only,
+                _ => return None,
+            }
+        }
+    }
+
+    fn check_exclusive_joins(&self, graph: &SpellGraph, errors: &mut Vec<ValidationError>) {
+        for join in graph.nodes.iter().filter(|node| node.kind == WAIT_FOR_ALL_KIND) {
+            let mut guarded: BTreeMap<&NodeId, Vec<(&str, &WireId)>> = BTreeMap::new();
+            for wire in self.incoming_flow(graph, &join.id) {
+                if let Some((source, socket)) = self.conditional_guard(graph, wire) {
+                    guarded.entry(source).or_default().push((socket, &wire.id));
+                }
+            }
+            for (source, arrivals) in guarded {
+                let sockets: BTreeSet<&str> = arrivals.iter().map(|(socket, _)| *socket).collect();
+                if sockets.len() > 1 {
+                    errors.push(ValidationError::ExclusiveJoin {
+                        node: join.id.clone(),
+                        conditional: source.clone(),
+                        wires: arrivals.into_iter().map(|(_, wire)| wire.clone()).collect(),
+                    });
+                }
+            }
+        }
     }
 
     fn check_required_inputs(&self, graph: &SpellGraph, errors: &mut Vec<ValidationError>) {

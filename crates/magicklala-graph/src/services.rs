@@ -31,6 +31,17 @@ pub trait NodeContext: Send {
     fn knowledge(&self) -> Option<Arc<dyn KnowledgeService>>;
     fn events(&self) -> Arc<dyn EventEmitter>;
     fn cancellation(&self) -> CancellationToken;
+    fn agent_id(&self) -> Option<&str> {
+        None
+    }
+    fn allow_private_http(&self) -> bool {
+        false
+    }
+}
+
+#[async_trait]
+pub trait CredentialResolver: Send + Sync {
+    async fn resolve(&self, credential_id: &str) -> Result<String, NodeError>;
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
