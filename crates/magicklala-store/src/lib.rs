@@ -32,6 +32,14 @@ pub enum StoreError {
 
 pub type StoreResult<T> = Result<T, StoreError>;
 
+pub fn is_in_memory_database_url(url: &str) -> bool {
+    let url = url.trim();
+    let target = url.strip_prefix("sqlite:").unwrap_or(url);
+    let target = target.strip_prefix("//").unwrap_or(target);
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    path == ":memory:" || query.split('&').filter_map(|pair| pair.split_once('=')).any(|(key, value)| key == "mode" && value == "memory")
+}
+
 pub fn normalize_webhook_path(raw: &str) -> StoreResult<String> {
     let segments: Vec<&str> = raw.trim().split('/').map(str::trim).filter(|segment| !segment.is_empty()).collect();
     if segments.is_empty() {
@@ -66,6 +74,12 @@ pub trait Repository: Send + Sync {
     async fn reveal_credential(&self, id: CredentialId, vault: &dyn CryptoVault) -> StoreResult<String>;
     async fn list_credentials(&self, project: ProjectId) -> StoreResult<Vec<CredentialMeta>>;
     async fn delete_credential(&self, id: CredentialId) -> StoreResult<()>;
+    async fn delete_webhook(&self, id: WebhookId) -> StoreResult<()> {
+        Err(StoreError::Invalid(format!("deleting webhook {} is not supported", id.0)))
+    }
+    async fn clear_memories(&self, _agent: AgentId) -> StoreResult<u64> {
+        Err(StoreError::Invalid("clearing memories is not supported".to_owned()))
+    }
     async fn append_chat(&self, input: NewChatMessage) -> StoreResult<ChatMessage>;
     async fn chat_history(&self, agent: AgentId, channel: &str, limit: u32) -> StoreResult<Vec<ChatMessage>>;
     async fn add_memory(&self, input: NewMemory) -> StoreResult<MemoryRecord>;
@@ -76,6 +90,9 @@ pub trait Repository: Send + Sync {
     async fn find_webhook(&self, path: &str) -> StoreResult<WebhookRecord>;
     async fn record_run(&self, run: ExecutionRun) -> StoreResult<()>;
     async fn list_runs(&self, agent: AgentId, limit: u32) -> StoreResult<Vec<ExecutionRun>>;
+    async fn find_run_by_correlation(&self, _agent: AgentId, _correlation_id: &str) -> StoreResult<Option<ExecutionRun>> {
+        Ok(None)
+    }
     async fn log_llm_request(&self, log: LlmRequestLog) -> StoreResult<()>;
     async fn get_plugin_state(&self, agent: AgentId, plugin: &str) -> StoreResult<Option<PluginStateRecord>>;
     async fn put_plugin_state(&self, state: PluginStateRecord) -> StoreResult<()>;
@@ -93,7 +110,13 @@ impl SqliteStore {
             .foreign_keys(true)
             .journal_mode(SqliteJournalMode::Wal)
             .busy_timeout(std::time::Duration::from_secs(10));
-        let pool = SqlitePoolOptions::new().max_connections(8).connect_with(options).await?;
+        let pool = if is_in_memory_database_url(url) {
+            SqlitePoolOptions::new().max_connections(1).min_connections(1).idle_timeout(None).max_lifetime(None)
+        } else {
+            SqlitePoolOptions::new().max_connections(8)
+        }
+        .connect_with(options)
+        .await?;
         Ok(Self { pool })
     }
 

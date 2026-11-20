@@ -4,10 +4,10 @@ use std::error::Error;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use magicklala_embedder::{ChunkConfig, DocumentInput, DocumentKind, Embedder, HttpEmbedder, KnowledgePipeline, LocalHashEmbedder, extract_text};
-use magicklala_graph::SpellGraph;
+use magicklala_graph::{RunStatus, SpellGraph};
 use magicklala_store::{
-    AesGcmVault, AgentId, CredentialId, KnowledgeChunk, KnowledgeDocId, NewAgent, NewCredential, NewKnowledgeDoc, NewMemory, NewProject, NewSpell,
-    NewSpellRelease, NewWebhook, ProjectId, Repository, SqliteStore, UpdateAgent,
+    AesGcmVault, AgentId, CredentialId, CryptoVault, ExecutionRun, KnowledgeChunk, KnowledgeDocId, NewAgent, NewCredential, NewKnowledgeDoc, NewMemory,
+    NewProject, NewSpell, NewSpellRelease, NewWebhook, ProjectId, Repository, SpellRecordId, SqliteStore, UpdateAgent, WebhookId, is_in_memory_database_url,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -16,7 +16,17 @@ use uuid::Uuid;
 type ProbeResult<T> = Result<T, Box<dyn Error>>;
 
 #[tokio::main]
-async fn main() -> ProbeResult<()> {
+async fn main() -> std::process::ExitCode {
+    match probe().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn probe() -> ProbeResult<()> {
     let mut args = std::env::args().skip(1);
     let command = args.next().ok_or("usage: store_probe <command> <json-spec>")?;
     let spec: Value = serde_json::from_str(&args.next().ok_or("missing json spec argument")?)?;
@@ -31,6 +41,12 @@ async fn main() -> ProbeResult<()> {
         "webhooks" => webhooks(&spec).await?,
         "concurrent-update" => concurrent_update(&spec).await?,
         "pinned-release" => pinned_release(&spec).await?,
+        "credential-guard" => credential_guard(&spec).await?,
+        "credential-release" => credential_release(&spec).await?,
+        "clear-memories" => clear_memories(&spec).await?,
+        "run-correlation" => run_correlation(&spec).await?,
+        "vault-keys" => vault_keys(&spec)?,
+        "memory-urls" => memory_urls(&spec).await?,
         other => return Err(format!("unknown command {other}").into()),
     };
     println!("{}", serde_json::to_string(&output)?);
@@ -330,4 +346,168 @@ async fn pinned_release(spec: &Value) -> ProbeResult<Value> {
         .err()
         .map(|error| error.to_string());
     Ok(json!({ "releases": releases, "draftDescription": store.get_spell(spell.id).await?.graph.description, "foreignGraphError": foreign }))
+}
+
+async fn credential_guard(spec: &Value) -> ProbeResult<Value> {
+    let store = open(spec).await?;
+    let vault = AesGcmVault::from_env_or_key(None)?;
+    let (project, agents) = project_with_agents(&store, "guarded").await?;
+    let credential = store
+        .put_credential(
+            NewCredential { project_id: project, name: "webhook-signing".to_owned(), provider: "webhook".to_owned(), secret: text(spec, "secret")?.to_owned() },
+            &vault,
+        )
+        .await?;
+    let webhook = store
+        .create_webhook(NewWebhook {
+            agent_id: agent_for(&agents, "primary")?,
+            path: text(spec, "path")?.to_owned(),
+            secret_credential_id: Some(credential.id),
+        })
+        .await?;
+    let blocked = store.delete_credential(credential.id).await.err().map(|error| error.to_string());
+    let signed = store.find_webhook(text(spec, "path")?).await?.secret_credential_id;
+    Ok(json!({ "webhookId": webhook.id, "credentialId": credential.id, "blockedError": blocked, "signedWebhookSecret": signed }))
+}
+
+async fn credential_release(spec: &Value) -> ProbeResult<Value> {
+    let store = open(spec).await?;
+    let webhook = WebhookId(Uuid::parse_str(text(spec, "webhookId")?)?);
+    let credential = CredentialId(Uuid::parse_str(text(spec, "credentialId")?)?);
+    store.delete_webhook(webhook).await?;
+    store.delete_credential(credential).await?;
+    let missing = store.delete_webhook(webhook).await.err().map(|error| error.to_string());
+    Ok(json!({ "webhookDeleted": true, "credentialDeleted": true, "missingWebhookError": missing }))
+}
+
+async fn recall(store: &SqliteStore, agent: AgentId, query: &[f32]) -> ProbeResult<Vec<String>> {
+    Ok(store.search_memories(agent, query, 10).await?.into_iter().map(|hit| hit.item.content).collect())
+}
+
+async fn clear_memories(spec: &Value) -> ProbeResult<Value> {
+    let store = open(spec).await?;
+    let (_, agents) = project_with_agents(&store, "forgetful").await?;
+    let embedder = LocalHashEmbedder::new(256);
+    for memory in list(spec, "memories")? {
+        let content = text(memory, "content")?;
+        store
+            .add_memory(NewMemory {
+                agent_id: agent_for(&agents, text(memory, "owner")?)?,
+                content: content.to_owned(),
+                embedding: Some(embedder.embed_one(content)),
+                metadata: json!({}),
+            })
+            .await?;
+    }
+    let query = embedder.embed_one(text(spec, "query")?);
+    let primary = agent_for(&agents, "primary")?;
+    let recall_before = recall(&store, primary, &query).await?;
+    let removed = store.clear_memories(primary).await?;
+    let recall_after = recall(&store, primary, &query).await?;
+    let removed_again = store.clear_memories(primary).await?;
+    let other_after = recall(&store, agent_for(&agents, "other")?, &query).await?;
+    Ok(
+        json!({ "recallBefore": recall_before, "removed": removed, "recallAfter": recall_after, "removedAgain": removed_again, "otherRecallAfter": other_after }),
+    )
+}
+
+fn correlated_run(agent: AgentId, spell: SpellRecordId, correlation: &str, age_seconds: i64) -> ExecutionRun {
+    let started_at = chrono::Utc::now() - chrono::Duration::seconds(age_seconds);
+    ExecutionRun {
+        run_id: Uuid::now_v7(),
+        agent_id: Some(agent),
+        spell_id: spell,
+        release_id: None,
+        status: RunStatus::Succeeded,
+        trigger: "event/on_message".to_owned(),
+        started_at,
+        finished_at: Some(started_at),
+        nodes_executed: 1,
+        error: None,
+        trace: json!({ "correlation_id": correlation, "channel": "probe" }),
+    }
+}
+
+async fn found_run(store: &SqliteStore, agent: AgentId, correlation: &str) -> ProbeResult<Value> {
+    Ok(match store.find_run_by_correlation(agent, correlation).await? {
+        Some(run) => json!({ "runId": run.run_id, "correlation": run.trace["correlation_id"] }),
+        None => Value::Null,
+    })
+}
+
+async fn run_correlation(spec: &Value) -> ProbeResult<Value> {
+    let store = open(spec).await?;
+    let (project, agents) = project_with_agents(&store, "correlated").await?;
+    let spell = store.create_spell(NewSpell { project_id: project, name: "correlated".to_owned(), graph: SpellGraph::new("correlated") }).await?;
+    let (primary, other) = (agent_for(&agents, "primary")?, agent_for(&agents, "other")?);
+    let (correlation, other_correlation) = (text(spec, "correlation")?, text(spec, "otherCorrelation")?);
+    let runs = [
+        ("primaryOlder", correlated_run(primary, spell.id, correlation, 120)),
+        ("primaryNewer", correlated_run(primary, spell.id, correlation, 5)),
+        ("primaryOther", correlated_run(primary, spell.id, other_correlation, 1)),
+        ("otherAgent", correlated_run(other, spell.id, correlation, 0)),
+    ];
+    let mut ids = serde_json::Map::new();
+    for (label, run) in runs {
+        ids.insert(label.to_owned(), json!(run.run_id));
+        store.record_run(run).await?;
+    }
+    Ok(json!({
+        "runs": ids,
+        "found": {
+            "primary": found_run(&store, primary, correlation).await?,
+            "primaryOther": found_run(&store, primary, other_correlation).await?,
+            "otherAgent": found_run(&store, other, correlation).await?,
+            "unknown": found_run(&store, primary, text(spec, "unknown")?).await?,
+        },
+    }))
+}
+
+fn sealed_round_trip(vault: &AesGcmVault, plaintext: &str) -> ProbeResult<String> {
+    Ok(String::from_utf8(vault.decrypt(&vault.encrypt(plaintext.as_bytes())?)?)?)
+}
+
+fn vault_keys(spec: &Value) -> ProbeResult<Value> {
+    let plaintext = text(spec, "plaintext")?;
+    let mut keys = Vec::new();
+    for key in list(spec, "keys")? {
+        let entry = match AesGcmVault::from_key_material(text(key, "material")?) {
+            Ok(vault) => json!({ "label": text(key, "label")?, "accepted": true, "error": null, "opened": sealed_round_trip(&vault, plaintext)? }),
+            Err(error) => json!({ "label": text(key, "label")?, "accepted": false, "error": error.to_string(), "opened": null }),
+        };
+        keys.push(entry);
+    }
+    Ok(json!({ "keys": keys }))
+}
+
+async fn project_names(store: &SqliteStore) -> ProbeResult<Vec<String>> {
+    let mut names: Vec<String> = store.list_projects().await?.into_iter().map(|project| project.name).collect();
+    names.sort();
+    Ok(names)
+}
+
+async fn memory_urls(spec: &Value) -> ProbeResult<Value> {
+    let classified: Vec<Value> = strings(spec, "urls")?.into_iter().map(|url| json!({ "url": url, "inMemory": is_in_memory_database_url(url) })).collect();
+    let shared = SqliteStore::connect("sqlite::memory:").await?;
+    shared.migrate().await?;
+    let mut writers = tokio::task::JoinSet::new();
+    for index in 0..count(spec, "writers")? {
+        let store = shared.clone();
+        writers.spawn(async move { store.create_project(NewProject { name: format!("writer-{index:02}"), description: String::new() }).await });
+    }
+    let mut errors = Vec::new();
+    while let Some(joined) = writers.join_next().await {
+        match joined {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => errors.push(error.to_string()),
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+    let concurrent = project_names(&shared).await?;
+    let on_disk = SqliteStore::connect(text(spec, "fileUrl")?).await?;
+    on_disk.migrate().await?;
+    on_disk.create_project(NewProject { name: "on-disk".to_owned(), description: String::new() }).await?;
+    let file_projects = project_names(&on_disk).await?;
+    on_disk.pool().close().await;
+    Ok(json!({ "classified": classified, "concurrent": { "errors": errors, "projects": concurrent }, "file": { "projects": file_projects } }))
 }

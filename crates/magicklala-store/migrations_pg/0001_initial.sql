@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS webhooks (
     id UUID PRIMARY KEY,
     agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     path TEXT NOT NULL UNIQUE,
-    secret_credential_id UUID REFERENCES credentials(id) ON DELETE SET NULL,
+    secret_credential_id UUID REFERENCES credentials(id) ON DELETE RESTRICT,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use magicklala_canvas::{CanvasState, ExecutionStatus, category_accent, interactive_canvas_view, status_color};
 use magicklala_graph::{
@@ -10,9 +12,10 @@ use magicklala_graph::{
 };
 use magicklala_nodes::{HttpLlmGateway, InMemoryKnowledge, InMemoryMemory, LlmGatewayConfig, default_registry};
 use magicklala_store::{NewProject, NewSpell, NewSpellRelease, Repository, SpellRecordId, SpellRelease, SqliteStore};
-use rune::{App, AppSpec, Color, Cx, El, ScrollSpec, TextEdit, TextStyle, col, el, row, text, text_input};
+use rune::{App, AppSpec, Color, Cx, El, ScrollSpec, TextEdit, TextStyle, Waker, col, el, row, text, text_input};
 use serde_json::json;
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 
 const TITLE: &str = "MagickLaLa Studio";
 pub const TOOLBAR_HEIGHT: f32 = 48.0;
@@ -31,10 +34,19 @@ pub const STUDIO_SENDER: &str = "studio-user";
 pub const CHAT_TRIGGER_KIND: &str = "event/on_message";
 const REPLY_OUTPUTS: [&str; 2] = ["reply", "content"];
 const SENT_OUTPUT_SUFFIX: &str = ".sent";
+pub const DEFAULT_RUN_TIMEOUT: Duration = Duration::from_secs(60);
+pub const PROMPT_EDITOR_PADDING: f32 = 10.0;
+pub const PROMPT_EDITOR_HEIGHT: f32 = 172.0;
+pub const COMPACT_PROMPT_EDITOR_HEIGHT: f32 = 148.0;
+pub const COMPACT_INSPECTOR_BELOW: f32 = 720.0;
+pub const RUN_SLOT_WIDTH: f32 = 88.0;
+pub const COMPACT_RUN_SLOT_WIDTH: f32 = 64.0;
+const PUBLISH_NOTES: &str = "Published from Studio";
 
 static LAUNCH_SIZE: Mutex<Option<(f32, f32)>> = Mutex::new(None);
 static LAUNCH_THEME: Mutex<Option<Theme>> = Mutex::new(None);
 static LAUNCH_DB: Mutex<Option<PathBuf>> = Mutex::new(None);
+static LAUNCH_RUN_TIMEOUT: Mutex<Option<Duration>> = Mutex::new(None);
 static RUNTIME: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
 
 #[derive(Debug, Error)]
@@ -51,11 +63,12 @@ pub enum StudioError {
 pub struct StudioConfig {
     pub size: (f32, f32),
     pub db_path: Option<PathBuf>,
+    pub run_timeout: Duration,
 }
 
 impl Default for StudioConfig {
     fn default() -> Self {
-        Self { size: (1280.0, 800.0), db_path: None }
+        Self { size: (1280.0, 800.0), db_path: None, run_timeout: DEFAULT_RUN_TIMEOUT }
     }
 }
 
@@ -80,6 +93,7 @@ where
 
 pub struct StudioStore {
     repository: SqliteStore,
+    spell_record_id: Option<SpellRecordId>,
     pub url: String,
 }
 
@@ -93,10 +107,14 @@ impl StudioStore {
             Ok::<_, magicklala_store::StoreError>(store)
         })?
         .map_err(|error| StudioError::Store(error.to_string()))?;
-        Ok(Self { repository, url })
+        Ok(Self { repository, spell_record_id: None, url })
     }
 
-    fn spell_record(&self, spell: &SpellGraph) -> Result<SpellRecordId, StudioError> {
+    pub fn spell_record_id(&self) -> Option<SpellRecordId> {
+        self.spell_record_id
+    }
+
+    fn resolve_spell_record(&self, spell: &SpellGraph) -> Result<SpellRecordId, StudioError> {
         let repository = self.repository.clone();
         let spell = spell.clone();
         block(move || async move {
@@ -106,7 +124,7 @@ impl StudioStore {
                     repository.create_project(NewProject { name: STUDIO_PROJECT.to_owned(), description: "Spells published from Studio".to_owned() }).await?
                 }
             };
-            let existing = repository.list_spells(project.id).await?.into_iter().find(|record| record.name == spell.name);
+            let existing = repository.list_spells(project.id).await?.into_iter().find(|record| record.graph.id == spell.id);
             let record = match existing {
                 Some(record) => record,
                 None => repository.create_spell(NewSpell { project_id: project.id, name: spell.name.clone(), graph: spell.clone() }).await?,
@@ -116,15 +134,19 @@ impl StudioStore {
         .map_err(|error| StudioError::Store(error.to_string()))
     }
 
-    pub fn publish(&self, spell: &SpellGraph) -> Result<SpellRelease, StudioError> {
-        let id = self.spell_record(spell)?;
+    pub fn publish(&mut self, spell: &SpellGraph) -> Result<SpellRelease, StudioError> {
+        let id = match self.spell_record_id {
+            Some(id) => id,
+            None => self.resolve_spell_record(spell)?,
+        };
         let repository = self.repository.clone();
         let graph = spell.clone();
-        block(move || async move {
-            repository.save_spell_graph(id, graph).await?;
-            repository.create_release(NewSpellRelease { spell_id: id, notes: "Published from Studio".to_owned() }).await
+        let release = block(move || async move {
+            repository.create_release_with_graph(NewSpellRelease { spell_id: id, notes: PUBLISH_NOTES.to_owned() }, Some(graph)).await
         })?
-        .map_err(|error| StudioError::Store(error.to_string()))
+        .map_err(|error| StudioError::Store(error.to_string()))?;
+        self.spell_record_id = Some(release.spell_id);
+        Ok(release)
     }
 
     pub fn latest_release(&self) -> Result<Option<(SpellGraph, Vec<SpellRelease>)>, StudioError> {
@@ -150,21 +172,50 @@ impl StudioStore {
         })?
         .map_err(|error| StudioError::Store(error.to_string()))
     }
+
+    fn adopt_latest_release(&mut self) -> Result<Option<(SpellGraph, Vec<SpellRelease>)>, StudioError> {
+        let latest = self.latest_release()?;
+        if let Some(release) = latest.as_ref().and_then(|(_, releases)| releases.last()) {
+            self.spell_record_id = Some(release.spell_id);
+        }
+        Ok(latest)
+    }
 }
 
-#[derive(Default)]
-struct TraceCollector(Mutex<Vec<TraceEvent>>);
+#[derive(Debug, Clone, PartialEq)]
+pub enum BackgroundMessage {
+    Trace(TraceEvent),
+    Finished(Result<RunSummary, String>),
+    TimedOut,
+}
 
-impl EventEmitter for TraceCollector {
+#[derive(Clone)]
+struct BackgroundChannel {
+    sender: Sender<BackgroundMessage>,
+    waker: Option<Waker>,
+}
+
+impl BackgroundChannel {
+    fn deliver(&self, message: BackgroundMessage) {
+        if self.sender.send(message).is_ok()
+            && let Some(wake) = &self.waker
+        {
+            wake();
+        }
+    }
+}
+
+impl EventEmitter for BackgroundChannel {
     fn emit(&self, event: TraceEvent) {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).push(event);
+        self.deliver(BackgroundMessage::Trace(event));
     }
 }
 
-impl TraceCollector {
-    fn take(&self) -> Vec<TraceEvent> {
-        std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner))
-    }
+struct ActiveRun {
+    token: CancellationToken,
+    handle: tokio::task::JoinHandle<()>,
+    receiver: Receiver<BackgroundMessage>,
+    reply_to_chat: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +243,20 @@ pub struct RunReport {
 impl RunReport {
     fn invalid(error: String) -> Self {
         Self { outcome: RunOutcome::Invalid, replies: Vec::new(), error: Some(error) }
+    }
+
+    fn stopped(status: RunStatus, error: String) -> Self {
+        Self { outcome: RunOutcome::Finished(status), replies: Vec::new(), error: Some(error) }
+    }
+
+    fn chat_reply(&self, number: u32) -> String {
+        match (self.replies.is_empty(), self.outcome, &self.error) {
+            (false, _, _) => self.replies.join("\n"),
+            (true, RunOutcome::Finished(RunStatus::Cancelled), _) => format!("Run #{number} cancelled."),
+            (true, RunOutcome::Finished(RunStatus::TimedOut), Some(error)) => format!("Run #{number} stopped: {error}."),
+            (true, _, Some(error)) => format!("Run #{number} {}: {error}", self.outcome.label().to_lowercase()),
+            (true, _, None) => format!("Run #{number} finished without a reply."),
+        }
     }
 
     fn from_summary(summary: &RunSummary, failure: Option<String>) -> Self {
@@ -310,14 +375,21 @@ pub struct StudioApp {
     pub last_published: Option<SpellRelease>,
     pub store: Option<StudioStore>,
     pub store_error: Option<String>,
+    pub run_timeout: Duration,
+    run_started: Option<Instant>,
+    active: Option<ActiveRun>,
+    stopping: Vec<tokio::task::JoinHandle<()>>,
+    waker: Option<Waker>,
 }
 
 impl StudioApp {
     pub fn demo() -> Self {
         let db_path = LAUNCH_DB.lock().ok().and_then(|path| path.clone());
-        let mut app = Self::open(&StudioConfig { db_path, ..StudioConfig::default() }).unwrap_or_else(|error| {
+        let run_timeout = LAUNCH_RUN_TIMEOUT.lock().ok().and_then(|timeout| *timeout).unwrap_or(DEFAULT_RUN_TIMEOUT);
+        let mut app = Self::open(&StudioConfig { db_path, run_timeout, ..StudioConfig::default() }).unwrap_or_else(|error| {
             let mut app = Self::from_registry();
             app.store_error = Some(error.to_string());
+            app.run_timeout = run_timeout;
             app
         });
         if LAUNCH_THEME.lock().ok().and_then(|theme| *theme) == Some(Theme::Light) {
@@ -327,8 +399,8 @@ impl StudioApp {
     }
 
     pub fn open(config: &StudioConfig) -> Result<Self, StudioError> {
-        let store = StudioStore::open(config.db_path.as_deref())?;
-        let mut app = match store.latest_release()? {
+        let mut store = StudioStore::open(config.db_path.as_deref())?;
+        let mut app = match store.adopt_latest_release()? {
             Some((graph, releases)) => {
                 let mut app = Self::with_spell(graph, registry_specs());
                 app.releases = releases.iter().map(|release| Release { version: release.version, nodes: release.graph.nodes.len() }).collect();
@@ -338,6 +410,7 @@ impl StudioApp {
             None => Self::from_registry(),
         };
         app.store = Some(store);
+        app.run_timeout = config.run_timeout;
         Ok(app)
     }
 
@@ -371,6 +444,11 @@ impl StudioApp {
             last_published: None,
             store: None,
             store_error: None,
+            run_timeout: DEFAULT_RUN_TIMEOUT,
+            run_started: None,
+            active: None,
+            stopping: Vec::new(),
+            waker: None,
         };
         let nodes: Vec<(NodeId, String, serde_json::Value)> =
             app.spell.nodes.iter().map(|node| (node.id.clone(), node.kind.clone(), node.config.clone())).collect();
@@ -468,10 +546,9 @@ impl StudioApp {
         &self.validation
     }
 
-    pub fn run_spell(&mut self) -> usize {
+    pub fn run_spell(&mut self) -> bool {
         let payload = self.run_payload.clone();
-        self.execute(None, payload);
-        self.trace.len()
+        self.start_run(None, payload, false)
     }
 
     fn trigger(&self, prefer: Option<&str>, payload: &serde_json::Value) -> Option<RunTrigger> {
@@ -482,52 +559,186 @@ impl StudioApp {
         Some(RunTrigger { node: node.id.clone(), socket, payload: Value::from(payload.clone()) })
     }
 
-    pub fn execute(&mut self, prefer: Option<&str>, payload: serde_json::Value) -> RunReport {
+    pub fn is_running(&self) -> bool {
+        self.active.is_some()
+    }
+
+    pub fn set_waker(&mut self, waker: Waker) {
+        self.waker = Some(waker);
+    }
+
+    pub fn start_run(&mut self, prefer: Option<&str>, payload: serde_json::Value, reply_to_chat: bool) -> bool {
+        if self.is_running() {
+            return false;
+        }
         self.runs += 1;
         self.trace.clear();
         self.trace_events.clear();
         self.pending_trace.clear();
+        self.last_run = None;
+        self.run_started = Some(Instant::now());
         self.canvas.nodes.iter_mut().for_each(|card| card.status = ExecutionStatus::Idle);
         self.canvas.wires.iter_mut().for_each(|wire| wire.active = false);
-        let report = match self.validate().clone() {
-            ValidationState::Invalid(errors) => RunReport::invalid(errors.join("; ")),
-            _ => match self.trigger(prefer, &payload) {
-                None => RunReport::invalid("spell has no trigger node".to_owned()),
-                Some(trigger) => self.run_engine(trigger),
-            },
+        let trigger = match self.validate().clone() {
+            ValidationState::Invalid(errors) => Err(errors.join("; ")),
+            _ => self.trigger(prefer, &payload).ok_or_else(|| "spell has no trigger node".to_owned()),
         };
-        if report.outcome == RunOutcome::Invalid {
-            let detail = report.error.clone().unwrap_or_default();
-            self.trace.push(TraceLine { at_ms: 0, kind: "RunRejected", detail, status: ExecutionStatus::Failed });
+        match trigger.and_then(|trigger| self.spawn_engine(trigger, reply_to_chat)) {
+            Ok(active) => {
+                self.active = Some(active);
+                true
+            }
+            Err(error) => {
+                self.trace.push(TraceLine { at_ms: 0, kind: "RunRejected", detail: error.clone(), status: ExecutionStatus::Failed });
+                self.conclude(RunReport::invalid(error), reply_to_chat);
+                false
+            }
         }
-        self.last_run = Some(report.clone());
-        report
     }
 
-    fn run_engine(&mut self, trigger: RunTrigger) -> RunReport {
+    fn spawn_engine(&self, trigger: RunTrigger, reply_to_chat: bool) -> Result<ActiveRun, String> {
+        let runtime = runtime().map_err(|error| error.to_string())?;
+        let (sender, receiver) = mpsc::channel();
+        let channel = BackgroundChannel { sender, waker: self.waker.clone() };
         let engine = SpellEngine::new(Arc::new(default_registry()), studio_services());
-        let collector = Arc::new(TraceCollector::default());
-        let emitter: Arc<dyn EventEmitter> = collector.clone();
+        let emitter: Arc<dyn EventEmitter> = Arc::new(channel.clone());
         let graph = self.spell.clone();
-        let outcome = block(move || async move { engine.run(&graph, trigger, emitter).await.map_err(|error| error.to_string()) });
-        self.pending_trace = collector.take().into();
-        while self.step_trace() {}
+        let deadline = self.run_timeout;
+        let token = CancellationToken::new();
+        let cancellation = token.clone();
+        let handle = runtime.spawn(async move {
+            let run = engine.run_with_cancellation(&graph, trigger, emitter, cancellation.clone());
+            let message = match tokio::time::timeout(deadline, run).await {
+                Ok(result) => BackgroundMessage::Finished(result.map_err(|error| error.to_string())),
+                Err(_) => {
+                    cancellation.cancel();
+                    BackgroundMessage::TimedOut
+                }
+            };
+            channel.deliver(message);
+        });
+        Ok(ActiveRun { token, handle, receiver, reply_to_chat })
+    }
+
+    pub fn poll_background(&mut self) -> bool {
+        self.stopping.retain(|handle| !handle.is_finished());
+        let mut changed = false;
+        while let Some(active) = &self.active {
+            let message = match active.receiver.try_recv() {
+                Ok(message) => message,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => BackgroundMessage::Finished(Err("background run stopped without a result".to_owned())),
+            };
+            self.apply_background(message);
+            changed = true;
+        }
+        changed
+    }
+
+    pub fn wait_background(&mut self, timeout: Duration) -> bool {
+        self.wait_until(timeout, |app| !app.is_running())
+    }
+
+    pub fn wait_until(&mut self, timeout: Duration, done: impl Fn(&Self) -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while !done(self) {
+            let Some(active) = &self.active else { return false };
+            let message = match active.receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(message) => message,
+                Err(RecvTimeoutError::Timeout) => return false,
+                Err(RecvTimeoutError::Disconnected) => BackgroundMessage::Finished(Err("background run stopped without a result".to_owned())),
+            };
+            self.apply_background(message);
+        }
+        true
+    }
+
+    pub fn wait_stopped(&mut self, timeout: Duration) -> bool {
+        let handles = std::mem::take(&mut self.stopping);
+        block(move || async move {
+            tokio::time::timeout(timeout, async move {
+                for handle in handles {
+                    handle.await.ok();
+                }
+            })
+            .await
+            .is_ok()
+        })
+        .unwrap_or(false)
+    }
+
+    pub fn background_tasks(&self) -> usize {
+        self.stopping.iter().filter(|handle| !handle.is_finished()).count() + usize::from(self.active.is_some())
+    }
+
+    pub fn cancel_run(&mut self) {
+        self.poll_background();
+        let Some(active) = &self.active else { return };
+        active.token.cancel();
+        self.close_run("RunCancelled", "cancelled from Studio".to_owned(), RunReport::stopped(RunStatus::Cancelled, "run cancelled".to_owned()));
+    }
+
+    fn apply_background(&mut self, message: BackgroundMessage) {
+        match message {
+            BackgroundMessage::Trace(event) => {
+                self.pending_trace.push_back(event);
+                while self.step_trace() {}
+            }
+            BackgroundMessage::Finished(result) => {
+                let report = self.report_for(result);
+                let reply_to_chat = self.release_active();
+                self.conclude(report, reply_to_chat);
+            }
+            BackgroundMessage::TimedOut => {
+                let error = format!("run timed out after {}ms", self.run_timeout.as_millis());
+                self.close_run("RunTimedOut", error.clone(), RunReport::stopped(RunStatus::TimedOut, error));
+            }
+        }
+    }
+
+    fn close_run(&mut self, kind: &'static str, detail: String, report: RunReport) {
+        let at_ms = self.elapsed_ms();
+        self.trace.push(TraceLine { at_ms, kind, detail, status: ExecutionStatus::Failed });
+        self.canvas.nodes.iter_mut().filter(|card| card.status == ExecutionStatus::Running).for_each(|card| card.status = ExecutionStatus::Failed);
+        let reply_to_chat = self.release_active();
+        self.conclude(report, reply_to_chat);
+    }
+
+    fn release_active(&mut self) -> bool {
+        let Some(active) = self.active.take() else { return false };
+        if !active.handle.is_finished() {
+            self.stopping.push(active.handle);
+        }
+        active.reply_to_chat
+    }
+
+    fn conclude(&mut self, report: RunReport, reply_to_chat: bool) {
+        if reply_to_chat {
+            self.chat.push(ChatMessage { from_user: false, text: report.chat_reply(self.runs) });
+        }
+        self.last_run = Some(report);
+    }
+
+    fn report_for(&self, result: Result<RunSummary, String>) -> RunReport {
         let finished = self.trace_events.iter().rev().find_map(|event| match event {
             TraceEvent::RunFinished { summary, .. } => Some(summary.clone()),
             _ => None,
         });
-        match (outcome, finished) {
-            (Ok(Ok(summary)), _) => RunReport::from_summary(&summary, None),
-            (Ok(Err(error)), Some(summary)) => RunReport::from_summary(&summary, Some(error)),
-            (Ok(Err(error)), None) => RunReport::invalid(error),
-            (Err(error), _) => RunReport { outcome: RunOutcome::Finished(RunStatus::Failed), replies: Vec::new(), error: Some(error.to_string()) },
+        match (result, finished) {
+            (Ok(summary), _) => RunReport::from_summary(&summary, None),
+            (Err(error), Some(summary)) => RunReport::from_summary(&summary, Some(error)),
+            (Err(error), None) => RunReport::invalid(error),
         }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.run_started.map_or(0, |started| u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX))
     }
 
     pub fn step_trace(&mut self) -> bool {
         let Some(event) = self.pending_trace.pop_front() else { return false };
         self.canvas.apply_trace_event(&event);
-        let at_ms = self.trace.len() as u64 * 140;
+        let at_ms = self.elapsed_ms();
         self.trace.push(trace_line(&event, at_ms, &self.canvas));
         self.trace_events.push(event);
         true
@@ -577,8 +788,9 @@ impl StudioApp {
         if self.store.is_none() {
             self.store = Some(StudioStore::open(None)?);
         }
-        let store = self.store.as_ref().ok_or_else(|| StudioError::Store("no studio store".to_owned()))?;
-        let release = store.publish(&self.spell).inspect_err(|error| self.store_error = Some(error.to_string()))?;
+        let store = self.store.as_mut().ok_or_else(|| StudioError::Store("no studio store".to_owned()))?;
+        let published = store.publish(&self.spell);
+        let release = published.inspect_err(|error| self.store_error = Some(error.to_string()))?;
         self.releases.push(Release { version: release.version, nodes: release.graph.nodes.len() });
         self.store_error = None;
         let version = release.version;
@@ -586,20 +798,26 @@ impl StudioApp {
         Ok(version)
     }
 
+    pub fn spell_record_id(&self) -> Option<SpellRecordId> {
+        self.store.as_ref().and_then(StudioStore::spell_record_id)
+    }
+
     pub fn send_chat(&mut self) {
         let message = self.chat_input.text.trim().to_owned();
-        if message.is_empty() {
+        if message.is_empty() || self.is_running() {
             return;
         }
         self.chat.push(ChatMessage { from_user: true, text: message.clone() });
         self.chat_input = TextEdit::new("");
-        let report = self.execute(Some(CHAT_TRIGGER_KIND), json!({ "channel": STUDIO_CHANNEL, "sender": STUDIO_SENDER, "content": message }));
-        let text = match (report.replies.is_empty(), &report.error) {
-            (false, _) => report.replies.join("\n"),
-            (true, Some(error)) => format!("Run #{} {}: {error}", self.runs, report.outcome.label().to_lowercase()),
-            (true, None) => format!("Run #{} finished without a reply.", self.runs),
-        };
-        self.chat.push(ChatMessage { from_user: false, text });
+        self.start_run(Some(CHAT_TRIGGER_KIND), json!({ "channel": STUDIO_CHANNEL, "sender": STUDIO_SENDER, "content": message }), true);
+    }
+}
+
+impl Drop for StudioApp {
+    fn drop(&mut self) {
+        if let Some(active) = &self.active {
+            active.token.cancel();
+        }
     }
 }
 
@@ -626,7 +844,7 @@ pub fn render_headless_snapshot_themed(out_path: &Path, size: (f32, f32), theme:
     remember_theme(theme);
     let args =
         vec!["--snap".to_owned(), target.clone(), "--size".to_owned(), format!("{}x{}", size.0 as u32, size.1 as u32), "--scale".to_owned(), "1".to_owned()];
-    App::new(spec(StudioConfig { size, db_path: None })).args(args).try_run().map_err(StudioError::Rune)?;
+    App::new(spec(StudioConfig { size, ..StudioConfig::default() })).args(args).try_run().map_err(StudioError::Rune)?;
     if out_path.is_file() { Ok(()) } else { Err(StudioError::MissingSnapshot(target)) }
 }
 
@@ -643,7 +861,18 @@ fn remember_size(size: (f32, f32)) {
 }
 
 fn spec(config: StudioConfig) -> AppSpec<StudioApp> {
-    AppSpec::new(TITLE, config.size, StudioApp::demo, studio_view)
+    remember_run_timeout(config.run_timeout);
+    AppSpec {
+        setup: Some(StudioApp::set_waker),
+        poll: Some(|app, _, _| app.poll_background()),
+        ..AppSpec::new(TITLE, config.size, StudioApp::demo, studio_view)
+    }
+}
+
+fn remember_run_timeout(timeout: Duration) {
+    if let Ok(mut slot) = LAUNCH_RUN_TIMEOUT.lock() {
+        *slot = Some(timeout);
+    }
 }
 
 struct Tones {
@@ -815,9 +1044,19 @@ fn toolbar(app: &StudioApp, t: &Tones) -> El {
         .child(tool("validate", "Validate", false, |app| {
             app.validate();
         }))
-        .child(tool("run-spell", if compact { "Run" } else { "Run Spell" }, true, |app| {
-            app.run_spell();
-        }))
+        .child(
+            row().key("run-slot").w(if compact { COMPACT_RUN_SLOT_WIDTH } else { RUN_SLOT_WIDTH }).child(
+                if app.is_running() {
+                    tool("cancel-run", "Cancel", true, StudioApp::cancel_run)
+                } else {
+                    tool("run-spell", if compact { "Run" } else { "Run Spell" }, true, |app| {
+                        app.run_spell();
+                    })
+                }
+                .w_full()
+                .justify_center(),
+            ),
+        )
         .child(tool("publish", "Publish", false, |app| {
             app.publish().ok();
         }))
@@ -989,19 +1228,25 @@ fn inspector_body(app: &StudioApp, t: &Tones) -> El {
     );
     let id = card.id.clone();
     let field = editable_field(&card.kind);
-    let editor_height = if app.size.1 < 720.0 { 118.0 } else { 150.0 };
+    let editor_height = prompt_editor_height(app.size);
     let editor = field.and_then(|field| app.prompts.get(&card.id).map(|edit| (field, edit))).map(|(field, edit)| {
-        text_input(edit, font(12.5, 450.0).mono())
-            .key("prompt-editor")
+        let input = text_input(edit, prompt_font())
+            .key("prompt-field")
             .label(format!("{} {field}", card.title))
             .w_full()
+            .color(t.ink)
+            .on_edit(move |app: &mut StudioApp| app.prompts.entry(id.clone()).or_insert_with(|| TextEdit::new("")));
+        col()
+            .key("prompt-editor")
+            .w_full()
             .h(editor_height)
-            .padding(10.0)
+            .padding(PROMPT_EDITOR_PADDING)
             .radius(8.0)
             .fill(t.background)
             .border(1.0, t.line)
-            .color(t.ink)
-            .on_edit(move |app: &mut StudioApp| app.prompts.entry(id.clone()).or_insert_with(|| TextEdit::new("")))
+            .clip_rounded(8.0)
+            .scroll(ScrollSpec { stick_bottom: false })
+            .child(input)
     });
     let column = col()
         .gap(10.0)
@@ -1016,6 +1261,14 @@ fn inspector_body(app: &StudioApp, t: &Tones) -> El {
         (Some(field), Some(editor)) => column.child(label(editor_caption(field), 10.5, 700.0, t.muted)).child(editor),
         _ => column,
     }
+}
+
+pub fn prompt_font() -> TextStyle {
+    font(12.5, 450.0).mono()
+}
+
+pub fn prompt_editor_height(size: (f32, f32)) -> f32 {
+    if size.1 < COMPACT_INSPECTOR_BELOW { COMPACT_PROMPT_EDITOR_HEIGHT } else { PROMPT_EDITOR_HEIGHT }
 }
 
 fn editor_caption(field: &str) -> &'static str {
@@ -1061,7 +1314,11 @@ fn playground(app: &StudioApp, t: &Tones) -> El {
 
 fn trace_strip(app: &StudioApp, t: &Tones) -> El {
     let header = row().gap(10.0).items_center().child(label("TRACE", 10.5, 700.0, t.muted)).child(label(
-        if app.runs == 0 { "No runs yet. Press Run Spell.".to_owned() } else { format!("run #{} · {} events", app.runs, app.trace.len()) },
+        match (app.runs, app.is_running()) {
+            (0, _) => "No runs yet. Press Run Spell.".to_owned(),
+            (runs, true) => format!("run #{runs} · running · {} events · Cancel stops it", app.trace.len()),
+            (runs, false) => format!("run #{runs} · {} events", app.trace.len()),
+        },
         11.5,
         500.0,
         t.muted,

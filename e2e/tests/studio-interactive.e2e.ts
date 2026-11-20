@@ -16,6 +16,19 @@ const unreachableLlm = 'http://127.0.0.1:9';
 type ExampleSpell = { nodes: { id: string; config: unknown }[]; wires: { id: string }[] };
 type RunReport = { status: string; events: string[]; failedNodes: string[]; replies: string[]; error: string | null; validation: string };
 
+type InspectorLayout = {
+  width: number;
+  height: number;
+  editorBottom: number | null;
+  panelBottom: number | null;
+  editorHeight: number;
+  card: { left: number; right: number; top: number; bottom: number };
+  field: { left: number; right: number; top: number };
+  promptLines: number;
+  lineHeight: number;
+  padding: number;
+};
+
 type Bounds = { key: string; left: number | null; right: number | null; top: number | null; bottom: number | null };
 
 type ProbeReport = {
@@ -41,7 +54,8 @@ type ProbeReport = {
   chat: { message: string; echoReply: string; failingReply: string; failingError: string | null };
   publish: { version: number; graph: unknown; reopened: { versions: number[]; spell: unknown } };
   palette: { categories: string[]; order: string[]; accents: Record<string, number[]> };
-  inspector: { width: number; height: number; editorBottom: number | null; panelBottom: number | null };
+  inspector: InspectorLayout;
+  inspectorDesktop: InspectorLayout;
   theme: { before: string; after: string };
   renders: { path: string; width: number; height: number }[];
 };
@@ -169,6 +183,15 @@ test('studio probe keeps example configs and dynamic wires, runs spells and chat
     expect(report.inspector.editorBottom).not.toBeNull();
     expect(report.inspector.panelBottom).not.toBeNull();
     expect((report.inspector.panelBottom ?? 0) - (report.inspector.editorBottom ?? 0)).toBeGreaterThanOrEqual(12);
+    expect(report.inspector.editorHeight).toBeGreaterThanOrEqual(148);
+    expect(report.inspectorDesktop).toMatchObject({ width: 1280, height: 800 });
+    expect(report.inspectorDesktop.editorHeight).toBeGreaterThanOrEqual(report.inspectorDesktop.promptLines * report.inspectorDesktop.lineHeight + 2 * report.inspectorDesktop.padding);
+    for (const layout of [report.inspector, report.inspectorDesktop]) {
+      expect(layout.field.left).toBeGreaterThanOrEqual(layout.card.left + layout.padding);
+      expect(layout.field.right).toBeLessThanOrEqual(layout.card.right - layout.padding);
+      expect(layout.field.top).toBeGreaterThanOrEqual(layout.card.top + layout.padding);
+      expect(layout.card.bottom - layout.card.top).toBe(layout.editorHeight);
+    }
 
     expect(report.theme).toEqual({ before: 'dark', after: 'light' });
 
@@ -216,6 +239,76 @@ test('studio probe keeps example configs and dynamic wires, runs spells and chat
       expect(facts.distinctColors).toBeGreaterThan(200);
       expect(facts.entropy).toBeGreaterThan(1.5);
     }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+async function studioProbe(args: string[]): Promise<any> {
+  const env = { ...process.env, DISPLAY: '', WAYLAND_DISPLAY: '', MAGICKLALA_LLM_BASE_URL: unreachableLlm, MAGICKLALA_LLM_API_KEY: '', OPENAI_API_KEY: '' };
+  const { stdout } = await run('cargo', ['run', '-q', '-p', 'magicklala-studio', '--example', 'studio_probe', '--', ...args], { cwd: repoRoot, env, timeout: 900_000, maxBuffer: 64 * 1024 * 1024 });
+  return JSON.parse(stdout.trim().split('\n').at(-1) ?? '');
+}
+
+test('Run and chat start in the background, stream live trace events, and Cancel or the run deadline stop a slow delay spell at once', { timeout: 900_000 }, async () => {
+  const delayMs = 30_000;
+  const deadlineMs = 400;
+  const prompt = Math.floor(delayMs / 10);
+
+  const report = await studioProbe(['cancel-run', String(delayMs), String(deadlineMs)]);
+
+  expect(report.delayNode).toEqual({ kind: 'time/delay', ms: delayMs });
+  expect(report.run.runningAfterStart).toBe(true);
+  expect(report.run.startMs).toBeLessThan(prompt);
+  expect(report.run.toolbarWhileRunning).toEqual({ cancel: true, run: false });
+  expect(report.run.liveEvents.slice(0, 2)).toEqual(['RunStarted', 'NodeStarted']);
+  expect(report.run.liveEvents).not.toContain('RunFinished');
+  expect(report.run.delayStatusWhileRunning).toBe('running');
+  expect(report.run.cancelMs).toBeLessThan(prompt);
+  expect(report.run.runningAfterCancel).toBe(false);
+  expect(report.run.outcome).toBe('Cancelled');
+  expect(report.run.lastTrace).toBe('RunCancelled');
+  expect(report.run.backgroundStopped).toBe(true);
+  expect(report.run.totalMs).toBeLessThan(prompt);
+  expect(report.run.toolbarAfterCancel).toEqual({ cancel: false, run: true });
+
+  expect(report.chat.runningAfterSend).toBe(true);
+  expect(report.chat.sendMs).toBeLessThan(prompt);
+  expect(report.chat.lastBubble).toEqual({ fromUser: true, text: report.chat.message });
+  expect(report.chat.inputCleared).toBe(true);
+  expect(report.chat.replyAfterCancel).toEqual({ fromUser: false, text: `Run #${report.chat.runNumber} cancelled.` });
+
+  expect(report.deadline.timeoutMs).toBe(deadlineMs);
+  expect(report.deadline.outcome).toBe('TimedOut');
+  expect(report.deadline.lastTrace).toBe('RunTimedOut');
+  expect(report.deadline.error).toBe(`run timed out after ${deadlineMs}ms`);
+  expect(report.deadline.running).toBe(false);
+  expect(report.deadline.totalMs).toBeGreaterThanOrEqual(deadlineMs);
+  expect(report.deadline.totalMs).toBeLessThan(prompt);
+});
+
+test('Publishing keeps one stable spell record through a rename, so v1 and v2 both belong to it and survive reopening the SQLite file', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-rename-'));
+  const dbPath = join(dir, 'studio.sqlite');
+  const renamed = 'Renamed Support Agent';
+  try {
+    const report = await studioProbe(['publish-renamed', dbPath, renamed]);
+
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const releases = db.prepare("SELECT spell_id AS spellId, version, json_extract(graph, '$.name') AS name FROM spell_releases ORDER BY version").all();
+    const spells = db.prepare('SELECT id FROM spells').all();
+    db.close();
+
+    expect(report.second.spellId).toBe(report.first.spellId);
+    expect(report.first.name).not.toBe(renamed);
+    expect(report.second.name).toBe(renamed);
+    expect(releases).toEqual([
+      { spellId: report.first.spellId, version: 1, name: report.first.name },
+      { spellId: report.first.spellId, version: 2, name: renamed },
+      { spellId: report.first.spellId, version: 3, name: renamed },
+    ]);
+    expect(spells).toEqual([{ id: report.first.spellId }]);
+    expect(report.reopened).toEqual({ versions: [1, 2], spellName: renamed, spellRecordId: report.first.spellId });
+    expect(report.third).toEqual({ version: 3, spellId: report.first.spellId, name: renamed });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
