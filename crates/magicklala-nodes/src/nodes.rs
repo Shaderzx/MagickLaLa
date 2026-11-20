@@ -130,7 +130,7 @@ impl NodeExecutor for StdNode {
             Op::KnowledgeChunk => chunk(ctx).await,
             Op::SendMessage => {
                 let content = required_text(ctx, "content").await?;
-                Ok(NodeOutcome::fire("out").with_output("sent", content))
+                Ok(NodeOutcome::fire("out").with_output("sent", content.clone()).with_reply(content))
             }
             Op::StreamMessage => stream_message(ctx).await,
             Op::RhaiScript => run_rhai(ctx).await,
@@ -220,8 +220,11 @@ async fn delay(ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeError> {
     }
 }
 
-fn placeholder_pattern() -> Result<Regex, NodeError> {
-    Regex::new(r"\{\{\s*([A-Za-z0-9_\-]+)((?:\.[A-Za-z0-9_\-]+)*)\s*\}\}").map_err(|error| NodeError::Other(error.to_string()))
+static PLACEHOLDER_PATTERN: std::sync::LazyLock<Result<Regex, String>> =
+    std::sync::LazyLock::new(|| Regex::new(r"\{\{\s*([A-Za-z0-9_\-]+)((?:\.[A-Za-z0-9_\-]+)*)\s*\}\}").map_err(|error| error.to_string()));
+
+fn placeholder_pattern() -> Result<&'static Regex, NodeError> {
+    PLACEHOLDER_PATTERN.as_ref().map_err(|error| NodeError::Other(error.clone()))
 }
 
 async fn template(ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeError> {
@@ -683,5 +686,5 @@ async fn stream_message(ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeEr
     for word in content.split_inclusive(' ') {
         events.emit(TraceEvent::StreamChunk { run_id, node_id: node_id.clone(), delta: word.to_owned() });
     }
-    Ok(NodeOutcome::fire("out").with_output("sent", content))
+    Ok(NodeOutcome::fire("out").with_output("sent", content.clone()).with_reply(content))
 }

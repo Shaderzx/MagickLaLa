@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -185,7 +185,6 @@ pub fn structural_errors(graph: &SpellGraph) -> Vec<ValidationError> {
     errors
 }
 
-const REPLY_OUTPUT_SOCKETS: [&str; 2] = ["sent", "reply"];
 const MESSAGE_TRIGGER_KINDS: [&str; 2] = ["event/on_message", "core/on_message"];
 const START_TRIGGER_KIND: &str = "event/on_start";
 
@@ -308,54 +307,8 @@ impl ScopedEngine {
     }
 }
 
-struct FinishOrder {
-    inner: Arc<dyn EventEmitter>,
-    finished: Mutex<Vec<NodeId>>,
-}
-
-impl FinishOrder {
-    fn nodes(&self) -> Vec<NodeId> {
-        self.finished.lock().unwrap_or_else(PoisonError::into_inner).clone()
-    }
-}
-
-impl EventEmitter for FinishOrder {
-    fn emit(&self, event: TraceEvent) {
-        if let TraceEvent::NodeFinished { node_id, .. } = &event {
-            let mut finished = self.finished.lock().unwrap_or_else(PoisonError::into_inner);
-            if !finished.contains(node_id) {
-                finished.push(node_id.clone());
-            }
-        }
-        self.inner.emit(event);
-    }
-}
-
-fn activation_replies(summary: &RunSummary) -> Vec<String> {
-    summary
-        .activations
-        .iter()
-        .flat_map(|activation| REPLY_OUTPUT_SOCKETS.iter().filter_map(|socket| activation.outputs.get(*socket)))
-        .filter_map(|value| value.as_str().map(str::to_owned))
-        .collect()
-}
-
-fn finished_replies(summary: &RunSummary, finish_order: &[NodeId]) -> Vec<String> {
-    finish_order
-        .iter()
-        .flat_map(|node| REPLY_OUTPUT_SOCKETS.iter().filter_map(move |socket| summary.outputs.get(&format!("{}.{socket}", node.0))))
-        .filter_map(|value| value.as_str().map(str::to_owned))
-        .collect()
-}
-
-pub fn ordered_replies(summary: &RunSummary, finish_order: &[NodeId]) -> Vec<String> {
-    if !summary.replies.is_empty() {
-        summary.replies.clone()
-    } else if summary.activations.is_empty() {
-        finished_replies(summary, finish_order)
-    } else {
-        activation_replies(summary)
-    }
+pub fn ordered_replies(summary: &RunSummary) -> Vec<String> {
+    summary.replies.clone()
 }
 
 fn missing_trigger(kind: ConnectorKind) -> SpellError {
@@ -440,19 +393,17 @@ impl ReleaseRunner for EngineReleaseRunner {
         scope: RunScope,
     ) -> Result<Vec<OutboundAction>, SpellError> {
         let trigger = self.trigger(&release.graph, event)?;
-        let order = Arc::new(FinishOrder { inner: events, finished: Mutex::new(Vec::new()) });
-        let emitter: Arc<dyn EventEmitter> = Arc::clone(&order) as Arc<dyn EventEmitter>;
         let binding = RunBinding { agent_id: Some(release.agent_id.to_string()), allow_private_http: self.allow_private_http, run_id: Some(scope.run_id) };
         let summary = match &self.scoped {
             Some(scoped) => {
                 let engine = scoped.engine(release.agent_id, scope.run_id, self.engine.step_limit(), &release.graph).await?;
-                engine.run_bound(&release.graph, trigger, emitter, scope.cancellation, binding).await?
+                engine.run_bound(&release.graph, trigger, events, scope.cancellation, binding).await?
             }
-            None => self.engine.run_bound(&release.graph, trigger, emitter, scope.cancellation, binding).await?,
+            None => self.engine.run_bound(&release.graph, trigger, events, scope.cancellation, binding).await?,
         };
         if summary.status != RunStatus::Succeeded {
             return Err(SpellError::Internal(summary.error.unwrap_or_else(|| format!("run ended {:?}", summary.status))));
         }
-        Ok(ordered_replies(&summary, &order.nodes()).into_iter().map(|content| reply_action(event, content)).collect())
+        Ok(ordered_replies(&summary).into_iter().map(|content| reply_action(event, content)).collect())
     }
 }

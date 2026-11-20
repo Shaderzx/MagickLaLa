@@ -10,9 +10,11 @@ use chrono::Utc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use crate::subgraphs::unresolvable_subgraphs;
 use crate::{
-    EmittedOutput, EventEmitter, KnowledgeService, LlmGateway, MemoryService, NodeContext, NodeError, NodeExecutor, NodeId, NodeInstance, NodeOutcome,
-    NodeSpec, RunId, RunStatus, RunSummary, SpellError, SpellGraph, SpellId, SpellValidator, SubgraphRef, TraceEvent, ValidationError, Value, Wire, WireId,
+    EmittedOutput, EventEmitter, KnowledgeService, LlmGateway, MAX_SUBGRAPH_DEPTH, MemoryService, NodeContext, NodeError, NodeExecutor, NodeId, NodeInstance,
+    NodeOutcome, NodeSpec, ResolvedSubgraphs, RunId, RunStatus, RunSummary, SpellError, SpellGraph, SpellId, SpellValidator, SubgraphKey, TraceEvent, Value,
+    Wire, WireId, resolve_subgraphs,
 };
 
 pub const WAIT_FOR_ALL_KIND: &str = "flow/wait_for_all";
@@ -21,7 +23,6 @@ pub const DO_ONCE_KIND: &str = "flow/do_once";
 pub const SUBGRAPH_KIND: &str = "flow/subgraph";
 pub const START_TRIGGER_KIND: &str = "event/on_start";
 pub const TRIGGER_PAYLOAD_SOCKET: &str = "payload";
-pub const REPLY_SOCKETS: [&str; 2] = ["sent", "reply"];
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 type NodeOutputs = BTreeMap<String, Value>;
@@ -29,14 +30,11 @@ type SharedOutputs = Arc<NodeOutputs>;
 type Memo = Arc<Mutex<HashMap<NodeId, SharedOutputs>>>;
 type Scope = Arc<BTreeMap<NodeId, SharedOutputs>>;
 type JoinQueues = HashMap<Option<WireId>, VecDeque<Scope>>;
-type SubgraphKey = (SpellId, Option<u32>);
-type ResolvedSubgraphs = HashMap<SubgraphKey, Arc<SpellGraph>>;
 
 pub const DEFAULT_WHILE_LOOP_MAX_ITERATIONS: u64 = 1000;
 pub const MAX_ACTIVATION_LOG_BYTES: usize = 1024 * 1024;
 pub const MAX_REPLIES: usize = 1000;
 pub const MAX_REPLY_BYTES: usize = 1024 * 1024;
-pub const MAX_SUBGRAPH_DEPTH: usize = 16;
 
 pub trait NodeCatalog: Send + Sync {
     fn executor(&self, kind: &str) -> Option<Arc<dyn NodeExecutor>>;
@@ -158,7 +156,6 @@ impl SpellEngine {
             run_id: binding.run_id.unwrap_or_default(),
             catalog: Arc::clone(&self.catalog),
             services: self.services.clone(),
-            events,
             cancellation,
             step_limit: self.step_limit,
             steps: AtomicU64::new(0),
@@ -167,7 +164,7 @@ impl SpellEngine {
             children,
             binding,
         });
-        let state = Arc::new(RunState::prepare(Arc::clone(&shared), Arc::new(graph.clone()), trigger, 0)?);
+        let state = Arc::new(RunState::prepare(Arc::clone(&shared), Arc::new(graph.clone()), trigger, 0, events)?);
         let started_at = Utc::now();
         state.emit(TraceEvent::RunStarted { run_id: shared.run_id, spell_id: graph.id, at: started_at });
         let first = Activation { node: state.trigger.node.clone(), socket: state.trigger.socket.clone(), via: None, scope: Scope::default() };
@@ -182,66 +179,8 @@ impl SpellEngine {
         let Some(resolver) = &self.subgraphs else {
             return unresolvable_subgraphs(graph).map(|()| ResolvedSubgraphs::new());
         };
-        resolve_subgraphs(resolver.as_ref(), validator, graph)
+        resolve_subgraphs(graph, resolver.as_ref(), validator)
     }
-}
-
-struct SubgraphFrame {
-    references: Vec<SubgraphRef>,
-    cursor: usize,
-    key: Option<SubgraphKey>,
-}
-
-fn resolve_subgraphs(resolver: &dyn SubgraphResolver, validator: &SpellValidator, root: &SpellGraph) -> Result<ResolvedSubgraphs, SpellError> {
-    let mut resolved = ResolvedSubgraphs::new();
-    let mut finished: HashSet<SubgraphKey> = HashSet::new();
-    let mut path = vec![root.id];
-    let mut frames = vec![SubgraphFrame { references: root.subgraphs.clone(), cursor: 0, key: None }];
-    loop {
-        let Some(frame) = frames.last_mut() else {
-            return Ok(resolved);
-        };
-        let next = frame.references.get(frame.cursor).cloned();
-        frame.cursor += 1;
-        let Some(reference) = next else {
-            if let Some(key) = frames.pop().and_then(|done| done.key) {
-                finished.insert(key);
-            }
-            path.pop();
-            continue;
-        };
-        let key = (reference.spell_id, reference.release_version);
-        if let Some(start) = path.iter().position(|ancestor| *ancestor == reference.spell_id) {
-            let chain: Vec<String> = path[start..].iter().chain(std::iter::once(&reference.spell_id)).map(|spell| spell.0.to_string()).collect();
-            return Err(SpellError::Internal(format!("subgraph cycle through node {:?}: {}", reference.node_id.0, chain.join(" -> "))));
-        }
-        if finished.contains(&key) {
-            continue;
-        }
-        if frames.len() > MAX_SUBGRAPH_DEPTH {
-            return Err(SpellError::Internal(format!("subgraph nesting through node {:?} exceeds {MAX_SUBGRAPH_DEPTH} levels", reference.node_id.0)));
-        }
-        let child = resolver
-            .resolve(reference.spell_id, reference.release_version)
-            .ok_or_else(|| SpellError::Internal(format!("subgraph {:?} for node {:?} cannot be resolved", reference.spell_id, reference.node_id)))?;
-        validator.validate(&child).map_err(SpellError::Validation)?;
-        frames.push(SubgraphFrame { references: child.subgraphs.clone(), cursor: 0, key: Some(key) });
-        path.push(reference.spell_id);
-        resolved.insert(key, Arc::new(child));
-    }
-}
-
-fn unresolvable_subgraphs(graph: &SpellGraph) -> Result<(), SpellError> {
-    if graph.subgraphs.is_empty() {
-        return Ok(());
-    }
-    Err(SpellError::Validation(
-        graph
-            .subgraphs
-            .iter()
-            .map(|reference| ValidationError::SubgraphResolverUnavailable { node: reference.node_id.clone(), spell: reference.spell_id })
-            .collect(),
-    ))
 }
 
 fn with_outputs(scope: &Scope, node: &NodeId, outputs: SharedOutputs) -> Scope {
@@ -282,11 +221,41 @@ fn outputs_bytes(outputs: &NodeOutputs) -> usize {
     outputs.iter().map(|(socket, value)| socket.len() + approx_bytes(value)).sum()
 }
 
-fn reply_of(outputs: &NodeOutputs) -> Option<&str> {
-    REPLY_SOCKETS.iter().find_map(|socket| match outputs.get(*socket) {
-        Some(Value::String(text)) if !text.is_empty() => Some(text.as_str()),
-        _ => None,
-    })
+enum Readiness {
+    Ready(Option<Value>, Option<TraceEvent>),
+    Waiting(NodeId),
+}
+
+enum Attempt {
+    Done(NodeOutcome, Vec<TraceEvent>),
+    Waiting(NodeId),
+    Failed(NodeError),
+}
+
+struct QualifiedEvents {
+    inner: Arc<dyn EventEmitter>,
+    caller: NodeId,
+}
+
+impl QualifiedEvents {
+    fn qualify(&self, id: &mut String) {
+        *id = format!("{}/{id}", self.caller.0);
+    }
+}
+
+impl EventEmitter for QualifiedEvents {
+    fn emit(&self, mut event: TraceEvent) {
+        match &mut event {
+            TraceEvent::RunStarted { .. } | TraceEvent::RunFinished { .. } => return,
+            TraceEvent::NodeStarted { node_id, .. }
+            | TraceEvent::NodeFinished { node_id, .. }
+            | TraceEvent::NodeFailed { node_id, .. }
+            | TraceEvent::StreamChunk { node_id, .. } => self.qualify(&mut node_id.0),
+            TraceEvent::WireActivated { wire_id, .. } => self.qualify(&mut wire_id.0),
+            TraceEvent::VariableSet { .. } => {}
+        }
+        self.inner.emit(event);
+    }
 }
 
 struct Activation {
@@ -358,7 +327,6 @@ struct RunShared {
     run_id: RunId,
     catalog: Arc<dyn NodeCatalog>,
     services: EngineServices,
-    events: Arc<dyn EventEmitter>,
     cancellation: CancellationToken,
     step_limit: u64,
     steps: AtomicU64,
@@ -377,6 +345,7 @@ impl RunShared {
 
 struct RunState {
     shared: Arc<RunShared>,
+    events: Arc<dyn EventEmitter>,
     depth: usize,
     spell_id: SpellId,
     graph: Arc<SpellGraph>,
@@ -407,7 +376,7 @@ fn child_trigger(shared: &RunShared, graph: &SpellGraph, payload: Value) -> Resu
 }
 
 impl RunState {
-    fn prepare(shared: Arc<RunShared>, graph: Arc<SpellGraph>, trigger: RunTrigger, depth: usize) -> Result<Self, SpellError> {
+    fn prepare(shared: Arc<RunShared>, graph: Arc<SpellGraph>, trigger: RunTrigger, depth: usize, events: Arc<dyn EventEmitter>) -> Result<Self, SpellError> {
         let mut executors = HashMap::new();
         let mut instances = HashMap::new();
         let mut impure = HashSet::new();
@@ -432,6 +401,7 @@ impl RunState {
             graph.variables.iter().map(|variable| (variable.name.clone(), variable.default.clone().unwrap_or_default())).collect();
         Ok(Self {
             shared,
+            events,
             depth,
             spell_id: graph.id,
             graph,
@@ -456,7 +426,7 @@ impl RunState {
     }
 
     fn emit(&self, event: TraceEvent) {
-        self.shared.events.emit(event);
+        self.events.emit(event);
     }
 
     fn flat_outputs(&self) -> BTreeMap<String, Value> {
@@ -514,102 +484,108 @@ impl RunState {
         self.executors.get(node).and_then(|executor| executor.spec().input(socket)).and_then(|spec| spec.default.clone())
     }
 
-    fn pure_sources<'a>(&'a self, node: &NodeId) -> impl Iterator<Item = &'a NodeId> + 'a {
-        self.wires_into.get(node).into_iter().flatten().map(|wire| &wire.from_node).filter(|source| !self.impure.contains(*source))
+    fn data_wire(&self, node: &NodeId, socket: &str) -> Option<&Wire> {
+        self.wires_into.get(node).and_then(|wires| wires.iter().find(|wire| wire.to_socket == socket))
     }
 
-    fn pure_upstream(&self, starts: Vec<NodeId>, memo: &Memo) -> Vec<NodeId> {
-        let cached: HashSet<NodeId> = locked(memo).keys().cloned().collect();
-        let mut seen: HashSet<NodeId> = HashSet::new();
-        let mut order = Vec::new();
-        let mut stack: Vec<(NodeId, bool)> = starts.into_iter().rev().map(|node| (node, false)).collect();
-        while let Some((node, expanded)) = stack.pop() {
-            if expanded {
-                order.push(node);
-                continue;
+    fn ready_input(&self, node: &NodeId, socket: &str, memo: &Memo, scope: &Scope) -> Readiness {
+        let Some(wire) = self.data_wire(node, socket) else {
+            return Readiness::Ready(self.unwired_input(node, socket), None);
+        };
+        let outputs = if self.impure.contains(&wire.from_node) {
+            scope.get(&wire.from_node).cloned()
+        } else {
+            let cached = locked(memo).get(&wire.from_node).cloned();
+            match cached {
+                Some(outputs) => Some(outputs),
+                None => return Readiness::Waiting(wire.from_node.clone()),
             }
-            if cached.contains(&node) || !seen.insert(node.clone()) {
-                continue;
-            }
-            let sources: Vec<NodeId> = self.pure_sources(&node).filter(|source| !seen.contains(*source) && !cached.contains(*source)).cloned().collect();
-            stack.push((node, true));
-            stack.extend(sources.into_iter().rev().map(|source| (source, false)));
+        };
+        let value = outputs.and_then(|outputs| outputs.get(&wire.from_socket).cloned());
+        let event = TraceEvent::WireActivated { run_id: self.run_id(), wire_id: wire.id.clone(), at: Utc::now(), value: value.clone() };
+        Readiness::Ready(value, Some(event))
+    }
+
+    async fn pull_value(self: &Arc<Self>, node: &NodeId, socket: &str, memo: &Memo, scope: &Scope) -> Result<Option<Value>, Fault> {
+        if let Readiness::Waiting(source) = self.ready_input(node, socket, memo, scope) {
+            self.materialize(source, memo, scope).await?;
         }
-        order
+        match self.ready_input(node, socket, memo, scope) {
+            Readiness::Ready(value, event) => {
+                event.into_iter().for_each(|event| self.emit(event));
+                Ok(value)
+            }
+            Readiness::Waiting(source) => Err(Fault::Node(NodeError::Other(format!("data node {:?} produced no outputs", source.0)))),
+        }
     }
 
-    async fn evaluate_upstream(self: &Arc<Self>, starts: Vec<NodeId>, memo: &Memo, scope: &Scope) -> Result<(), Fault> {
-        for node in self.pure_upstream(starts, memo) {
+    async fn materialize(self: &Arc<Self>, target: NodeId, memo: &Memo, scope: &Scope) -> Result<(), Fault> {
+        let mut demand = vec![target.clone()];
+        let mut pending: HashSet<NodeId> = HashSet::from([target]);
+        let mut started: HashMap<NodeId, Instant> = HashMap::new();
+        while let Some(node) = demand.last().cloned() {
+            if locked(memo).contains_key(&node) {
+                demand.pop();
+                pending.remove(&node);
+                continue;
+            }
             if self.shared.cancellation.is_cancelled() {
                 return Err(Fault::Run(SpellError::Cancelled));
             }
-            self.shared.count_step().map_err(Fault::Run)?;
-            let outputs = Arc::clone(self).evaluate_pure(node.clone(), memo.clone(), scope.clone()).await.map_err(Fault::Node)?;
-            locked(memo).insert(node, outputs);
+            if !started.contains_key(&node) {
+                self.shared.count_step().map_err(Fault::Run)?;
+                self.emit(TraceEvent::NodeStarted { run_id: self.run_id(), node_id: node.clone(), at: Utc::now() });
+                self.shared.executed.fetch_add(1, Ordering::SeqCst);
+                started.insert(node.clone(), Instant::now());
+            }
+            match self.attempt_data_node(&node, memo, scope).await {
+                Attempt::Waiting(source) if pending.insert(source.clone()) => demand.push(source),
+                Attempt::Waiting(source) => {
+                    return Err(Fault::Node(self.data_failure(&node, NodeError::Other(format!("value cycle through node {:?}", source.0)))));
+                }
+                Attempt::Failed(error) => return Err(Fault::Node(self.data_failure(&node, error))),
+                Attempt::Done(outcome, wires) => {
+                    self.record_replies(&outcome.replies).map_err(|error| Fault::Node(self.data_failure(&node, error)))?;
+                    wires.into_iter().for_each(|event| self.emit(event));
+                    let outputs = Arc::new(outcome.outputs);
+                    locked(memo).insert(node.clone(), Arc::clone(&outputs));
+                    locked(&self.outputs).insert(node.clone(), outputs);
+                    let duration_ms = started.get(&node).copied().map_or(0, elapsed_ms);
+                    self.emit(TraceEvent::NodeFinished { run_id: self.run_id(), node_id: node.clone(), at: Utc::now(), duration_ms });
+                    demand.pop();
+                    pending.remove(&node);
+                }
+            }
         }
         Ok(())
     }
 
-    fn pull(self: Arc<Self>, node: NodeId, socket: String, memo: Memo, scope: Scope) -> BoxFuture<Result<Option<Value>, NodeError>> {
-        Box::pin(async move {
-            let wire = self.wires_into.get(&node).and_then(|wires| wires.iter().find(|wire| wire.to_socket == socket)).cloned();
-            let Some(wire) = wire else {
-                return Ok(self.unwired_input(&node, &socket));
-            };
-            let value = if self.impure.contains(&wire.from_node) {
-                scope.get(&wire.from_node).and_then(|outputs| outputs.get(&wire.from_socket)).cloned()
-            } else {
-                if !locked(&memo).contains_key(&wire.from_node) {
-                    self.evaluate_upstream(vec![wire.from_node.clone()], &memo, &scope).await.map_err(|fault| match fault {
-                        Fault::Node(error) => error,
-                        Fault::Run(error) => NodeError::Other(error.to_string()),
-                    })?;
-                }
-                locked(&memo).get(&wire.from_node).and_then(|outputs| outputs.get(&wire.from_socket)).cloned()
-            };
-            self.emit(TraceEvent::WireActivated { run_id: self.run_id(), wire_id: wire.id.clone(), at: Utc::now(), value: value.clone() });
-            Ok(value)
-        })
-    }
-
-    fn evaluate_pure(self: Arc<Self>, node: NodeId, memo: Memo, scope: Scope) -> BoxFuture<Result<SharedOutputs, NodeError>> {
-        Box::pin(async move {
-            let (Some(instance), Some(executor)) = (self.instances.get(&node).cloned(), self.executors.get(&node).cloned()) else {
-                return Err(NodeError::Other(format!("node {node:?} is not part of the spell")));
-            };
-            let started = Instant::now();
-            self.emit(TraceEvent::NodeStarted { run_id: self.run_id(), node_id: node.clone(), at: Utc::now() });
-            self.shared.executed.fetch_add(1, Ordering::SeqCst);
-            let mut context = ExecContext { state: self.clone(), node: instance, trigger_socket: None, memo, scope };
-            let result = executor.execute(&mut context).await;
-            let recorded = result.and_then(|outcome| {
-                let outputs = Arc::new(outcome.outputs);
-                self.record_reply(&outputs)?;
-                Ok(outputs)
-            });
-            match recorded {
-                Ok(outputs) => {
-                    locked(&self.outputs).insert(node.clone(), Arc::clone(&outputs));
-                    self.emit(TraceEvent::NodeFinished { run_id: self.run_id(), node_id: node, at: Utc::now(), duration_ms: elapsed_ms(started) });
-                    Ok(outputs)
-                }
-                Err(error) => {
-                    self.emit(TraceEvent::NodeFailed { run_id: self.run_id(), node_id: node, at: Utc::now(), error: error.to_string() });
-                    Err(error)
-                }
-            }
-        })
-    }
-
-    fn record_reply(&self, outputs: &NodeOutputs) -> Result<(), NodeError> {
-        let Some(reply) = reply_of(outputs) else {
-            return Ok(());
+    async fn attempt_data_node(self: &Arc<Self>, node: &NodeId, memo: &Memo, scope: &Scope) -> Attempt {
+        let (Some(instance), Some(executor)) = (self.instances.get(node).cloned(), self.executors.get(node).cloned()) else {
+            return Attempt::Failed(NodeError::Other(format!("node {node:?} is not part of the spell")));
         };
-        locked(&self.shared.replies).record(reply)?;
-        *locked(&self.last_reply) = Some(reply.to_owned());
+        let mut context = ExecContext::data(Arc::clone(self), instance, memo.clone(), scope.clone());
+        let result = executor.execute(&mut context).await;
+        match (context.inputs, result) {
+            (Inputs::Data { waiting_on: Some(source), .. }, _) => Attempt::Waiting(source),
+            (Inputs::Data { wires, .. }, Ok(outcome)) => Attempt::Done(outcome, wires),
+            (_, Ok(outcome)) => Attempt::Done(outcome, Vec::new()),
+            (_, Err(error)) => Attempt::Failed(error),
+        }
+    }
+
+    fn data_failure(&self, node: &NodeId, error: NodeError) -> NodeError {
+        self.emit(TraceEvent::NodeFailed { run_id: self.run_id(), node_id: node.clone(), at: Utc::now(), error: error.to_string() });
+        error
+    }
+
+    fn record_replies(&self, replies: &[String]) -> Result<(), NodeError> {
+        for reply in replies.iter().filter(|reply| !reply.is_empty()) {
+            locked(&self.shared.replies).record(reply)?;
+            *locked(&self.last_reply) = Some(reply.clone());
+        }
         Ok(())
     }
-
     fn run_lane(self: Arc<Self>, first: Activation) -> BoxFuture<Result<(), SpellError>> {
         Box::pin(async move {
             let mut work = VecDeque::from([Work::Activate(first)]);
@@ -738,8 +714,7 @@ impl RunState {
         let started = Instant::now();
         self.emit(TraceEvent::NodeStarted { run_id: self.run_id(), node_id: node.clone(), at: Utc::now() });
         self.shared.executed.fetch_add(1, Ordering::SeqCst);
-        let mut context =
-            ExecContext { state: self.clone(), node: instance, trigger_socket: Some(socket.to_owned()), memo: Memo::default(), scope: scope.clone() };
+        let mut context = ExecContext::flow(self.clone(), instance, socket, scope.clone());
         let cancellation = self.shared.cancellation.clone();
         let result = tokio::select! {
             result = self.run_node(&mut context, executor) => result,
@@ -756,18 +731,16 @@ impl RunState {
     }
 
     fn accept_outcome(&self, outcome: NodeOutcome) -> Result<(Vec<String>, SharedOutputs), Fault> {
-        let outputs = Arc::new(outcome.outputs);
-        self.record_reply(&outputs).map_err(Fault::Node)?;
-        Ok((outcome.fire, outputs))
+        self.record_replies(&outcome.replies).map_err(Fault::Node)?;
+        Ok((outcome.fire, Arc::new(outcome.outputs)))
     }
 
     async fn run_node(self: &Arc<Self>, context: &mut ExecContext, executor: Arc<dyn NodeExecutor>) -> Result<NodeOutcome, Fault> {
-        let sources: Vec<NodeId> = self.pure_sources(&context.node.id).cloned().collect();
-        self.evaluate_upstream(sources, &context.memo, &context.scope).await?;
-        if context.node.kind == SUBGRAPH_KIND {
-            return self.run_subgraph(context).await;
+        let result = if context.node.kind == SUBGRAPH_KIND { self.run_subgraph(context).await } else { executor.execute(context).await.map_err(Fault::Node) };
+        match context.take_fault() {
+            Some(fault) => Err(Fault::Run(fault)),
+            None => result,
         }
-        executor.execute(context).await.map_err(Fault::Node)
     }
 
     async fn run_subgraph(self: &Arc<Self>, context: &mut ExecContext) -> Result<NodeOutcome, Fault> {
@@ -783,7 +756,8 @@ impl RunState {
             .ok_or_else(|| Fault::Node(NodeError::InvalidConfig(format!("subgraph called by node {:?} was not resolved before the run", node.0))))?;
         let payload = context.input(TRIGGER_PAYLOAD_SOCKET).await.map_err(Fault::Node)?.unwrap_or_default();
         let trigger = child_trigger(&self.shared, &graph, payload).map_err(Fault::Run)?;
-        let child = Arc::new(RunState::prepare(Arc::clone(&self.shared), graph, trigger, self.depth + 1).map_err(Fault::Run)?);
+        let events: Arc<dyn EventEmitter> = Arc::new(QualifiedEvents { inner: Arc::clone(&self.events), caller: node });
+        let child = Arc::new(RunState::prepare(Arc::clone(&self.shared), graph, trigger, self.depth + 1, events).map_err(Fault::Run)?);
         let first = Activation { node: child.trigger.node.clone(), socket: child.trigger.socket.clone(), via: None, scope: Scope::default() };
         Arc::clone(&child).run_lane(first).await.map_err(Fault::Run)?;
         child.check_joins_complete().map_err(Fault::Run)?;
@@ -791,7 +765,6 @@ impl RunState {
         let outputs: serde_json::Map<String, serde_json::Value> = child.flat_outputs().into_iter().map(|(key, value)| (key, value.to_json())).collect();
         Ok(NodeOutcome::fire("out").with_output("result", result).with_output("outputs", Value::Json(serde_json::Value::Object(outputs))))
     }
-
     async fn fan_out(self: &Arc<Self>, node: &NodeId, sockets: &[String], scope: Scope, work: &mut VecDeque<Work>) -> Result<(), SpellError> {
         let wires: Vec<Wire> = self.graph.wires_out_of(node).filter(|wire| sockets.contains(&wire.from_socket)).cloned().collect();
         for wire in &wires {
@@ -823,12 +796,35 @@ fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+enum Inputs {
+    Flow { fault: Option<SpellError> },
+    Data { waiting_on: Option<NodeId>, wires: Vec<TraceEvent> },
+}
+
 struct ExecContext {
     state: Arc<RunState>,
     node: NodeInstance,
     trigger_socket: Option<String>,
     memo: Memo,
     scope: Scope,
+    inputs: Inputs,
+}
+
+impl ExecContext {
+    fn flow(state: Arc<RunState>, node: NodeInstance, socket: &str, scope: Scope) -> Self {
+        Self { state, node, trigger_socket: Some(socket.to_owned()), memo: Memo::default(), scope, inputs: Inputs::Flow { fault: None } }
+    }
+
+    fn data(state: Arc<RunState>, node: NodeInstance, memo: Memo, scope: Scope) -> Self {
+        Self { state, node, trigger_socket: None, memo, scope, inputs: Inputs::Data { waiting_on: None, wires: Vec::new() } }
+    }
+
+    fn take_fault(&mut self) -> Option<SpellError> {
+        match &mut self.inputs {
+            Inputs::Flow { fault } => fault.take(),
+            Inputs::Data { .. } => None,
+        }
+    }
 }
 
 #[async_trait]
@@ -846,7 +842,28 @@ impl NodeContext for ExecContext {
     }
 
     async fn input(&mut self, socket: &str) -> Result<Option<Value>, NodeError> {
-        self.state.clone().pull(self.node.id.clone(), socket.to_owned(), self.memo.clone(), self.scope.clone()).await
+        match &mut self.inputs {
+            Inputs::Data { waiting_on, wires } => match self.state.ready_input(&self.node.id, socket, &self.memo, &self.scope) {
+                Readiness::Ready(value, event) => {
+                    wires.extend(event);
+                    Ok(value)
+                }
+                Readiness::Waiting(source) => {
+                    let message = format!("input {socket} waits for data node {:?}", source.0);
+                    *waiting_on = Some(source);
+                    Err(NodeError::Other(message))
+                }
+            },
+            Inputs::Flow { fault } => match self.state.pull_value(&self.node.id, socket, &self.memo, &self.scope).await {
+                Ok(value) => Ok(value),
+                Err(Fault::Node(error)) => Err(error),
+                Err(Fault::Run(error)) => {
+                    let message = error.to_string();
+                    *fault = Some(error);
+                    Err(NodeError::Other(message))
+                }
+            },
+        }
     }
 
     fn variable(&self, name: &str) -> Option<Value> {
@@ -876,7 +893,7 @@ impl NodeContext for ExecContext {
     }
 
     fn events(&self) -> Arc<dyn EventEmitter> {
-        self.state.shared.events.clone()
+        Arc::clone(&self.state.events)
     }
 
     fn cancellation(&self) -> CancellationToken {

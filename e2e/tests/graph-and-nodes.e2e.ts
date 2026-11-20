@@ -773,6 +773,7 @@ test('a flow/subgraph node runs the child spell with its payload, returns its re
       expect(summary?.replies).toEqual(['child saw rust', 'parent heard child saw rust']);
       expect(summary?.outputs['call.result']).toEqual({ type: 'string', value: 'child saw rust' });
       expect(summary?.outputs['call.outputs']?.value).toMatchObject({ 'child_send.sent': 'child saw rust', 'child_words.text': 'child saw rust' });
+      expect(eventIndex(run.events, 'node_finished', 'call/child_send')).toBeGreaterThan(eventIndex(run.events, 'node_started', 'call'));
       expect(eventIndex(run.events, 'node_finished', 'call/child_send')).toBeLessThan(eventIndex(run.events, 'node_finished', 'send'));
       expect(run.events.filter((event) => event.event === 'run_finished')).toHaveLength(1);
 

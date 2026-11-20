@@ -183,6 +183,7 @@ fn flow() -> Vec<Arc<dyn NodeExecutor>> {
             .output("result", SocketType::Any)
             .output("outputs", SocketType::Json)
             .field("spell_id", FieldKind::Text, None, false)
+            .field("release_version", FieldKind::Number { min: Some(1.0), max: None }, None, false)
             .build(Op::Subgraph),
         Def::new("flow/do_once", "Do Once", "flow", "Lets flow through only the first time until reset")
             .flow_in()

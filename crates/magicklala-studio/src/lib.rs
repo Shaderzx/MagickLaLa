@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -7,11 +7,11 @@ use std::time::{Duration, Instant};
 
 use magicklala_canvas::{CanvasState, ExecutionStatus, category_accent, interactive_canvas_view, status_color};
 use magicklala_graph::{
-    EngineServices, EventEmitter, NodeCatalog, NodeId, NodeInstance, NodeSpec, RunStatus, RunSummary, RunTrigger, SpellEngine, SpellGraph, SpellValidator,
-    TraceEvent, Value, VariableDef, Wire, WireId,
+    EngineServices, EventEmitter, NodeCatalog, NodeId, NodeInstance, NodeSpec, RunStatus, RunSummary, RunTrigger, SUBGRAPH_KIND, SpellEngine, SpellGraph,
+    SpellId, SpellValidator, SubgraphKey, SubgraphRef, SubgraphResolver, TraceEvent, Value, VariableDef, Wire, WireId, resolve_subgraphs,
 };
 use magicklala_nodes::{HttpLlmGateway, InMemoryKnowledge, InMemoryMemory, LlmGatewayConfig, default_registry};
-use magicklala_store::{NewProject, NewSpell, NewSpellRelease, Repository, SpellRecordId, SpellRelease, SqliteStore};
+use magicklala_store::{NewProject, NewSpell, NewSpellRelease, Repository, SpellRecord, SpellRecordId, SpellRelease, SqliteStore};
 use rune::{App, AppSpec, Color, Cx, El, ScrollSpec, TextEdit, TextStyle, Waker, col, el, row, text, text_input};
 use serde_json::json;
 use thiserror::Error;
@@ -32,8 +32,6 @@ pub const STUDIO_PROJECT: &str = "Studio";
 pub const STUDIO_CHANNEL: &str = "studio";
 pub const STUDIO_SENDER: &str = "studio-user";
 pub const CHAT_TRIGGER_KIND: &str = "event/on_message";
-const REPLY_OUTPUTS: [&str; 2] = ["reply", "content"];
-const SENT_OUTPUT_SUFFIX: &str = ".sent";
 pub const DEFAULT_RUN_TIMEOUT: Duration = Duration::from_secs(60);
 pub const PROMPT_EDITOR_PADDING: f32 = 10.0;
 pub const PROMPT_EDITOR_HEIGHT: f32 = 172.0;
@@ -182,6 +180,78 @@ impl StudioStore {
     }
 }
 
+pub const STUDIO_SUBGRAPH_LOOKUPS: usize = 256;
+pub const SUBGRAPH_SPELL_FIELD: &str = "spell_id";
+pub const SUBGRAPH_VERSION_FIELD: &str = "release_version";
+
+#[derive(Debug, Clone, Default)]
+pub struct StudioSubgraphResolver {
+    graphs: HashMap<SubgraphKey, SpellGraph>,
+}
+
+fn subgraph_keys(graph: &SpellGraph) -> impl Iterator<Item = SubgraphKey> + '_ {
+    graph.subgraphs.iter().map(|reference| (reference.spell_id, reference.release_version))
+}
+
+async fn released_graph(repository: &SqliteStore, record: &SpellRecord, version: Option<u32>) -> Result<Option<SpellGraph>, magicklala_store::StoreError> {
+    let mut releases = repository.list_releases(record.id).await?;
+    releases.sort_by_key(|release| release.version);
+    Ok(match version {
+        Some(version) => releases.into_iter().find(|release| release.version == version).map(|release| release.graph),
+        None => Some(releases.pop().map_or_else(|| record.graph.clone(), |release| release.graph)),
+    })
+}
+
+impl StudioSubgraphResolver {
+    pub fn load(store: Option<&StudioStore>, root: &SpellGraph) -> Result<Self, StudioError> {
+        let Some(store) = store.filter(|_| !root.subgraphs.is_empty()) else {
+            return Ok(Self::default());
+        };
+        let repository = store.repository.clone();
+        let root = root.clone();
+        let graphs = block(move || async move {
+            let mut records = Vec::new();
+            for project in repository.list_projects().await? {
+                records.extend(repository.list_spells(project.id).await?);
+            }
+            let mut graphs = HashMap::new();
+            let mut pending: VecDeque<SubgraphKey> = subgraph_keys(&root).collect();
+            while let Some(key) = pending.pop_front() {
+                if graphs.contains_key(&key) || graphs.len() >= STUDIO_SUBGRAPH_LOOKUPS {
+                    continue;
+                }
+                let Some(record) = records.iter().find(|record| record.graph.id == key.0 || record.id.0 == key.0.0) else { continue };
+                if let Some(graph) = released_graph(&repository, record, key.1).await? {
+                    pending.extend(subgraph_keys(&graph));
+                    graphs.insert(key, graph);
+                }
+            }
+            Ok::<_, magicklala_store::StoreError>(graphs)
+        })?
+        .map_err(|error| StudioError::Store(error.to_string()))?;
+        Ok(Self { graphs })
+    }
+}
+
+impl SubgraphResolver for StudioSubgraphResolver {
+    fn resolve(&self, spell_id: SpellId, release_version: Option<u32>) -> Option<SpellGraph> {
+        self.graphs.get(&(spell_id, release_version)).cloned()
+    }
+}
+
+fn subgraph_target(node: &NodeInstance, previous: &[SubgraphRef]) -> Option<SubgraphRef> {
+    let kept = previous.iter().find(|reference| reference.node_id == node.id);
+    let configured = node.config.get(SUBGRAPH_SPELL_FIELD).and_then(serde_json::Value::as_str).map(str::trim).filter(|text| !text.is_empty());
+    let Some(configured) = configured else {
+        return kept.cloned();
+    };
+    let spell_id: SpellId = serde_json::from_value(serde_json::Value::String(configured.to_owned())).ok()?;
+    let configured_version = node.config.get(SUBGRAPH_VERSION_FIELD).and_then(serde_json::Value::as_u64).and_then(|version| u32::try_from(version).ok());
+    let release_version =
+        configured_version.or_else(|| kept.filter(|reference| reference.spell_id == spell_id).and_then(|reference| reference.release_version));
+    Some(SubgraphRef { node_id: node.id.clone(), spell_id, release_version })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum BackgroundMessage {
     Trace(TraceEvent),
@@ -260,12 +330,7 @@ impl RunReport {
     }
 
     fn from_summary(summary: &RunSummary, failure: Option<String>) -> Self {
-        let replies = REPLY_OUTPUTS
-            .iter()
-            .filter_map(|key| summary.outputs.get(*key))
-            .chain(summary.outputs.iter().filter(|(name, _)| name.ends_with(SENT_OUTPUT_SUFFIX)).map(|(_, value)| value))
-            .filter_map(|value| value.as_str().map(str::to_owned))
-            .collect();
+        let replies = summary.replies.clone();
         let error = summary.error.clone().or(failure).filter(|_| summary.status != RunStatus::Succeeded);
         Self { outcome: RunOutcome::Finished(summary.status), replies, error }
     }
@@ -274,6 +339,7 @@ impl RunReport {
 pub fn editable_field(kind: &str) -> Option<&'static str> {
     match kind {
         "text/template" => Some("template"),
+        SUBGRAPH_KIND => Some(SUBGRAPH_SPELL_FIELD),
         kind if kind.starts_with("code/") => Some("script"),
         kind if kind.starts_with("ai/") => Some("prompt"),
         _ => None,
@@ -535,13 +601,29 @@ impl StudioApp {
                 to_socket: wire.to_socket.clone(),
             })
             .collect();
+        let previous = std::mem::take(&mut self.spell.subgraphs);
+        self.spell.subgraphs = self.spell.nodes.iter().filter(|node| node.kind == SUBGRAPH_KIND).filter_map(|node| subgraph_target(node, &previous)).collect();
+    }
+
+    pub fn subgraph_resolver(&self) -> Result<StudioSubgraphResolver, StudioError> {
+        StudioSubgraphResolver::load(self.store.as_ref(), &self.spell)
+    }
+
+    fn check_spell(&self) -> Result<(), Vec<String>> {
+        let validator = SpellValidator::new(self.specs.clone());
+        validator.validate(&self.spell).map_err(|errors| errors.iter().map(ToString::to_string).collect::<Vec<_>>())?;
+        if self.spell.subgraphs.is_empty() {
+            return Ok(());
+        }
+        let resolver = self.subgraph_resolver().map_err(|error| vec![error.to_string()])?;
+        resolve_subgraphs(&self.spell, &resolver, &validator).map(drop).map_err(|error| vec![error.to_string()])
     }
 
     pub fn validate(&mut self) -> &ValidationState {
         self.sync_spell();
-        self.validation = match SpellValidator::new(self.specs.clone()).validate(&self.spell) {
+        self.validation = match self.check_spell() {
             Ok(()) => ValidationState::Valid,
-            Err(errors) => ValidationState::Invalid(errors.iter().map(ToString::to_string).collect()),
+            Err(errors) => ValidationState::Invalid(errors),
         };
         &self.validation
     }
@@ -601,6 +683,11 @@ impl StudioApp {
         let (sender, receiver) = mpsc::channel();
         let channel = BackgroundChannel { sender, waker: self.waker.clone() };
         let engine = SpellEngine::new(Arc::new(default_registry()), studio_services());
+        let engine = if self.spell.subgraphs.is_empty() {
+            engine
+        } else {
+            engine.with_subgraph_resolver(Arc::new(self.subgraph_resolver().map_err(|error| error.to_string())?))
+        };
         let emitter: Arc<dyn EventEmitter> = Arc::new(channel.clone());
         let graph = self.spell.clone();
         let deadline = self.run_timeout;
@@ -1275,6 +1362,7 @@ fn editor_caption(field: &str) -> &'static str {
     match field {
         "script" => "RHAI SCRIPT",
         "template" => "TEMPLATE",
+        SUBGRAPH_SPELL_FIELD => "SPELL ID",
         _ => "PROMPT",
     }
 }

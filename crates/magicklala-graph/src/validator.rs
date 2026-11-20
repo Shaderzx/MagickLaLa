@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{NodeId, NodeInstance, NodeSpec, SPELL_SCHEMA_VERSION, SUBGRAPH_KIND, SpellGraph, ValidationError, WAIT_FOR_ALL_KIND, Wire, WireId};
+use crate::{NodeId, NodeInstance, NodeSpec, SPELL_SCHEMA_VERSION, SUBGRAPH_KIND, SpellGraph, SubgraphRef, ValidationError, WAIT_FOR_ALL_KIND, Wire, WireId};
 
 const CONDITIONAL_KINDS: [&str; 2] = ["flow/branch", "flow/switch"];
 
@@ -203,18 +203,18 @@ impl SpellValidator {
 }
 
 fn check_subgraph_calls(index: &GraphIndex<'_>, errors: &mut Vec<ValidationError>) {
-    let mut targeted: BTreeSet<&NodeId> = BTreeSet::new();
+    let mut targeted: BTreeMap<&NodeId, &SubgraphRef> = BTreeMap::new();
     for reference in &index.graph.subgraphs {
         if !index.node(&reference.node_id).is_some_and(|node| node.kind == SUBGRAPH_KIND) {
             errors.push(ValidationError::OrphanSubgraph { node: reference.node_id.clone(), spell: reference.spell_id });
             continue;
         }
-        if !targeted.insert(&reference.node_id) {
+        if targeted.insert(&reference.node_id, reference).is_some() {
             errors.push(ValidationError::DuplicateSubgraphTarget(reference.node_id.clone()));
         }
     }
     for call in index.graph.nodes.iter().filter(|node| node.kind == SUBGRAPH_KIND) {
-        let Some(reference) = index.graph.subgraphs.iter().find(|reference| reference.node_id == call.id) else {
+        let Some(reference) = targeted.get(&call.id) else {
             errors.push(ValidationError::SubgraphTargetMissing { node: call.id.clone() });
             continue;
         };

@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use magicklala_canvas::{ExecutionStatus, category_accent};
-use magicklala_graph::{NodeCatalog, NodeId, NodeInstance, SpellGraph, SpellValidator, Wire, WireId};
+use magicklala_canvas::{ExecutionStatus, SocketRef, category_accent};
+use magicklala_graph::{NodeCatalog, NodeId, NodeInstance, SocketType, SpellGraph, SpellValidator, Wire, WireId};
 use magicklala_studio::{
-    PALETTE_CATEGORY_ORDER, PROMPT_EDITOR_PADDING, StudioApp, StudioConfig, Theme, ValidationState, palette_categories, prompt_font, registry_specs,
-    render_headless_snapshot_themed, studio_view,
+    PALETTE_CATEGORY_ORDER, PROMPT_EDITOR_PADDING, StudioApp, StudioConfig, StudioStore, Theme, ValidationState, palette_categories, prompt_font,
+    registry_specs, render_headless_snapshot_themed, studio_view,
 };
 use rune::{Env, Runtime};
 use serde_json::json;
@@ -603,6 +603,140 @@ fn probe(desktop: PathBuf, compact: PathBuf, db_path: PathBuf) -> Result<serde_j
     }))
 }
 
+fn studio_wire(id: &str, from: (&str, &str), to: (&str, &str)) -> Wire {
+    Wire { id: WireId::from(id), from_node: NodeId::from(from.0), from_socket: from.1.to_owned(), to_node: NodeId::from(to.0), to_socket: to.1.to_owned() }
+}
+
+fn studio_node(id: &str, kind: &str, x: f32, config: serde_json::Value) -> NodeInstance {
+    NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position: [x, 0.0], config }
+}
+
+fn child_spell() -> SpellGraph {
+    let mut spell = SpellGraph::new("Child Agent");
+    spell.nodes = vec![
+        studio_node("child_start", "event/on_start", 0.0, serde_json::Value::Null),
+        studio_node("child_words", "text/template", 280.0, json!({ "template": "child saw {{topic}}" })),
+        studio_node("child_send", "io/send_message", 560.0, serde_json::Value::Null),
+    ];
+    spell.wires = vec![
+        studio_wire("cw_flow", ("child_start", "out"), ("child_send", "in")),
+        studio_wire("cw_topic", ("child_start", "payload"), ("child_words", "topic")),
+        studio_wire("cw_content", ("child_words", "text"), ("child_send", "content")),
+    ];
+    spell
+}
+
+fn parent_spell() -> SpellGraph {
+    let mut spell = SpellGraph::new("Parent Agent");
+    spell.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("words", "text/template", 560.0, json!({ "template": "parent heard {{result}}" })),
+        studio_node("send", "io/send_message", 840.0, serde_json::Value::Null),
+    ];
+    spell.wires = vec![studio_wire("w_content", ("words", "text"), ("send", "content"))];
+    spell
+}
+
+fn connect(rt: &mut Runtime<StudioApp>, from: (&str, &str), to: (&str, &str)) -> Result<(), String> {
+    let (from, to) = (SocketRef::new(from.0, from.1), SocketRef::new(to.0, to.1));
+    rt.state.canvas.connect_sockets(&from, &to).map(drop).map_err(|error| format!("cannot wire {from:?} to {to:?}: {error:?}"))?;
+    rt.update(|app, _| app.sync_spell());
+    Ok(())
+}
+
+fn validation_of(rt: &mut Runtime<StudioApp>) -> Result<serde_json::Value, String> {
+    click(rt, "validate")?;
+    let errors = match &rt.state.validation {
+        ValidationState::Invalid(errors) => errors.clone(),
+        _ => Vec::new(),
+    };
+    Ok(json!({ "validation": rt.state.validation.label(), "errors": errors, "subgraphs": rt.state.spell.subgraphs }))
+}
+
+fn editor_caption(rt: &Runtime<StudioApp>) -> Option<String> {
+    let [_, editor_top, _, _] = rect(rt, "prompt-editor")?;
+    let [panel_left, _, panel_width, _] = rect(rt, "inspector")?;
+    rt.elements()
+        .into_iter()
+        .filter(|element| element.rect[0] >= panel_left && element.rect[0] < panel_left + panel_width && element.rect[1] + element.rect[3] <= editor_top + 0.5)
+        .filter_map(|element| element.text.map(|text| (element.rect[1], text)))
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, text)| text)
+}
+
+fn type_spell_id(rt: &mut Runtime<StudioApp>, call: &NodeId, spell_id: &str) -> Result<(), String> {
+    let (selected, typed) = (call.clone(), spell_id.to_owned());
+    rt.update(move |app, _| {
+        app.canvas.select(Some(selected.clone()));
+        if let Some(edit) = app.prompts.get_mut(&selected) {
+            *edit = rune::TextEdit::new(&typed);
+        }
+    });
+    rt.frame(0.0);
+    let held = rt.state.prompts.get(call).map(|edit| edit.text.clone()).unwrap_or_default();
+    if held == spell_id && rt.find("prompt-field").is_some() { Ok(()) } else { Err(format!("inspector field holds {held:?} instead of {spell_id:?}")) }
+}
+
+fn subgraph(db_path: &Path) -> Result<serde_json::Value, String> {
+    let child = child_spell();
+    StudioStore::open(Some(db_path)).and_then(|mut store| store.publish(&child)).map_err(|error| error.to_string())?;
+    let mut app = StudioApp::with_spell(parent_spell(), registry_specs());
+    app.store = Some(StudioStore::open(Some(db_path)).map_err(|error| error.to_string())?);
+    let content = app.run_payload["content"].as_str().unwrap_or_default().to_owned();
+    let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    click(&mut rt, "palette-flow-subgraph")?;
+    let call = rt
+        .state
+        .canvas
+        .nodes
+        .last()
+        .filter(|card| card.kind == "flow/subgraph")
+        .map(|card| card.id.clone())
+        .ok_or("palette did not add a flow/subgraph node")?;
+    let selected = call.clone();
+    rt.update(move |app, _| app.canvas.select(Some(selected)));
+    rt.frame(0.0);
+    let placed = json!({ "kind": "flow/subgraph", "editor": rt.find("prompt-field").is_some(), "caption": editor_caption(&rt) });
+    let child_id = child.id.0.to_string();
+    type_spell_id(&mut rt, &call, &child_id)?;
+    let call_name = call.0.clone();
+    connect(&mut rt, ("trigger", "out"), (&call_name, "in"))?;
+    connect(&mut rt, ("trigger", "content"), (&call_name, "payload"))?;
+    connect(&mut rt, (&call_name, "out"), ("send", "in"))?;
+    if let Some(words) = rt.state.canvas.card_mut(&NodeId::from("words")) {
+        words.ensure_socket("result", SocketType::Any, false);
+    }
+    connect(&mut rt, (&call_name, "result"), ("words", "result"))?;
+    let mut pointed = validation_of(&mut rt)?;
+    pointed["config"] = rt.state.spell.node(&call).map(|node| node.config.clone()).unwrap_or_default();
+    click(&mut rt, "run-spell")?;
+    settle(&mut rt)?;
+    let run = run_report(&rt.state);
+    let missing_id = SpellGraph::new("never published").id.0.to_string();
+    type_spell_id(&mut rt, &call, &missing_id)?;
+    let mut missing = validation_of(&mut rt)?;
+    missing["spellId"] = json!(missing_id);
+    let doomed = call.clone();
+    rt.update(move |app, _| {
+        app.canvas.select(Some(doomed));
+        app.delete_selected_node();
+    });
+    rt.frame(0.0);
+    let mut deleted = validation_of(&mut rt)?;
+    deleted["nodes"] = json!(rt.state.spell.nodes.iter().map(|node| node.id.0.clone()).collect::<Vec<_>>());
+    Ok(json!({
+        "content": content,
+        "childSpellId": child_id,
+        "callNode": call.0,
+        "placed": placed,
+        "pointed": pointed,
+        "run": run,
+        "missing": missing,
+        "deleted": deleted,
+    }))
+}
+
 fn number(raw: Option<&String>, name: &str) -> Result<u64, String> {
     raw.ok_or_else(|| format!("missing {name}"))?.parse().map_err(|error| format!("{name}: {error}"))
 }
@@ -610,13 +744,14 @@ fn number(raw: Option<&String>, name: &str) -> Result<u64, String> {
 fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
+        Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("publish-renamed") => {
             let db = args.get(1).ok_or("missing database path")?;
             publish_renamed(Path::new(db), args.get(2).ok_or("missing new spell name")?)
         }
         _ => match args {
             [desktop, compact, db_path] => probe(PathBuf::from(desktop), PathBuf::from(compact), PathBuf::from(db_path)),
-            _ => Err("usage: studio_probe <desktop.png> <compact.png> <studio.sqlite> | cancel-run <delay-ms> <deadline-ms> | publish-renamed <studio.sqlite> <name>".to_owned()),
+            _ => Err("usage: studio_probe <desktop.png> <compact.png> <studio.sqlite> | cancel-run <delay-ms> <deadline-ms> | publish-renamed <studio.sqlite> <name> | subgraph <studio.sqlite>".to_owned()),
         },
     }
 }

@@ -48,11 +48,17 @@ pub trait CredentialResolver: Send + Sync {
 pub struct NodeOutcome {
     pub outputs: BTreeMap<String, Value>,
     pub fire: Vec<String>,
+    pub replies: Vec<String>,
 }
 
 impl NodeOutcome {
     pub fn fire(socket: &str) -> Self {
-        Self { outputs: BTreeMap::new(), fire: vec![socket.to_owned()] }
+        Self { outputs: BTreeMap::new(), fire: vec![socket.to_owned()], replies: Vec::new() }
+    }
+
+    pub fn with_reply(mut self, text: impl Into<String>) -> Self {
+        self.replies.push(text.into());
+        self
     }
 
     pub fn with_output(mut self, socket: &str, value: impl Into<Value>) -> Self {
