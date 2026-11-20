@@ -2,10 +2,11 @@ import { test, expect } from 'e2e';
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { DatabaseSync } from 'node:sqlite';
 import { deflateSync } from 'node:zlib';
 
 const run = promisify(execFile);
@@ -35,6 +36,15 @@ async function withDatabase<T>(body: (db: string, dir: string) => Promise<T>): P
     return await body(join(dir, 'magicklala.db'), dir);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+}
+
+function queryDatabase<T>(db: string, sql: string, ...params: Array<string | number>): T[] {
+  const database = new DatabaseSync(db, { readOnly: true });
+  try {
+    return database.prepare(sql).all(...params) as T[];
+  } finally {
+    database.close();
   }
 }
 
@@ -280,5 +290,130 @@ test('a release created from an explicit graph snapshot pins that snapshot even 
     expect(outcome.releases.map((release: any) => release.contentHash)).toEqual(outcome.releases.map((release: any) => release.snapshotHash));
     expect(outcome.draftDescription).toMatch(new RegExp(`^${spec.edit} \\d+$`));
     expect(outcome.foreignGraphError).toBe('invalid input: release graph belongs to a different spell');
+  });
+});
+
+const weakKeyError = 'invalid input: vault master key must be 32 bytes encoded as 64 hex characters or base64';
+
+test('deleting a credential that signs a webhook is refused as a conflict and the webhook stays signed until the webhook itself is deleted', async () => {
+  await withDatabase(async (db) => {
+    const masterKey = randomBytes(32).toString('hex');
+    const secret = `whsec-${randomBytes(12).toString('hex')}`;
+
+    const guarded = await probeJson('credential-guard', { db, path: '/hooks/signed', secret }, masterKey);
+    const webhookRows = queryDatabase<{ secret_credential_id: string | null }>(db, 'SELECT secret_credential_id FROM webhooks WHERE id = ?', guarded.webhookId);
+    const credentialRows = queryDatabase<{ id: string }>(db, 'SELECT id FROM credentials WHERE id = ?', guarded.credentialId);
+    const revealed = await probeJson('reveal', { db, id: guarded.credentialId }, masterKey);
+
+    expect(guarded.blockedError).toBe('conflict: credential is referenced by a webhook');
+    expect(guarded.signedWebhookSecret).toBe(guarded.credentialId);
+    expect(webhookRows).toEqual([{ secret_credential_id: guarded.credentialId }]);
+    expect(credentialRows).toEqual([{ id: guarded.credentialId }]);
+    expect(revealed.secret).toBe(secret);
+
+    const released = await probeJson('credential-release', { db, webhookId: guarded.webhookId, credentialId: guarded.credentialId }, masterKey);
+
+    expect(released).toEqual({ webhookDeleted: true, credentialDeleted: true, missingWebhookError: `not found: webhook ${guarded.webhookId}` });
+    expect(queryDatabase(db, 'SELECT id FROM webhooks WHERE id = ?', guarded.webhookId)).toEqual([]);
+    expect(queryDatabase(db, 'SELECT id FROM credentials WHERE id = ?', guarded.credentialId)).toEqual([]);
+  });
+});
+
+test('clearing an agent memories removes exactly that agent memories, reports how many went, and leaves its recall empty while another agent keeps its own', async () => {
+  await withDatabase(async (db) => {
+    const masterKey = randomBytes(32).toString('hex');
+    const memories = [
+      { owner: 'primary', content: 'The user prefers green tea with honey in the morning.' },
+      { owner: 'primary', content: 'The user is allergic to peanuts and tree nuts.' },
+      { owner: 'primary', content: 'The user drives a blue bicycle to the office.' },
+      { owner: 'other', content: 'The other user prefers black coffee in the morning.' },
+    ];
+    const primaryCount = memories.filter((memory) => memory.owner === 'primary').length;
+
+    const outcome = await probeJson('clear-memories', { db, memories, query: 'what does the user drink in the morning' }, masterKey);
+    const remaining = queryDatabase<{ content: string }>(db, 'SELECT content FROM memories ORDER BY content');
+
+    expect(outcome.recallBefore).toHaveLength(primaryCount);
+    expect(outcome.removed).toBe(primaryCount);
+    expect(outcome.recallAfter).toEqual([]);
+    expect(outcome.removedAgain).toBe(0);
+    expect(outcome.otherRecallAfter).toEqual(memories.filter((memory) => memory.owner === 'other').map((memory) => memory.content));
+    expect(remaining).toEqual(memories.filter((memory) => memory.owner === 'other').map((memory) => ({ content: memory.content })));
+  });
+});
+
+test('a recorded run is found by its correlation id for its own agent only, the newest one wins, and an unknown id finds nothing', async () => {
+  await withDatabase(async (db) => {
+    const masterKey = randomBytes(32).toString('hex');
+    const correlation = `corr-${randomBytes(6).toString('hex')}`;
+    const otherCorrelation = `corr-${randomBytes(6).toString('hex')}`;
+
+    const outcome = await probeJson('run-correlation', { db, correlation, otherCorrelation, unknown: 'corr-never-recorded' }, masterKey);
+
+    expect(outcome.found.primary).toEqual({ runId: outcome.runs.primaryNewer, correlation });
+    expect(outcome.found.primaryOther).toEqual({ runId: outcome.runs.primaryOther, correlation: otherCorrelation });
+    expect(outcome.found.otherAgent).toEqual({ runId: outcome.runs.otherAgent, correlation });
+    expect(outcome.found.unknown).toBeNull();
+    expect(outcome.runs.primaryOlder).not.toBe(outcome.runs.primaryNewer);
+  });
+});
+
+test('the vault accepts only a 32-byte master key written as 64 hex characters or base64 and refuses passphrases and wrong-length keys', async () => {
+  const key = randomBytes(32);
+  const accepted = [
+    { label: 'hex', material: key.toString('hex') },
+    { label: 'hex with spaces around', material: `  ${key.toString('hex').toUpperCase()}\n` },
+    { label: 'base64', material: key.toString('base64') },
+    { label: 'base64 unpadded', material: key.toString('base64').replace(/=+$/, '') },
+    { label: 'base64url', material: key.toString('base64url') },
+  ];
+  const refused = [
+    { label: 'passphrase', material: 'weak-passphrase' },
+    { label: 'short hex', material: randomBytes(16).toString('hex') },
+    { label: 'long hex', material: randomBytes(33).toString('hex') },
+    { label: 'short base64', material: randomBytes(24).toString('base64') },
+    { label: 'blank', material: '   ' },
+  ];
+  const plaintext = `sk-${randomBytes(10).toString('hex')}`;
+
+  const outcome = await probeJson('vault-keys', { keys: [...accepted, ...refused], plaintext }, key.toString('hex'));
+  const weakEnv = await withDatabase((db) => probe('credential', { db, name: 'openai', provider: 'openai', secret: plaintext }, 'weak-passphrase'));
+
+  expect(outcome.keys).toEqual([
+    ...accepted.map((entry) => ({ label: entry.label, accepted: true, error: null, opened: plaintext })),
+    ...refused.map((entry) => ({ label: entry.label, accepted: false, error: weakKeyError, opened: null })),
+  ]);
+  expect(weakEnv.ok).toBe(false);
+  expect(weakEnv.ok ? '' : weakEnv.stderr).toContain(weakKeyError);
+});
+
+test('only real in-memory SQLite URLs count as in-memory and share one database across concurrent queries, while file paths that merely mention memory stay on disk', async () => {
+  await withDatabase(async (_db, dir) => {
+    const masterKey = randomBytes(32).toString('hex');
+    const trickyDir = join(dir, 'mode=memory');
+    await mkdir(trickyDir);
+    const trickyFile = join(trickyDir, 'app.db');
+    const urls = [
+      { url: ':memory:', inMemory: true },
+      { url: 'sqlite::memory:', inMemory: true },
+      { url: 'sqlite://:memory:', inMemory: true },
+      { url: 'sqlite://:memory:?cache=shared', inMemory: true },
+      { url: 'sqlite:file:studio?mode=memory&cache=shared', inMemory: true },
+      { url: 'file:studio?cache=shared&mode=memory', inMemory: true },
+      { url: `sqlite://${trickyFile}`, inMemory: false },
+      { url: trickyFile, inMemory: false },
+      { url: `sqlite://${join(dir, 'my:memory:.db')}`, inMemory: false },
+      { url: `sqlite://${join(dir, 'app.db')}?mode=rwc`, inMemory: false },
+    ];
+    const writers = 24;
+
+    const outcome = await probeJson('memory-urls', { urls: urls.map((entry) => entry.url), fileUrl: `sqlite://${trickyFile}`, writers }, masterKey);
+
+    expect(outcome.classified).toEqual(urls);
+    expect(outcome.concurrent.errors).toEqual([]);
+    expect(outcome.concurrent.projects).toEqual(Array.from({ length: writers }, (_, index) => `writer-${String(index).padStart(2, '0')}`));
+    expect(outcome.file.projects).toEqual(['on-disk']);
+    expect((await stat(trickyFile)).size).toBeGreaterThan(0);
+    expect(queryDatabase(trickyFile, 'SELECT name FROM projects')).toEqual([{ name: 'on-disk' }]);
   });
 });
