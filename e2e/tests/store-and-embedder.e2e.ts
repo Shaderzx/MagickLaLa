@@ -445,3 +445,36 @@ test('only real in-memory SQLite URLs count as in-memory and share one database 
     expect(queryDatabase(trickyFile, 'SELECT name FROM projects')).toEqual([{ name: 'on-disk' }]);
   });
 });
+
+test('SqliteStore treats empty, percent-encoded :memory: and memdb SQLite URLs as in-memory exactly like SQLite does, keeping every one on a single connection so concurrent writers never lose the migrated tables, and writes no file', async () => {
+  await withDatabase(async (_db, dir) => {
+    const masterKey = randomBytes(32).toString('hex');
+    const workDir = join(dir, 'cwd');
+    await mkdir(workDir);
+    const memoryUrls = ['sqlite:', 'sqlite://', 'file:', 'sqlite:file:', 'sqlite:%3Amemory%3A', 'file:%3Amemory%3A', 'file:x?vfs=memdb', 'file:y?vfs=mem%64b'];
+    const fileUrls = [join(dir, 'mode=memory.sqlite'), `sqlite://${join(dir, 'mode=memory', 'studio.sqlite')}`, 'FILE::memory:'];
+    const writers = 24;
+
+    const classified = await probeJson('memory-urls', { urls: [...memoryUrls, ...fileUrls], fileUrl: `sqlite://${join(dir, 'on-disk.sqlite')}`, writers: 1 }, masterKey);
+    expect(classified.classified).toEqual([...memoryUrls.map((url) => ({ url, inMemory: true })), ...fileUrls.map((url) => ({ url, inMemory: false }))]);
+    await run('cargo', ['build', '-q', '-p', 'magicklala-store', '--example', 'store_probe'], { cwd: repoRoot, timeout: 900_000, maxBuffer: 64 * 1024 * 1024 });
+    const { stdout } = await run(join(repoRoot, 'target', 'debug', 'examples', 'store_probe'), ['connect-urls', JSON.stringify({ urls: memoryUrls, writers })], {
+      cwd: workDir,
+      env: { ...process.env, MAGICKLALA_MASTER_KEY: masterKey },
+      timeout: 900_000,
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    const connected = JSON.parse(stdout);
+
+    expect(connected.stores).toEqual(
+      memoryUrls.map((url) => ({
+        url,
+        inMemory: true,
+        onDisk: false,
+        errors: [],
+        projects: Array.from({ length: writers }, (_, index) => `writer-${String(index).padStart(2, '0')}`),
+      })),
+    );
+    expect(await readdir(workDir)).toEqual([]);
+  });
+});

@@ -741,3 +741,65 @@ test('Editing the spell clears a one-off Publish or Save error from the TRACE st
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('magicklala studio --snap opens its --db exactly as given: a plain path becomes a migrated SQLite file, a sqlite:// URL whose mode decodes to memory writes nothing, and a file name ending in a space keeps that space', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-cli-db-'));
+  try {
+    await run('cargo', ['build', '-q', '-p', 'magicklala-cli'], { cwd: repoRoot, timeout: 900_000, maxBuffer: 64 * 1024 * 1024 });
+    const memoryDir = join(dir, 'memory');
+    const spaceDir = join(dir, 'space');
+    await mkdir(memoryDir);
+    await mkdir(spaceDir);
+    const realDb = join(dir, 'real.sqlite');
+    const launches = [
+      { png: join(dir, 'real.png'), db: realDb },
+      { png: join(dir, 'memory.png'), db: `sqlite://${join(memoryDir, 'demo')}?mode=mem%6fry` },
+      { png: join(dir, 'space.png'), db: join(spaceDir, 'intended.sqlite ') },
+    ];
+    const env: NodeJS.ProcessEnv = { ...process.env, DISPLAY: '', WAYLAND_DISPLAY: '', MAGICKLALA_LLM_BASE_URL: unreachableLlm, MAGICKLALA_LLM_API_KEY: '', OPENAI_API_KEY: '' };
+    delete env.MAGICKLALA_DB;
+    for (const launch of launches) {
+      await run(join(repoRoot, 'target', 'debug', 'magicklala'), ['studio', '--snap', launch.png, '--db', launch.db], { cwd: dir, env, timeout: 900_000, maxBuffer: 64 * 1024 * 1024 });
+    }
+
+    for (const launch of launches) {
+      expect([...(await readFile(launch.png)).subarray(0, 8)]).toEqual(pngSignature);
+    }
+    expect(await readdir(dir)).toContain('real.sqlite');
+    const db = new DatabaseSync(realDb, { readOnly: true });
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").all();
+    db.close();
+    expect(tables).toEqual([{ name: 'schema_migrations' }]);
+    expect(await readdir(memoryDir)).toEqual([]);
+    const spaceFiles = await readdir(spaceDir);
+    expect(spaceFiles).toContain('intended.sqlite ');
+    expect(spaceFiles).not.toContain('intended.sqlite');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Studio saves, publishes and reopens SQLite files whose names end in a space or contain %, ? and #, so releases 1 and 2 land in those exact files on disk', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-odd-names-'));
+  try {
+    const paths = [join(dir, 'intended.sqlite '), join(dir, 'q?t#1%2.sqlite')];
+
+    const first = await studioProbe(['memory-db', ...paths]);
+    const second = await studioProbe(['memory-db', ...paths]);
+
+    const files = await readdir(dir);
+    expect(files).toContain('intended.sqlite ');
+    expect(files).toContain('q?t#1%2.sqlite');
+    expect(files).not.toContain('intended.sqlite');
+    for (const [index, path] of paths.entries()) {
+      expect(first.forms[index]).toEqual({ db: path, persistent: true, status: 'Draft saved', saveError: null, publishError: null, releases: [1] });
+      expect(second.forms[index]).toEqual({ db: path, persistent: true, status: 'Draft saved', saveError: null, publishError: null, releases: [1, 2] });
+      const db = new DatabaseSync(path, { readOnly: true });
+      const versions = db.prepare('SELECT version FROM spell_releases ORDER BY version').all() as { version: number }[];
+      db.close();
+      expect(versions.map((row) => row.version)).toEqual([1, 2]);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
