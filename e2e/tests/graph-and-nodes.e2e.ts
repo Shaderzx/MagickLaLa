@@ -773,13 +773,13 @@ test('a flow/subgraph node runs the child spell with its payload, returns its re
       expect(summary?.replies).toEqual(['child saw rust', 'parent heard child saw rust']);
       expect(summary?.outputs['call.result']).toEqual({ type: 'string', value: 'child saw rust' });
       expect(summary?.outputs['call.outputs']?.value).toMatchObject({ 'child_send.sent': 'child saw rust', 'child_words.text': 'child saw rust' });
-      expect(eventIndex(run.events, 'node_finished', 'child_send')).toBeLessThan(eventIndex(run.events, 'node_finished', 'send'));
+      expect(eventIndex(run.events, 'node_finished', 'call/child_send')).toBeLessThan(eventIndex(run.events, 'node_finished', 'send'));
       expect(run.events.filter((event) => event.event === 'run_finished')).toHaveLength(1);
 
       const starved = await runSpell([path, '--subgraph', childPath, '--payload', JSON.stringify('rust'), '--step-limit', String(nodes.length)], {});
       expect(starved.code).toBe(1);
       expect(summaryOf(starved)?.error).toBe(`step limit ${nodes.length} exceeded`);
-      expect(eventIndex(starved.events, 'node_finished', 'child_send')).toBe(-1);
+      expect(eventIndex(starved.events, 'node_finished', 'call/child_send')).toBe(-1);
       expect(eventIndex(starved.events, 'node_started', 'send')).toBe(-1);
     }, { subgraphs: [{ node_id: 'call', spell_id: childSpellId }] });
   });
@@ -858,4 +858,133 @@ test('an OpenAI [DONE] marker does not end a Gemini or Anthropic stream that nev
   } finally {
     await provider.close();
   }
+});
+
+function uuidFor(n: number) {
+  return `0190a1b2-c3d4-7e5f-8a9b-${String(n).padStart(12, '0')}`;
+}
+
+function callerSpell(id: string, calls: string[]) {
+  const callIds = calls.map((_, index) => `call_${index}`);
+  const flowOrder = ['start', ...callIds, ...(calls.length === 0 ? ['send'] : [])];
+  const nodes = [
+    spellNode('start', 'event/on_start'),
+    ...callIds.map((callId) => spellNode(callId, 'flow/subgraph')),
+    ...(calls.length === 0 ? [spellNode('send', 'io/send_message', { content: `leaf ${id}` })] : []),
+  ];
+  const wires = flowOrder.slice(1).map((target, index) => spellWire(`w_${target}`, flowOrder[index], 'out', target, 'in'));
+  const subgraphs = calls.map((spell, index) => ({ node_id: callIds[index], spell_id: spell }));
+  return { schema_version: 1, id, name: id, nodes, wires, subgraphs };
+}
+
+async function withSpellFiles<T>(spells: { id: string }[], use: (paths: Map<string, string>) => Promise<T>) {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-spells-'));
+  try {
+    const paths = new Map<string, string>();
+    for (const spell of spells) {
+      const path = join(dir, `${spell.id}.json`);
+      await writeFile(path, JSON.stringify(spell));
+      paths.set(spell.id, path);
+    }
+    return await use(paths);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+function diamond(withDeepLeaf: boolean) {
+  const [root, shared, sharedChild, sharedGrandchild] = [uuidFor(1), uuidFor(2), uuidFor(3), uuidFor(4)];
+  const chain = Array.from({ length: 14 }, (_, index) => uuidFor(100 + index));
+  const spells = [
+    callerSpell(root, [shared, chain[0]]),
+    ...chain.map((spell, index) => callerSpell(spell, [chain[index + 1] ?? shared])),
+    callerSpell(shared, [sharedChild]),
+    callerSpell(sharedChild, withDeepLeaf ? [sharedGrandchild] : []),
+    ...(withDeepLeaf ? [callerSpell(sharedGrandchild, [])] : []),
+  ];
+  return { root, leaf: withDeepLeaf ? sharedGrandchild : sharedChild, spells };
+}
+
+async function runDiamond(withDeepLeaf: boolean) {
+  const { root, leaf, spells } = diamond(withDeepLeaf);
+  return withSpellFiles(spells, async (paths) => {
+    const subgraphArgs = spells.filter((spell) => spell.id !== root).flatMap((spell) => ['--subgraph', paths.get(spell.id) ?? '']);
+    return { leaf, run: await runSpell([paths.get(root) ?? '', ...subgraphArgs], {}) };
+  });
+}
+
+test('a subgraph call path deeper than 16 levels is rejected before any node runs even when a shallow path already reached the shared child', async () => {
+  const deep = await runDiamond(true);
+  expect(deep.run.code).toBe(1);
+  expect(deep.run.stderr).toContain('exceeds 16 levels');
+  expect(deep.run.events).toEqual([]);
+
+  const atLimit = await runDiamond(false);
+  expect(atLimit.run.code).toBe(0);
+  expect(summaryOf(atLimit.run)?.replies).toEqual([`leaf ${atLimit.leaf}`, `leaf ${atLimit.leaf}`]);
+});
+
+test('a template wired to a failing JSON parser on an input it no longer reads succeeds without running the parser', async () => {
+  const nodes = [
+    spellNode('start', 'event/on_start'),
+    spellNode('broken', 'json/parse', { text: '{not json' }),
+    spellNode('words', 'text/template', { template: 'plain words' }),
+    spellNode('send', 'io/send_message'),
+  ];
+  const wires = [
+    spellWire('w_start', 'start', 'out', 'send', 'in'),
+    spellWire('w_old', 'broken', 'json', 'words', 'old'),
+    spellWire('w_content', 'words', 'text', 'send', 'content'),
+  ];
+  await withSpellFile(nodes, wires, async (path) => {
+    const run = await runSpell([path, '--step-limit', '3'], {});
+    expect(run.code).toBe(0);
+    const summary = summaryOf(run);
+    expect(summary?.replies).toEqual(['plain words']);
+    expect(summary?.nodes_executed).toBe(3);
+    expect(eventIndex(run.events, 'node_started', 'broken')).toBe(-1);
+    expect(summary?.outputs['broken.json']).toBeUndefined();
+  });
+});
+
+test('only explicit send nodes add replies, so a script output named reply or sent never becomes one', async () => {
+  const script = '#{ reply: "internal note", sent: "also internal" }';
+  const withSend = [spellNode('start', 'event/on_start'), spellNode('script', 'code/rhai_script', { script }), spellNode('send', 'io/send_message', { content: 'the real reply' })];
+  const withSendWires = [spellWire('w_script', 'start', 'out', 'script', 'in'), spellWire('w_send', 'script', 'out', 'send', 'in')];
+  await withSpellFile(withSend, withSendWires, async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(0);
+    expect(summaryOf(run)?.outputs['script.reply']).toEqual({ type: 'string', value: 'internal note' });
+    expect(summaryOf(run)?.replies).toEqual(['the real reply']);
+  });
+  const scriptOnly = [spellNode('start', 'event/on_start'), spellNode('script', 'code/rhai_script', { script })];
+  await withSpellFile(scriptOnly, [spellWire('w_script', 'start', 'out', 'script', 'in')], async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(0);
+    expect(summaryOf(run)?.outputs['script.sent']).toEqual({ type: 'string', value: 'also internal' });
+    expect(summaryOf(run)?.replies).toEqual([]);
+  });
+});
+
+function relaySpell(id: string, label: string, call?: { node: string; spell: string }) {
+  const flow = ['start', ...(call ? [call.node] : []), 'send'];
+  const nodes = [spellNode('start', 'event/on_start'), ...(call ? [spellNode(call.node, 'flow/subgraph')] : []), spellNode('send', 'io/send_message', { content: `from ${label}` })];
+  const wires = flow.slice(1).map((target, index) => spellWire(index === 0 ? 'w_flow' : 'w_next', flow[index], 'out', target, 'in'));
+  return { schema_version: 1, id, name: label, nodes, wires, subgraphs: call ? [{ node_id: call.node, spell_id: call.spell }] : [] };
+}
+
+test('trace events from a subgraph carry the calling node path, so child nodes named like parent nodes never collide', async () => {
+  const [parentId, childId, grandchildId] = [uuidFor(201), uuidFor(202), uuidFor(203)];
+  const spells = [relaySpell(parentId, 'parent', { node: 'outer', spell: childId }), relaySpell(childId, 'child', { node: 'inner', spell: grandchildId }), relaySpell(grandchildId, 'grandchild')];
+  await withSpellFiles(spells, async (paths) => {
+    const run = await runSpell([paths.get(parentId) ?? '', '--subgraph', paths.get(childId) ?? '', '--subgraph', paths.get(grandchildId) ?? ''], {});
+    expect(run.code).toBe(0);
+    expect(summaryOf(run)?.replies).toEqual(['from grandchild', 'from child', 'from parent']);
+    const finished = run.events.filter((event) => event.event === 'node_finished').map((event) => event.node_id);
+    expect(finished).toEqual(['start', 'outer/start', 'outer/inner/start', 'outer/inner/send', 'outer/inner', 'outer/send', 'outer', 'send']);
+    const wires = run.events.filter((event) => event.event === 'wire_activated').map((event) => (event as TraceEvent & { wire_id?: string }).wire_id);
+    expect(wires).toEqual(['w_flow', 'outer/w_flow', 'outer/inner/w_flow', 'outer/w_next', 'w_next']);
+    expect(run.events.filter((event) => event.event === 'run_started')).toHaveLength(1);
+    expect(run.events.filter((event) => event.event === 'run_finished')).toHaveLength(1);
+  });
 });

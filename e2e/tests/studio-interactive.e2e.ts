@@ -313,3 +313,37 @@ test('Publishing keeps one stable spell record through a rename, so v1 and v2 bo
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('a flow/subgraph node placed in Studio points at a spell published to its SQLite file, validates, runs the child through the real engine, and leaves no orphan entry once deleted', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-subgraph-'));
+  const dbPath = join(dir, 'studio.sqlite');
+  try {
+    const report = await studioProbe(['subgraph', dbPath]);
+
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const published = db.prepare("SELECT json_extract(graph, '$.id') AS spellId FROM spell_releases ORDER BY version").all() as { spellId: string }[];
+    db.close();
+    expect(published).toEqual([{ spellId: report.childSpellId }]);
+
+    expect(report.placed).toEqual({ kind: 'flow/subgraph', editor: true, caption: 'SPELL ID' });
+    expect(report.pointed.subgraphs).toEqual([{ node_id: report.callNode, spell_id: report.childSpellId, release_version: null }]);
+    expect(report.pointed.config).toMatchObject({ spell_id: report.childSpellId });
+    expect(report.pointed.validation).toBe('valid');
+    expect(report.pointed.errors).toEqual([]);
+
+    expect(report.run.status).toBe('Succeeded');
+    expect(report.run.error).toBeNull();
+    expect(report.run.failedNodes).toEqual([]);
+    expect(report.run.replies).toEqual([`child saw ${report.content}`, `parent heard child saw ${report.content}`]);
+
+    expect(report.missing.validation).toBe('invalid');
+    expect(report.missing.errors.join('\n')).toContain(report.missing.spellId);
+
+    expect(report.deleted.nodes).not.toContain(report.callNode);
+    expect(report.deleted.subgraphs).toEqual([]);
+    expect(report.deleted.validation).toBe('valid');
+    expect(report.deleted.errors).toEqual([]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
