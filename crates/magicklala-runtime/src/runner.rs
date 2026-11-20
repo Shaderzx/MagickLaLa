@@ -118,6 +118,8 @@ pub fn structural_errors(graph: &SpellGraph) -> Vec<ValidationError> {
     errors
 }
 
+const SENT_OUTPUT_SUFFIX: &str = ".sent";
+
 pub struct EngineReleaseRunner {
     engine: Arc<SpellEngine>,
     reply_outputs: Vec<String>,
@@ -156,6 +158,7 @@ impl ReleaseRunner for EngineReleaseRunner {
             .reply_outputs
             .iter()
             .filter_map(|key| summary.outputs.get(key))
+            .chain(summary.outputs.iter().filter(|(name, _)| name.ends_with(SENT_OUTPUT_SUFFIX)).map(|(_, value)| value))
             .filter_map(|value| value.as_str().map(str::to_owned))
             .map(|content| reply_action(event, content))
             .collect())

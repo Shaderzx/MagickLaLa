@@ -57,7 +57,7 @@ async fn reply(state: &AppState, text: &str) -> String {
             let request =
                 ChatRequest { content, channel: channel.unwrap_or_else(|| "websocket".to_owned()), sender: sender.unwrap_or_else(|| "user".to_owned()) };
             match deliver_chat(state, agent_id, request).await {
-                Ok(message) => serde_json::json!({ "type": "chat_accepted", "message": message }).to_string(),
+                Ok(exchange) => serde_json::json!({ "type": "chat_accepted", "message": exchange.message, "reply": exchange.reply }).to_string(),
                 Err(error) => serde_json::json!({ "type": "error", "error": error.message, "code": error.code }).to_string(),
             }
         }

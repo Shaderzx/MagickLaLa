@@ -9,14 +9,16 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::routing::{get, post, put};
-use magicklala_nodes::NodeRegistry;
-use magicklala_runtime::AgentSupervisor;
+use magicklala_embedder::{Embedder, LocalHashEmbedder};
+use magicklala_graph::{EngineServices, LlmGateway, NodeCatalog, SpellEngine, SpellValidator};
+use magicklala_nodes::{HttpLlmGateway, NodeRegistry};
+use magicklala_runtime::{AgentSupervisor, CopilotEngine, EngineReleaseRunner, InMemoryEventBus, MeteredLlmGateway, StoreKnowledgeBridge, StoreMemoryBridge};
 use magicklala_store::{AesGcmVault, CryptoVault, Repository};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 pub use api::ApiDoc;
-pub use embedding::{HashingEmbedder, cosine};
+pub use embedding::cosine;
 pub use error::{ApiError, ApiResult};
 pub use memory::{InMemoryRepository, content_hash, graph_hash};
 
@@ -38,20 +40,63 @@ pub struct AppState {
     pub supervisor: Arc<AgentSupervisor>,
     pub store: Arc<dyn Repository>,
     pub vault: Arc<dyn CryptoVault>,
+    pub embedder: Arc<dyn Embedder>,
+    pub engine: Arc<SpellEngine>,
+    pub copilot: Arc<CopilotEngine>,
+}
+
+pub struct Wiring {
+    pub registry: Arc<NodeRegistry>,
+    pub store: Arc<dyn Repository>,
+    pub vault: Arc<dyn CryptoVault>,
+    pub llm: Arc<dyn LlmGateway>,
+    pub embedder: Arc<dyn Embedder>,
+}
+
+impl Wiring {
+    pub fn new(registry: Arc<NodeRegistry>, store: Arc<dyn Repository>, vault: Arc<dyn CryptoVault>) -> Self {
+        Self { registry, store, vault, llm: Arc::new(HttpLlmGateway::from_env()), embedder: Arc::new(LocalHashEmbedder::default()) }
+    }
+
+    pub fn with_llm(mut self, llm: Arc<dyn LlmGateway>) -> Self {
+        self.llm = llm;
+        self
+    }
+
+    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
+        self.embedder = embedder;
+        self
+    }
 }
 
 impl AppState {
-    pub fn new(registry: Arc<NodeRegistry>, supervisor: Arc<AgentSupervisor>, store: Arc<dyn Repository>, vault: Arc<dyn CryptoVault>) -> Self {
-        Self { registry, supervisor, store, vault }
+    pub fn wire(wiring: Wiring) -> Self {
+        let Wiring { registry, store, vault, llm, embedder } = wiring;
+        let metered: Arc<dyn LlmGateway> = Arc::new(MeteredLlmGateway::new(Arc::clone(&llm), Arc::clone(&store)));
+        let services = EngineServices {
+            llm: Some(Arc::clone(&metered)),
+            memory: Some(Arc::new(StoreMemoryBridge::new(Arc::clone(&store), Arc::clone(&embedder)))),
+            knowledge: Some(Arc::new(StoreKnowledgeBridge::new(Arc::clone(&store), Arc::clone(&embedder)))),
+        };
+        let catalog: Arc<dyn NodeCatalog> = registry.clone();
+        let engine = Arc::new(SpellEngine::new(catalog, services));
+        let runner = Arc::new(EngineReleaseRunner::new(Arc::clone(&engine)));
+        let supervisor = Arc::new(AgentSupervisor::with_runner(Arc::new(InMemoryEventBus::default()), runner));
+        let copilot = Arc::new(CopilotEngine::new(SpellValidator::new(registry.specs())).with_model(metered, "openai", copilot_model()));
+        Self { registry, supervisor, store, vault, embedder, engine, copilot }
     }
 
-    pub fn in_memory(registry: Arc<NodeRegistry>, supervisor: Arc<AgentSupervisor>, vault_key: [u8; 32]) -> Self {
-        Self::new(registry, supervisor, Arc::new(InMemoryRepository::new()), Arc::new(AesGcmVault::new(&vault_key)))
+    pub fn in_memory(registry: Arc<NodeRegistry>, vault_key: [u8; 32]) -> Self {
+        Self::wire(Wiring::new(registry, Arc::new(InMemoryRepository::new()), Arc::new(AesGcmVault::new(&vault_key))))
     }
 
     pub fn ephemeral_vault_key() -> [u8; 32] {
         rand::random()
     }
+}
+
+fn copilot_model() -> String {
+    std::env::var("MAGICKLALA_COPILOT_MODEL").ok().filter(|model| !model.is_empty()).unwrap_or_else(|| "gpt-4o-mini".to_owned())
 }
 
 pub fn build_router(state: AppState) -> Router {

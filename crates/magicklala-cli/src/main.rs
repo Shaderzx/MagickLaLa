@@ -5,11 +5,13 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use magicklala_graph::{EngineServices, NodeCatalog, NodeId, RunTrigger, SpellEngine, SpellGraph, SpellValidator, TraceEvent, Value};
-use magicklala_nodes::default_registry;
-use magicklala_runtime::{AgentSupervisor, InMemoryEventBus};
-use magicklala_server::{AppState, ServerConfig};
+use magicklala_nodes::{HttpLlmGateway, InMemoryKnowledge, InMemoryMemory, LlmGatewayConfig, default_registry};
+use magicklala_server::{AppState, ServerConfig, Wiring};
+use magicklala_store::{AesGcmVault, CryptoVault, MASTER_KEY_ENV, Repository, SqliteStore};
 
 const VAULT_KEY_ENV: &str = "MAGICKLALA_VAULT_KEY";
+const EMBEDDER_URL_ENV: &str = "MAGICKLALA_EMBEDDER_URL";
+const EMBEDDER_MODEL_ENV: &str = "MAGICKLALA_EMBEDDER_MODEL";
 
 #[derive(Parser)]
 #[command(name = "magicklala", version, about = "MagickLaLa visual AI agent studio and runtime")]
@@ -123,7 +125,7 @@ fn main() -> ExitCode {
 
 fn dispatch(cli: Cli) -> CliResult {
     match cli.command {
-        Command::Studio { snap: Some(path), .. } => Ok(magicklala_studio::render_headless_snapshot(&path)?),
+        Command::Studio { snap: Some(path), width, height } => Ok(magicklala_studio::render_headless_snapshot_sized(&path, (width, height))?),
         Command::Studio { snap: None, width, height } => Ok(magicklala_studio::run_studio(magicklala_studio::StudioConfig { size: (width, height) })?),
         Command::Serve { bind, database_url } => block_on(serve(ServerConfig { bind, database_url })),
         Command::Spell { command } => spell(command),
@@ -135,30 +137,66 @@ fn block_on(future: impl Future<Output = CliResult>) -> CliResult {
     tokio::runtime::Runtime::new()?.block_on(future)
 }
 
-fn vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    match std::env::var(VAULT_KEY_ENV) {
-        Ok(encoded) => {
-            let bytes = hex::decode(encoded.trim())?;
-            Ok(<[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| format!("{VAULT_KEY_ENV} must be 64 hex characters (32 bytes)"))?)
-        }
+fn vault() -> Result<Arc<dyn CryptoVault>, Box<dyn std::error::Error>> {
+    let fallback = std::env::var(VAULT_KEY_ENV).ok().filter(|key| !key.trim().is_empty());
+    match AesGcmVault::from_env_or_key(fallback.as_deref()) {
+        Ok(vault) => Ok(Arc::new(vault)),
         Err(_) => {
-            eprintln!("warning: {VAULT_KEY_ENV} is not set; credentials are sealed with an ephemeral key and cannot be revealed after a restart");
-            Ok(AppState::ephemeral_vault_key())
+            eprintln!(
+                "warning: neither {MASTER_KEY_ENV} nor {VAULT_KEY_ENV} is set; credentials are sealed with an ephemeral key and cannot be revealed after a restart"
+            );
+            Ok(Arc::new(AesGcmVault::new(&AppState::ephemeral_vault_key())))
         }
     }
 }
 
+fn embedder() -> Arc<dyn magicklala_embedder::Embedder> {
+    match std::env::var(EMBEDDER_URL_ENV).ok().filter(|url| !url.is_empty()) {
+        Some(url) => {
+            let model = std::env::var(EMBEDDER_MODEL_ENV).unwrap_or_else(|_| "text-embedding-3-small".to_owned());
+            let dimensions = std::env::var("MAGICKLALA_EMBEDDER_DIMENSIONS").ok().and_then(|value| value.parse().ok()).unwrap_or(1_536);
+            let embedder = magicklala_embedder::HttpEmbedder::new(&url, model, dimensions);
+            match std::env::var("MAGICKLALA_EMBEDDER_API_KEY").ok().filter(|key| !key.is_empty()) {
+                Some(key) => Arc::new(embedder.with_api_key(key)),
+                None => Arc::new(embedder),
+            }
+        }
+        None => Arc::new(magicklala_embedder::LocalHashEmbedder::default()),
+    }
+}
+
 async fn serve(config: ServerConfig) -> CliResult {
-    let supervisor = Arc::new(AgentSupervisor::new(Arc::new(InMemoryEventBus::default())));
-    let state = AppState::in_memory(Arc::new(default_registry()), supervisor, vault_key()?);
+    let store = SqliteStore::connect(&config.database_url).await?;
+    store.migrate().await?;
+    let store: Arc<dyn Repository> = Arc::new(store);
+    let state = AppState::wire(Wiring::new(Arc::new(default_registry()), store, vault()?).with_embedder(embedder()));
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
-    eprintln!("magicklala server listening on http://{} (store: in-memory, requested {})", listener.local_addr()?, config.database_url);
+    eprintln!("magicklala server listening on http://{} (store: sqlite {})", listener.local_addr()?, config.database_url);
     Ok(magicklala_server::serve_on(listener, state).await?)
 }
 
 fn load(file: &Path) -> Result<SpellGraph, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(file).map_err(|error| format!("cannot read {}: {error}", file.display()))?;
     Ok(serde_json::from_str(&text).map_err(|error| format!("{} is not a spell: {error}", file.display()))?)
+}
+
+fn override_model(graph: &mut SpellGraph, model: &str) {
+    for node in graph.nodes.iter_mut().filter(|node| node.kind.starts_with("ai/")) {
+        if let Some(config) = node.config.as_object_mut() {
+            config.insert("model".to_owned(), serde_json::Value::String(model.to_owned()));
+        }
+    }
+}
+
+fn cli_payload(input: &str) -> Value {
+    match serde_json::from_str::<serde_json::Value>(input) {
+        Ok(json @ serde_json::Value::Object(_)) => Value::from(json),
+        _ => Value::Event(std::collections::BTreeMap::from([
+            ("channel".to_owned(), Value::String("cli".to_owned())),
+            ("sender".to_owned(), Value::String("cli".to_owned())),
+            ("content".to_owned(), Value::String(input.to_owned())),
+        ])),
+    }
 }
 
 fn spell(command: SpellCommand) -> CliResult {
@@ -179,13 +217,25 @@ fn spell(command: SpellCommand) -> CliResult {
             }
         }
         SpellCommand::Run { file, stream, trace, input, llm_base_url, model } => {
-            let graph = load(&file)?;
-            if let Some(url) = &llm_base_url {
-                eprintln!("llm: {url} model {}", model.as_deref().unwrap_or("default"));
+            let mut graph = load(&file)?;
+            if let Some(model) = model.as_deref().filter(|model| !model.is_empty()) {
+                override_model(&mut graph, model);
             }
-            let trigger_node = graph.nodes.first().map(|node| node.id.clone()).unwrap_or_else(|| NodeId::from("trigger"));
-            let engine = SpellEngine::new(registry, EngineServices::default());
-            let trigger = RunTrigger { node: trigger_node, socket: "out".to_owned(), payload: Value::from(input) };
+            let trigger_node = graph
+                .nodes
+                .iter()
+                .find(|node| registry.get(&node.kind).is_some_and(|executor| executor.spec().is_trigger))
+                .or_else(|| graph.nodes.first())
+                .map(|node| node.id.clone())
+                .unwrap_or_else(|| NodeId::from("trigger"));
+            let gateway_config = LlmGatewayConfig { base_url: llm_base_url.filter(|url| !url.is_empty()), ..LlmGatewayConfig::from_env() };
+            let services = EngineServices {
+                llm: Some(Arc::new(HttpLlmGateway::new(gateway_config))),
+                memory: Some(Arc::new(InMemoryMemory::new())),
+                knowledge: Some(Arc::new(InMemoryKnowledge::new())),
+            };
+            let engine = SpellEngine::new(registry, services);
+            let trigger = RunTrigger { node: trigger_node, socket: "out".to_owned(), payload: cli_payload(&input) };
             let emitter = Arc::new(TerminalTrace { stream, trace });
             let summary = tokio::runtime::Runtime::new()?.block_on(engine.run(&graph, trigger, emitter))?;
             let rendered = serde_json::to_string_pretty(&summary)?;

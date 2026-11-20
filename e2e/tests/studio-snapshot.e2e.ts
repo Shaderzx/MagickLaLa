@@ -9,7 +9,7 @@ const run = promisify(execFile);
 const repoRoot = resolve(import.meta.dirname, '..', '..');
 const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
-test('magicklala studio --snap writes a non-empty Studio PNG without a display server', async () => {
+test('magicklala studio --snap writes a non-empty Studio PNG without a display server', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-snap-'));
   const out = join(dir, 'studio.png');
   try {

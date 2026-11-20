@@ -38,7 +38,16 @@ async function stopProcess(child: ChildProcess): Promise<void> {
 }
 
 function emptySpell(name: string) {
-  return { schema_version: 1, id: randomUUID(), name, description: 'loopback spell', variables: [], nodes: [], wires: [], subgraphs: [] };
+  return {
+    schema_version: 1,
+    id: randomUUID(),
+    name,
+    description: 'loopback spell',
+    variables: [],
+    nodes: [{ id: 'message', kind: 'event/on_message', position: [0, 0], config: {} }],
+    wires: [],
+    subgraphs: [],
+  };
 }
 
 const test = base.extend<{ server: Server }>({

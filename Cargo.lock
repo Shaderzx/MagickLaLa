@@ -2292,10 +2292,12 @@ version = "0.0.1"
 dependencies = [
  "clap",
  "hex",
+ "magicklala-embedder",
  "magicklala-graph",
  "magicklala-nodes",
  "magicklala-runtime",
  "magicklala-server",
+ "magicklala-store",
  "magicklala-studio",
  "reqwest",
  "serde_json",

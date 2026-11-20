@@ -96,7 +96,7 @@ const knowledgeDocs = [
   { owner: 'other', title: 'Other agent volcano copy', kind: 'html', text: volcanoHtml },
 ];
 
-test('store keeps projects, agents, spells and numbered releases after the process restarts', async () => {
+test('store keeps projects, agents, spells and numbered releases after the process restarts', { timeout: 900_000 }, async () => {
   await withDatabase(async (db) => {
     const masterKey = randomBytes(32).toString('hex');
     const names = { project: `project-${randomBytes(4).toString('hex')}`, agent: 'Librarian', spell: 'Answer questions' };

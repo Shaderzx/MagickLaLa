@@ -567,6 +567,7 @@ fn inspector_body(app: &StudioApp, t: &Tones) -> El {
     let editor = app.prompts.get(&card.id).map(|edit| {
         text_input(edit, font(12.5, 450.0).mono())
             .key("prompt-editor")
+            .label(format!("{} prompt", card.title))
             .w_full()
             .h(150.0)
             .padding(10.0)
@@ -609,6 +610,7 @@ fn playground(app: &StudioApp, t: &Tones) -> El {
             text_input(&app.chat_input, font(12.5, 450.0))
                 .single_line()
                 .key("chat-input")
+                .label("Chat message")
                 .grow(1.0)
                 .h(32.0)
                 .px(10.0)

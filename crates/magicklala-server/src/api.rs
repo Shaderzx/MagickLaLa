@@ -6,11 +6,10 @@ use axum::response::IntoResponse;
 use chrono::Utc;
 use magicklala_connectors::{ConnectorKind, InboundEvent};
 use magicklala_embedder::{ChunkConfig, DocumentInput, DocumentKind, KnowledgePipeline};
-use magicklala_graph::{
-    EngineServices, EventEmitter, NodeCatalog, NodeId, NodeSpec, RunTrigger, SpellEngine, SpellGraph, SpellValidator, TraceEvent, ValidationError, Value,
-    WireId,
+use magicklala_graph::{EventEmitter, NodeCatalog, NodeId, NodeSpec, RunTrigger, SpellGraph, SpellValidator, TraceEvent, ValidationError, Value, WireId};
+use magicklala_runtime::{
+    AgentStatus, CopilotError, CopilotRequest, CopilotSuggestion, DEFAULT_RUN_TIMEOUT, DispatchError, GraphPatchOp, RuntimeEvent, SharedEmbedder,
 };
-use magicklala_runtime::{AgentStatus, CopilotRequest, CopilotSuggestion, GraphPatchOp, RuntimeEvent};
 use magicklala_store::*;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -18,7 +17,6 @@ use utoipa::{IntoParams, OpenApi, ToSchema};
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::embedding::HashingEmbedder;
 use crate::error::{ApiError, ApiJson, ApiPath, ApiQuery, ApiResult};
 use crate::memory::content_hash;
 
@@ -147,6 +145,11 @@ pub struct AgentView {
     #[serde(flatten)]
     pub agent: Agent,
     pub status: AgentStatus,
+}
+
+async fn embed(state: &AppState, text: &str) -> ApiResult<Vec<f32>> {
+    let mut vectors = state.embedder.embed(&[text.to_owned()]).await.map_err(|error| ApiError::internal(error.to_string()))?;
+    vectors.pop().ok_or_else(|| ApiError::internal("embedder returned no vector"))
 }
 
 fn default_channel() -> String {
@@ -309,12 +312,24 @@ pub async fn run_spell(State(state): State<AppState>, ApiPath(id): ApiPath<Uuid>
     let spell = state.store.get_spell(SpellRecordId(id)).await?;
     let trigger_node =
         body.trigger_node.map(NodeId).or_else(|| spell.graph.nodes.first().map(|node| node.id.clone())).unwrap_or_else(|| NodeId::from("trigger"));
-    let catalog: Arc<dyn NodeCatalog> = state.registry.clone();
-    let engine = SpellEngine::new(catalog, EngineServices::default());
     let trace = Arc::new(BusTrace { state: state.clone(), agent: None, collected: Mutex::new(Vec::new()) });
-    let summary =
-        engine.run(&spell.graph, RunTrigger { node: trigger_node, socket: "out".to_owned(), payload: Value::from(body.input) }, trace.clone()).await?;
+    let trigger = RunTrigger { node: trigger_node, socket: "out".to_owned(), payload: Value::from(body.input) };
+    let summary = state.engine.run(&spell.graph, trigger.clone(), trace.clone()).await?;
     let events = trace.collected.lock().map(|events| events.clone()).unwrap_or_default();
+    let record = ExecutionRun {
+        run_id: summary.run_id.0,
+        agent_id: None,
+        spell_id: spell.id,
+        release_id: None,
+        status: summary.status,
+        trigger: trigger.node.0,
+        started_at: summary.started_at,
+        finished_at: Some(summary.finished_at),
+        nodes_executed: summary.nodes_executed,
+        error: summary.error.clone(),
+        trace: serde_json::to_value(&events).unwrap_or_default(),
+    };
+    state.store.record_run(record).await?;
     Ok(Json(serde_json::json!({ "summary": summary, "trace": events })))
 }
 
@@ -396,6 +411,9 @@ pub async fn publish_release(
     let release = state.store.create_release(NewSpellRelease { spell_id, notes: body.notes }).await?;
     let pin = UpdateAgent { default_spell_id: Some(Some(spell_id)), pinned_release_id: Some(Some(release.id)), ..UpdateAgent::default() };
     state.store.update_agent(agent.id, pin).await?;
+    if state.supervisor.status(agent.id.0).await.is_some() {
+        deploy(&state, agent.id.0, release.graph.clone()).await?;
+    }
     Ok(created(release))
 }
 
@@ -414,10 +432,11 @@ pub async fn start_agent(State(state): State<AppState>, ApiPath(id): ApiPath<Uui
     if !agent.enabled {
         return Err(ApiError::conflict("agent_disabled", "agent is disabled"));
     }
-    if agent.pinned_release_id.is_none() {
-        return Err(ApiError::conflict("no_release", "publish a release before starting the agent"));
-    }
+    let pinned = pinned_release(&state, &agent).await?.ok_or_else(|| ApiError::conflict("no_release", "publish a release before starting the agent"))?;
     state.supervisor.register(id).await;
+    if state.supervisor.release(id).await.is_none_or(|deployed| deployed.graph != pinned.graph) {
+        deploy(&state, id, pinned.graph).await?;
+    }
     state.supervisor.start(id).await?;
     Ok(Json(agent_view(&state, agent).await))
 }
@@ -430,7 +449,61 @@ pub async fn stop_agent(State(state): State<AppState>, ApiPath(id): ApiPath<Uuid
     Ok(Json(agent_view(&state, agent).await))
 }
 
-pub async fn deliver_chat(state: &AppState, agent_id: Uuid, body: ChatRequest) -> ApiResult<ChatMessage> {
+async fn pinned_release(state: &AppState, agent: &Agent) -> ApiResult<Option<SpellRelease>> {
+    let (Some(release_id), Some(spell_id)) = (agent.pinned_release_id, agent.default_spell_id) else { return Ok(None) };
+    Ok(state.store.list_releases(spell_id).await?.into_iter().find(|release| release.id == release_id))
+}
+
+async fn deploy(state: &AppState, agent_id: Uuid, graph: SpellGraph) -> ApiResult<()> {
+    match state.supervisor.deploy_release(agent_id, graph).await {
+        Ok(_) | Err(DispatchError::InvalidRelease(_)) => Ok(()),
+        Err(error) => Err(dispatch_error(error)),
+    }
+}
+
+fn dispatch_error(error: DispatchError) -> ApiError {
+    match error {
+        DispatchError::InvalidRelease(detail) => ApiError::bad_request("invalid_spell", detail),
+        DispatchError::NotRunning(_) => ApiError::conflict("agent_not_running", "start the agent before sending it events"),
+        DispatchError::NoRelease(_) => ApiError::conflict("no_release", "publish a release before starting the agent"),
+        other => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "dispatch_failed", other.to_string()),
+    }
+}
+
+#[derive(Serialize)]
+pub struct ChatExchange {
+    pub message: ChatMessage,
+    pub reply: ChatMessage,
+}
+
+enum RunOutcome {
+    Reply(String),
+    Failed(String),
+}
+
+async fn await_reply(events: &mut tokio::sync::broadcast::Receiver<RuntimeEvent>, agent_id: Uuid, channel: &str) -> ApiResult<String> {
+    let wait = async {
+        loop {
+            match events.recv().await {
+                Ok(RuntimeEvent::Outbound { action }) if action.channel == channel && action.connector_id.is_nil() => return RunOutcome::Reply(action.content),
+                Ok(RuntimeEvent::Trace { agent_id: Some(source), event: TraceEvent::RunFinished { summary, .. } })
+                    if source == agent_id && summary.status != magicklala_graph::RunStatus::Succeeded =>
+                {
+                    return RunOutcome::Failed(summary.error.unwrap_or_else(|| format!("run ended {:?}", summary.status)));
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return RunOutcome::Failed("event bus closed".to_owned()),
+            }
+        }
+    };
+    match tokio::time::timeout(DEFAULT_RUN_TIMEOUT + std::time::Duration::from_secs(5), wait).await {
+        Ok(RunOutcome::Reply(content)) => Ok(content),
+        Ok(RunOutcome::Failed(error)) => Err(ApiError::new(StatusCode::BAD_GATEWAY, "run_failed", error)),
+        Err(_) => Err(ApiError::new(StatusCode::GATEWAY_TIMEOUT, "run_timeout", "the agent did not reply in time")),
+    }
+}
+
+pub async fn deliver_chat(state: &AppState, agent_id: Uuid, body: ChatRequest) -> ApiResult<ChatExchange> {
     let agent = state.store.get_agent(AgentId(agent_id)).await?;
     if body.content.trim().is_empty() {
         return Err(ApiError::bad_request("invalid_body", "content must not be empty"));
@@ -449,8 +522,11 @@ pub async fn deliver_chat(state: &AppState, agent_id: Uuid, body: ChatRequest) -
             metadata: serde_json::Value::Null,
         })
         .await?;
-    state.supervisor.bus().publish(RuntimeEvent::Inbound {
-        event: InboundEvent {
+    let mut events = state.supervisor.bus().subscribe();
+    let channel = body.channel.clone();
+    state
+        .supervisor
+        .dispatch_inbound(InboundEvent {
             connector_id: Uuid::nil(),
             agent_id: agent.id.0,
             kind: ConnectorKind::Rest,
@@ -459,15 +535,27 @@ pub async fn deliver_chat(state: &AppState, agent_id: Uuid, body: ChatRequest) -
             content: body.content,
             payload: serde_json::to_value(&message).unwrap_or_default(),
             received_at: Utc::now(),
-        },
-    });
-    Ok(message)
+        })
+        .await
+        .map_err(dispatch_error)?;
+    let content = await_reply(&mut events, agent.id.0, &channel).await?;
+    let reply = state
+        .store
+        .append_chat(NewChatMessage {
+            agent_id: agent.id,
+            channel,
+            role: ChatRole::Assistant,
+            sender: agent.name.clone(),
+            content,
+            metadata: serde_json::json!({ "in_reply_to": message.id }),
+        })
+        .await?;
+    Ok(ChatExchange { message, reply })
 }
 
 #[utoipa::path(post, path = "/api/v1/agents/{id}/chat", tag = "agents", params(("id" = Uuid, Path, description = "Agent id")), request_body = ChatRequest, responses((status = 202, description = "Message accepted"), (status = 409, description = "Agent not running")))]
 pub async fn chat_with_agent(State(state): State<AppState>, ApiPath(id): ApiPath<Uuid>, ApiJson(body): ApiJson<ChatRequest>) -> ApiResult<impl IntoResponse> {
-    let message = deliver_chat(&state, id, body).await?;
-    Ok((StatusCode::ACCEPTED, Json(message)))
+    Ok(Json(deliver_chat(&state, id, body).await?))
 }
 
 #[utoipa::path(post, path = "/api/v1/credentials", tag = "credentials", request_body = CreateCredential, responses((status = 201, description = "Credential sealed; metadata only")))]
@@ -490,7 +578,8 @@ pub async fn delete_credential(State(state): State<AppState>, ApiPath(id): ApiPa
 
 #[utoipa::path(post, path = "/api/v1/agents/{id}/knowledge", tag = "knowledge", params(("id" = Uuid, Path, description = "Agent id")), request_body = AddKnowledge, responses((status = 201, description = "Document chunked and embedded")))]
 pub async fn add_knowledge(State(state): State<AppState>, ApiPath(id): ApiPath<Uuid>, ApiJson(body): ApiJson<AddKnowledge>) -> ApiResult<impl IntoResponse> {
-    let pipeline = KnowledgePipeline::new(HashingEmbedder, ChunkConfig::default()).map_err(|error| ApiError::internal(error.to_string()))?;
+    let pipeline =
+        KnowledgePipeline::new(SharedEmbedder(Arc::clone(&state.embedder)), ChunkConfig::default()).map_err(|error| ApiError::internal(error.to_string()))?;
     let kind = if body.markdown { DocumentKind::Markdown } else { DocumentKind::Text };
     let document = DocumentInput { title: body.title.clone(), kind, source_uri: body.source_uri.clone(), bytes: body.content.clone().into_bytes() };
     let chunks = pipeline.ingest(&document).await.map_err(|error| ApiError::bad_request("invalid_document", error.to_string()))?;
@@ -515,7 +604,7 @@ pub async fn search_knowledge(
     ApiPath(id): ApiPath<Uuid>,
     ApiQuery(query): ApiQuery<SearchQuery>,
 ) -> ApiResult<Json<Vec<SearchHit<KnowledgeChunk>>>> {
-    let embedding = HashingEmbedder::embed_one(&query.q);
+    let embedding = embed(&state, &query.q).await?;
     Ok(Json(state.store.search_knowledge(AgentId(id), &query.q, &embedding, query.limit.unwrap_or(DEFAULT_SEARCH_LIMIT)).await?))
 }
 
@@ -524,7 +613,7 @@ pub async fn add_memory(State(state): State<AppState>, ApiPath(id): ApiPath<Uuid
     if body.content.trim().is_empty() {
         return Err(ApiError::bad_request("invalid_body", "content must not be empty"));
     }
-    let embedding = HashingEmbedder::embed_one(&body.content);
+    let embedding = embed(&state, &body.content).await?;
     Ok(created(state.store.add_memory(NewMemory { agent_id: AgentId(id), content: body.content, embedding: Some(embedding), metadata: body.metadata }).await?))
 }
 
@@ -534,7 +623,7 @@ pub async fn search_memories(
     ApiPath(id): ApiPath<Uuid>,
     ApiQuery(query): ApiQuery<SearchQuery>,
 ) -> ApiResult<Json<Vec<SearchHit<MemoryRecord>>>> {
-    let embedding = HashingEmbedder::embed_one(&query.q);
+    let embedding = embed(&state, &query.q).await?;
     Ok(Json(state.store.search_memories(AgentId(id), &embedding, query.limit.unwrap_or(DEFAULT_SEARCH_LIMIT)).await?))
 }
 
@@ -557,18 +646,18 @@ pub async fn receive_webhook(State(state): State<AppState>, ApiPath(path): ApiPa
     }
     let payload = serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&body).into_owned()));
     let content = payload.as_str().map(ToOwned::to_owned).unwrap_or_else(|| payload.to_string());
-    state.supervisor.bus().publish(RuntimeEvent::Inbound {
-        event: InboundEvent {
-            connector_id: webhook.id.0,
-            agent_id: webhook.agent_id.0,
-            kind: ConnectorKind::Webhook,
-            channel: webhook.path.clone(),
-            sender: "webhook".to_owned(),
-            content,
-            payload,
-            received_at: Utc::now(),
-        },
-    });
+    let event = InboundEvent {
+        connector_id: webhook.id.0,
+        agent_id: webhook.agent_id.0,
+        kind: ConnectorKind::Webhook,
+        channel: webhook.path.clone(),
+        sender: "webhook".to_owned(),
+        content,
+        payload,
+        received_at: Utc::now(),
+    };
+    state.supervisor.register(webhook.agent_id.0).await;
+    state.supervisor.dispatch_inbound(event).await.map_err(dispatch_error)?;
     Ok((StatusCode::ACCEPTED, Json(serde_json::json!({ "accepted": true, "webhook_id": webhook.id, "agent_id": webhook.agent_id }))))
 }
 
@@ -593,13 +682,16 @@ fn repair_ops(errors: &[ValidationError]) -> Vec<GraphPatchOp> {
 #[utoipa::path(post, path = "/api/v1/copilot/suggest", tag = "copilot", responses((status = 200, description = "Suggested graph patch")))]
 pub async fn copilot_suggest(State(state): State<AppState>, ApiJson(request): ApiJson<CopilotRequest>) -> ApiResult<Json<CopilotSuggestion>> {
     let errors = SpellValidator::new(state.registry.specs()).validate(&request.spell).err().unwrap_or_default();
-    let ops = repair_ops(&errors);
-    let summary = if errors.is_empty() {
-        format!("{} is valid; no repairs needed for \"{}\"", request.spell.name, request.prompt)
-    } else {
-        format!("{} has {} problem(s); proposing {} repair op(s)", request.spell.name, errors.len(), ops.len())
-    };
-    Ok(Json(CopilotSuggestion { summary, ops }))
+    if !errors.is_empty() {
+        let ops = repair_ops(&errors);
+        let summary = format!("{} has {} problem(s); proposing {} repair op(s)", request.spell.name, errors.len(), ops.len());
+        return Ok(Json(CopilotSuggestion { summary, ops }));
+    }
+    match state.copilot.suggest(&request).await {
+        Ok((suggestion, _)) => Ok(Json(suggestion)),
+        Err(CopilotError::Rejected(rejection)) => Err(ApiError::bad_request("patch_rejected", rejection.errors.join("; "))),
+        Err(error) => Err(ApiError::new(StatusCode::BAD_GATEWAY, "copilot_failed", error.to_string())),
+    }
 }
 
 pub async fn route_not_found() -> ApiError {

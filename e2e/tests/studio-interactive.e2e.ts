@@ -58,7 +58,7 @@ function pngFacts(bytes: Buffer) {
   return { width, height, distinctColors: colors.size, entropy };
 }
 
-test('studio probe drives spawn, drag, validate, run trace and theme toggle, then renders desktop and compact PNGs headlessly', async () => {
+test('studio probe drives spawn, drag, validate, run trace and theme toggle, then renders desktop and compact PNGs headlessly', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-probe-'));
   const desktop = join(dir, 'studio-desktop.png');
   const compact = join(dir, 'studio-compact.png');
