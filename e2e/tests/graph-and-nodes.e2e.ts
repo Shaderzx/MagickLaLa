@@ -202,3 +202,163 @@ test('the validator rejects a type-mismatched wire and a value cycle with the ex
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+type SpellNode = { id: string; kind: string; position: number[]; config: Record<string, unknown> };
+type SpellWire = { id: string; from_node: string; from_socket: string; to_node: string; to_socket: string };
+
+const spellNode = (id: string, kind: string, config: Record<string, unknown> = {}): SpellNode => ({ id, kind, position: [0, 0], config });
+const spellWire = (id: string, from_node: string, from_socket: string, to_node: string, to_socket: string): SpellWire => ({ id, from_node, from_socket, to_node, to_socket });
+
+async function withSpellFile<T>(nodes: SpellNode[], wires: SpellWire[], use: (path: string) => Promise<T>) {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-hardening-'));
+  try {
+    const path = join(dir, 'spell.json');
+    await writeFile(path, JSON.stringify({ schema_version: 1, id: '0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c', name: 'hardening', nodes, wires }));
+    return await use(path);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+async function startRecordingServer(respond: (response: ServerResponse) => void) {
+  const requests: string[] = [];
+  const server = createServer((request, response) => {
+    requests.push(`${request.method} ${request.url}`);
+    request.resume();
+    request.on('end', () => respond(response));
+  });
+  await new Promise<void>((ready) => server.listen(0, '127.0.0.1', ready));
+  const { port } = server.address() as AddressInfo;
+  return { baseUrl: `http://127.0.0.1:${port}`, requests, close: () => new Promise<void>((done) => server.close(() => done())) };
+}
+
+function failureOf(run: SpellRun, nodeId: string) {
+  return run.events.find((event) => event.event === 'node_failed' && event.node_id === nodeId)?.error ?? '';
+}
+
+function finalStatus(run: SpellRun) {
+  return run.events.find((event) => event.event === 'run_finished')?.summary?.status;
+}
+
+test('wiring both outcomes of one branch into wait_for_all is rejected because the join could never complete', async () => {
+  const nodes = [spellNode('start', 'event/on_start'), spellNode('check', 'logic/regex_match', { text: 'go', pattern: 'go' }), spellNode('gate', 'flow/branch'), spellNode('join', 'flow/wait_for_all')];
+  const wires = [
+    spellWire('w_start', 'start', 'out', 'gate', 'in'),
+    spellWire('w_condition', 'check', 'matched', 'gate', 'condition'),
+    spellWire('w_true', 'gate', 'true', 'join', 'in'),
+    spellWire('w_false', 'gate', 'false', 'join', 'in'),
+  ];
+  await withSpellFile(nodes, wires, async (path) => {
+    const validation = await runSpell([path, '--validate'], {});
+    expect(validation.code).toBe(2);
+    expect(JSON.parse(validation.stdout)).toEqual({ valid: false, errors: [{ kind: 'exclusive_join', detail: { node: 'join', source: 'gate', wires: ['w_true', 'w_false'] } }] });
+    const run = await runSpell([path], {});
+    expect(run.code).not.toBe(0);
+    expect(run.events.some((event) => event.event === 'run_finished' && event.summary?.status === 'succeeded')).toBe(false);
+  });
+});
+
+test('a wait_for_all that only some branches reach fails the run as an incomplete join instead of succeeding', async () => {
+  const nodes = [
+    spellNode('start', 'event/on_start'),
+    spellNode('fork', 'flow/split'),
+    spellNode('never', 'logic/regex_match', { text: 'stop', pattern: 'go' }),
+    spellNode('gate', 'flow/branch'),
+    spellNode('join', 'flow/wait_for_all'),
+    spellNode('after', 'io/send_message', { content: 'joined' }),
+  ];
+  const wires = [
+    spellWire('w_start', 'start', 'out', 'fork', 'in'),
+    spellWire('w_direct', 'fork', 'out_0', 'join', 'in'),
+    spellWire('w_gate', 'fork', 'out_1', 'gate', 'in'),
+    spellWire('w_condition', 'never', 'matched', 'gate', 'condition'),
+    spellWire('w_gated', 'gate', 'true', 'join', 'in'),
+    spellWire('w_after', 'join', 'out', 'after', 'in'),
+  ];
+  await withSpellFile(nodes, wires, async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(1);
+    expect(eventIndex(run.events, 'node_started', 'after')).toBe(-1);
+    expect(finalStatus(run)).toBe('failed');
+    expect(run.events.find((event) => event.event === 'run_finished')?.summary?.error).toContain('join incomplete: node "join" received 1 of 2 branches');
+  });
+});
+
+test('a while_loop stops at its own max_iterations and fails the run with the configured limit', async () => {
+  const nodes = [
+    spellNode('start', 'event/on_start'),
+    spellNode('always', 'logic/regex_match', { text: 'go', pattern: 'go' }),
+    spellNode('loop', 'flow/while_loop', { max_iterations: 3 }),
+    spellNode('tick', 'var/set', { name: 'ticks', value: 1 }),
+  ];
+  const wires = [spellWire('w_start', 'start', 'out', 'loop', 'in'), spellWire('w_condition', 'always', 'matched', 'loop', 'condition'), spellWire('w_body', 'loop', 'body', 'tick', 'in')];
+  await withSpellFile(nodes, wires, async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(1);
+    expect(run.events.filter((event) => event.event === 'node_finished' && event.node_id === 'tick').length).toBe(3);
+    expect(failureOf(run, 'loop')).toContain('while loop exceeded max_iterations 3');
+    expect(finalStatus(run)).toBe('failed');
+  });
+});
+
+test('a stream that closes before the [DONE] marker fails the run instead of returning a truncated answer', async () => {
+  const truncated = await startRecordingServer((response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(`data: ${JSON.stringify({ choices: [{ delta: { content: 'half an ans' } }] })}\n\n`);
+  });
+  try {
+    const nodes = [spellNode('start', 'event/on_start'), spellNode('writer', 'ai/stream_text', { prompt: 'write a poem' })];
+    await withSpellFile(nodes, [spellWire('w_start', 'start', 'out', 'writer', 'in')], async (path) => {
+      const run = await runSpell([path], { MAGICKLALA_LLM_BASE_URL: truncated.baseUrl });
+      expect(truncated.requests).toEqual(['POST /v1/chat/completions']);
+      expect(run.code).toBe(1);
+      expect(failureOf(run, 'writer')).toContain('upstream stream closed before completion marker');
+      expect(finalStatus(run)).toBe('failed');
+      expect(run.events.find((event) => event.event === 'run_finished')?.summary?.outputs['writer.text']).toBeUndefined();
+    });
+  } finally {
+    await truncated.close();
+  }
+});
+
+test('net/http_fetch refuses loopback and cloud metadata addresses unless private HTTP is explicitly allowed', async () => {
+  const internal = await startRecordingServer((response) => response.writeHead(200, { 'content-type': 'text/plain' }).end('internal secret'));
+  try {
+    const fetchSpell = (url: string) => [[spellNode('start', 'event/on_start'), spellNode('fetch', 'net/http_fetch', { url, timeout_ms: 5000 })], [spellWire('w_start', 'start', 'out', 'fetch', 'in')]] as const;
+    for (const url of [`${internal.baseUrl}/admin`, 'http://169.254.169.254/latest/meta-data/']) {
+      const [nodes, wires] = fetchSpell(url);
+      await withSpellFile([...nodes], [...wires], async (path) => {
+        const run = await runSpell([path], { MAGICKLALA_ALLOW_PRIVATE_HTTP: '0' });
+        expect(run.code).toBe(1);
+        expect(failureOf(run, 'fetch')).toContain('refuses to connect to private address');
+        expect(finalStatus(run)).toBe('failed');
+      });
+    }
+    expect(internal.requests).toEqual([]);
+    const [nodes, wires] = fetchSpell(`${internal.baseUrl}/admin`);
+    await withSpellFile([...nodes], [...wires], async (path) => {
+      const allowed = await runSpell([path], { MAGICKLALA_ALLOW_PRIVATE_HTTP: '1' });
+      expect(allowed.code).toBe(0);
+      expect(internal.requests).toEqual(['GET /admin']);
+      expect(allowed.events.find((event) => event.event === 'run_finished')?.summary?.outputs['fetch.body']).toEqual({ type: 'string', value: 'internal secret' });
+    });
+  } finally {
+    await internal.close();
+  }
+});
+
+test('an LLM call that names a vault credential fails as invalid config when no resolver is wired, and never sends the env key', async () => {
+  const provider = await startRecordingServer((response) => response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ choices: [{ message: { content: 'leaked' } }] })));
+  try {
+    const nodes = [spellNode('start', 'event/on_start'), spellNode('ask', 'ai/generate_text', { prompt: 'hello', credential_id: 'vault-credential-7' })];
+    await withSpellFile(nodes, [spellWire('w_start', 'start', 'out', 'ask', 'in')], async (path) => {
+      const run = await runSpell([path], { MAGICKLALA_LLM_BASE_URL: provider.baseUrl, MAGICKLALA_LLM_API_KEY: 'env-key-that-must-not-be-used' });
+      expect(run.code).toBe(1);
+      expect(failureOf(run, 'ask')).toBe('invalid config: credential vault-credential-7 cannot be resolved: no credential resolver is configured');
+      expect(provider.requests).toEqual([]);
+      expect(finalStatus(run)).toBe('failed');
+    });
+  } finally {
+    await provider.close();
+  }
+});
