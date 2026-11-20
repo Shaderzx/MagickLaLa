@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use magicklala_graph::{EngineServices, NodeCatalog, NodeId, RunTrigger, SpellEngine, SpellGraph, SpellValidator, TraceEvent, Value};
+use magicklala_graph::{EngineServices, NodeCatalog, NodeId, RunTrigger, SpellEngine, SpellGraph, SpellId, SpellValidator, SubgraphKey, TraceEvent, Value};
 use magicklala_nodes::{HttpLlmGateway, InMemoryKnowledge, InMemoryMemory, LlmGatewayConfig, NodeRegistry, default_registry};
 use magicklala_server::{ALLOWED_HOSTS_ENV, API_TOKEN_ENV, AppState, ProjectSubgraphResolver, ServerConfig, Wiring};
 use magicklala_store::{AesGcmVault, CryptoVault, MASTER_KEY_ENV, ProjectId, Repository, SqliteStore, StoreResult, is_in_memory_database_url};
@@ -246,28 +246,28 @@ fn load(file: &Path) -> Result<SpellGraph, Box<dyn std::error::Error>> {
     Ok(serde_json::from_str(&text).map_err(|error| format!("{} is not a spell: {error}", file.display()))?)
 }
 
-async fn spell_project(store: &SqliteStore, graph: &SpellGraph) -> StoreResult<Option<ProjectId>> {
+async fn stored_spell(store: &SqliteStore, graph: &SpellGraph) -> StoreResult<Option<(ProjectId, SubgraphKey)>> {
     for project in store.list_projects().await? {
-        if store.list_spells(project.id).await?.iter().any(|spell| spell.graph.id == graph.id) {
-            return Ok(Some(project.id));
+        if let Some(record) = store.list_spells(project.id).await?.into_iter().find(|spell| spell.graph.id == graph.id) {
+            return Ok(Some((project.id, (SpellId(record.id.0), None))));
         }
     }
     Ok(None)
 }
 
-async fn stored_subgraphs(db: &str, graph: &SpellGraph, registry: &NodeRegistry) -> Result<ProjectSubgraphResolver, Box<dyn std::error::Error>> {
+async fn stored_subgraphs(db: &str, graph: &SpellGraph, registry: &NodeRegistry) -> Result<(ProjectSubgraphResolver, SubgraphKey), Box<dyn std::error::Error>> {
     let url = database_url_or_default(Some(db.to_owned()));
     if !is_in_memory_database_url(&url) && !studio_db_path(Path::new(db)).exists() {
         return Err(format!("database {db} does not exist; pass the SQLite file magicklala serve uses").into());
     }
     let store = SqliteStore::connect(&url).await?;
     store.migrate().await?;
-    let project = spell_project(&store, graph)
+    let (project, root_key) = stored_spell(&store, graph)
         .await?
         .ok_or_else(|| format!("spell {} is not stored in {db}; save it there through the server or Studio, or run without --db", graph.id.0))?;
     let resolver = ProjectSubgraphResolver::load(&store, project, graph).await?;
-    resolver.verify(graph, &SpellValidator::new(registry.specs()))?;
-    Ok(resolver)
+    resolver.verify_from(graph, root_key, &SpellValidator::new(registry.specs()))?;
+    Ok((resolver, root_key))
 }
 
 fn override_model(graph: &mut SpellGraph, model: &str) {
@@ -330,7 +330,7 @@ fn spell(command: SpellCommand) -> CliResult {
                 knowledge: Some(Arc::new(InMemoryKnowledge::new())),
             };
             let engine = match resolver {
-                Some(resolver) => SpellEngine::new(registry, services).with_subgraph_resolver(Arc::new(resolver)),
+                Some((resolver, root_key)) => SpellEngine::new(registry, services).with_subgraph_resolver(Arc::new(resolver)).with_root_subgraph(root_key),
                 None => SpellEngine::new(registry, services),
             };
             let trigger = RunTrigger { node: trigger_node, socket: "out".to_owned(), payload: cli_payload(&input) };

@@ -2,17 +2,15 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use magicklala_graph::{SpellGraph, SpellId, SpellValidator, SubgraphResolver};
+use magicklala_graph::{SpellGraph, SpellId, SpellValidator, SubgraphKey, SubgraphResolver};
 use magicklala_runtime::SubgraphLoader;
 use magicklala_store::{ProjectId, Repository, StoreResult};
 
 pub const MAX_SUBGRAPH_LOOKUPS: usize = 64;
 
-type SubgraphKey = (SpellId, Option<u32>);
-
 #[derive(Debug, Clone, Default)]
 pub struct ProjectSubgraphResolver {
-    graphs: HashMap<SubgraphKey, SpellGraph>,
+    graphs: HashMap<SubgraphKey, (SpellId, SpellGraph)>,
 }
 
 fn references(graph: &SpellGraph) -> impl Iterator<Item = SubgraphKey> + '_ {
@@ -36,26 +34,31 @@ impl ProjectSubgraphResolver {
                 continue;
             }
             let (spell_id, version) = key;
-            let Some(record) = spells.iter().find(|spell| spell.id.0 == spell_id.0 || spell.graph.id == spell_id) else { continue };
+            let by_record = spells.iter().find(|spell| spell.id.0 == spell_id.0);
+            let Some(record) = by_record.or_else(|| spells.iter().find(|spell| spell.graph.id == spell_id)) else { continue };
             let graph = match version {
                 None => Some(record.graph.clone()),
                 Some(version) => store.list_releases(record.id).await?.into_iter().find(|release| release.version == version).map(|release| release.graph),
             };
             if let Some(graph) = graph {
                 pending.extend(references(&graph));
-                graphs.insert(key, graph);
+                graphs.insert(key, (SpellId(record.id.0), graph));
             }
         }
         Ok(Self { graphs })
     }
 
-    pub fn verify(&self, root: &SpellGraph, validator: &SpellValidator) -> Result<(), String> {
-        magicklala_graph::resolve_subgraphs(root, self, validator).map(drop).map_err(|error| error.to_string())
+    pub fn verify_from(&self, root: &SpellGraph, root_key: SubgraphKey, validator: &SpellValidator) -> Result<(), String> {
+        magicklala_graph::resolve_subgraphs_from(root, root_key, self, validator).map(drop).map_err(|error| error.to_string())
     }
 }
 
 impl SubgraphResolver for ProjectSubgraphResolver {
     fn resolve(&self, spell_id: SpellId, release_version: Option<u32>) -> Option<SpellGraph> {
+        self.resolve_entry(spell_id, release_version).map(|(_, graph)| graph)
+    }
+
+    fn resolve_entry(&self, spell_id: SpellId, release_version: Option<u32>) -> Option<(SpellId, SpellGraph)> {
         self.graphs.get(&(spell_id, release_version)).cloned()
     }
 }

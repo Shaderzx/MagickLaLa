@@ -284,7 +284,10 @@ impl EngineRig {
         let agent_id = agent.id.0;
         supervisor.register(agent_id).await;
         supervisor.start(agent_id).await.map_err(text_error)?;
-        supervisor.deploy_release_from(agent_id, graph, ReleaseOrigin { spell_id: record.id, release_id: None }).await.map_err(text_error)?;
+        supervisor
+            .deploy_release_from(agent_id, graph, ReleaseOrigin { spell_id: record.id, release_id: None, release_version: None })
+            .await
+            .map_err(text_error)?;
         Ok(Self { bus, supervisor, store, agent_id, spell_id: record.id.0, database })
     }
 

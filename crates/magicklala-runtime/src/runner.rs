@@ -7,7 +7,7 @@ use magicklala_connectors::{ConnectorKind, InboundEvent, OutboundAction};
 use magicklala_embedder::Embedder;
 use magicklala_graph::{
     EngineServices, EventEmitter, LlmGateway, NodeCatalog, NodeId, NodeInstance, RunBinding, RunId, RunStatus, RunSummary, RunTrigger, SPELL_SCHEMA_VERSION,
-    SpellEngine, SpellError, SpellGraph, SubgraphResolver, TraceEvent, ValidationError, Value,
+    SpellEngine, SpellError, SpellGraph, SpellId, SubgraphKey, SubgraphResolver, TraceEvent, ValidationError, Value,
 };
 use magicklala_store::{AgentId, ProjectId, ReleaseId, Repository, SpellRecordId};
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,8 @@ use crate::metered::{LlmCallScope, MeteredLlmGateway};
 pub struct ReleaseOrigin {
     pub spell_id: SpellRecordId,
     pub release_id: Option<ReleaseId>,
+    #[serde(default)]
+    pub release_version: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,6 +42,10 @@ impl AgentRelease {
 
     pub fn release_record_id(&self) -> Option<ReleaseId> {
         self.origin.and_then(|origin| origin.release_id)
+    }
+
+    pub fn root_subgraph(&self) -> SubgraphKey {
+        (SpellId(self.spell_record_id().0), self.origin.and_then(|origin| origin.release_version))
     }
 }
 
@@ -393,7 +399,12 @@ impl ReleaseRunner for EngineReleaseRunner {
         scope: RunScope,
     ) -> Result<Vec<OutboundAction>, SpellError> {
         let trigger = self.trigger(&release.graph, event)?;
-        let binding = RunBinding { agent_id: Some(release.agent_id.to_string()), allow_private_http: self.allow_private_http, run_id: Some(scope.run_id) };
+        let binding = RunBinding {
+            agent_id: Some(release.agent_id.to_string()),
+            allow_private_http: self.allow_private_http,
+            run_id: Some(scope.run_id),
+            root_subgraph: Some(release.root_subgraph()),
+        };
         let summary = match &self.scoped {
             Some(scoped) => {
                 let engine = scoped.engine(release.agent_id, scope.run_id, self.engine.step_limit(), &release.graph).await?;

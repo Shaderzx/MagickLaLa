@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use magicklala_canvas::{ExecutionStatus, SocketRef, category_accent};
-use magicklala_graph::{NodeCatalog, NodeId, NodeInstance, SocketType, SpellGraph, SpellValidator, Wire, WireId};
+use magicklala_graph::{NodeCatalog, NodeId, NodeInstance, SocketType, SpellGraph, SpellId, SpellValidator, Wire, WireId};
 use magicklala_studio::{
     PALETTE_CATEGORY_ORDER, PROMPT_EDITOR_PADDING, StudioApp, StudioConfig, StudioStore, Theme, ValidationState, palette_categories, prompt_font,
     registry_specs, render_headless_snapshot_themed, studio_view,
@@ -11,8 +11,8 @@ use magicklala_studio::{
 use rune::{Env, Runtime};
 use serde_json::json;
 
-const TOOLBAR_KEYS: [&str; 10] =
-    ["toolbar-left", "validation-pill", "validate", "run-spell", "publish", "theme-toggle", "zoom-out", "zoom-readout", "zoom-in", "zoom-fit"];
+const TOOLBAR_KEYS: [&str; 11] =
+    ["toolbar-left", "validation-pill", "validate", "run-spell", "save", "publish", "theme-toggle", "zoom-out", "zoom-readout", "zoom-in", "zoom-fit"];
 const CONTEXT_MENU_ITEMS: [&str; 4] = ["context-add-ai-generate_text", "context-delete-node", "context-fit-view", "context-dismiss"];
 
 const SETTLE: Duration = Duration::from_secs(120);
@@ -664,8 +664,8 @@ fn editor_caption(rt: &Runtime<StudioApp>) -> Option<String> {
         .map(|(_, text)| text)
 }
 
-fn type_spell_id(rt: &mut Runtime<StudioApp>, call: &NodeId, spell_id: &str) -> Result<(), String> {
-    let (selected, typed) = (call.clone(), spell_id.to_owned());
+fn type_prompt(rt: &mut Runtime<StudioApp>, node: &NodeId, text: &str) -> Result<(), String> {
+    let (selected, typed) = (node.clone(), text.to_owned());
     rt.update(move |app, _| {
         app.canvas.select(Some(selected.clone()));
         if let Some(edit) = app.prompts.get_mut(&selected) {
@@ -673,8 +673,8 @@ fn type_spell_id(rt: &mut Runtime<StudioApp>, call: &NodeId, spell_id: &str) -> 
         }
     });
     rt.frame(0.0);
-    let held = rt.state.prompts.get(call).map(|edit| edit.text.clone()).unwrap_or_default();
-    if held == spell_id && rt.find("prompt-field").is_some() { Ok(()) } else { Err(format!("inspector field holds {held:?} instead of {spell_id:?}")) }
+    let held = rt.state.prompts.get(node).map(|edit| edit.text.clone()).unwrap_or_default();
+    if held == text && rt.find("prompt-field").is_some() { Ok(()) } else { Err(format!("inspector field holds {held:?} instead of {text:?}")) }
 }
 
 fn type_release_version(rt: &mut Runtime<StudioApp>, call: &NodeId, version: &str) -> Result<(), String> {
@@ -709,14 +709,28 @@ fn run_once(rt: &mut Runtime<StudioApp>) -> Result<serde_json::Value, String> {
     Ok(run_report(&rt.state))
 }
 
+fn published_then_saved_child(db_path: &Path) -> Result<(SpellGraph, serde_json::Value), String> {
+    let mut app = StudioApp::with_spell(child_spell("v1 saw {{topic}}"), registry_specs());
+    app.store = Some(StudioStore::open(Some(db_path)).map_err(|error| error.to_string())?);
+    let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    click(&mut rt, "publish")?;
+    let published = rt.state.releases.last().map(|release| release.version);
+    type_prompt(&mut rt, &NodeId::from("child_words"), "draft saw {{topic}}")?;
+    let save_button = rt.find("save").is_some();
+    click(&mut rt, "save")?;
+    let report = json!({
+        "published": published,
+        "saveButton": save_button,
+        "status": rt.state.draft_status,
+        "releases": rt.state.releases.iter().map(|release| release.version).collect::<Vec<_>>(),
+        "storeError": rt.state.store_error,
+    });
+    Ok((rt.state.spell.clone(), report))
+}
+
 fn subgraph(db_path: &Path) -> Result<serde_json::Value, String> {
-    let mut child = child_spell("v1 saw {{topic}}");
-    let mut child_store = StudioStore::open(Some(db_path)).map_err(|error| error.to_string())?;
-    child_store.publish(&child).map_err(|error| error.to_string())?;
-    if let Some(words) = child.nodes.iter_mut().find(|node| node.id.0 == "child_words") {
-        words.config = json!({ "template": "draft saw {{topic}}" });
-    }
-    child_store.save_draft(&child).map_err(|error| error.to_string())?;
+    let (child, child_save) = published_then_saved_child(db_path)?;
     let mut app = StudioApp::with_spell(parent_spell(), registry_specs());
     app.store = Some(StudioStore::open(Some(db_path)).map_err(|error| error.to_string())?);
     let content = app.run_payload["content"].as_str().unwrap_or_default().to_owned();
@@ -742,7 +756,7 @@ fn subgraph(db_path: &Path) -> Result<serde_json::Value, String> {
         "versionCaption": caption_above(&rt, "release-version-field"),
     });
     let child_id = child.id.0.to_string();
-    type_spell_id(&mut rt, &call, &child_id)?;
+    type_prompt(&mut rt, &call, &child_id)?;
     let call_name = call.0.clone();
     connect(&mut rt, ("trigger", "out"), (&call_name, "in"))?;
     connect(&mut rt, ("trigger", "content"), (&call_name, "payload"))?;
@@ -763,7 +777,7 @@ fn subgraph(db_path: &Path) -> Result<serde_json::Value, String> {
     type_release_version(&mut rt, &call, "")?;
     let unpinned = validation_of(&mut rt)?;
     let missing_id = SpellGraph::new("never published").id.0.to_string();
-    type_spell_id(&mut rt, &call, &missing_id)?;
+    type_prompt(&mut rt, &call, &missing_id)?;
     let mut missing = validation_of(&mut rt)?;
     missing["spellId"] = json!(missing_id);
     let doomed = call.clone();
@@ -777,6 +791,7 @@ fn subgraph(db_path: &Path) -> Result<serde_json::Value, String> {
     Ok(json!({
         "content": content,
         "childSpellId": child_id,
+        "childSave": child_save,
         "callNode": call.0,
         "placed": placed,
         "pointed": pointed,
@@ -789,6 +804,95 @@ fn subgraph(db_path: &Path) -> Result<serde_json::Value, String> {
     }))
 }
 
+fn api_shaped_parent(child: SpellId) -> SpellGraph {
+    let mut spell = SpellGraph::new("API Parent");
+    spell.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("call", "flow/subgraph", 280.0, json!({})),
+        studio_node("words", "text/template", 560.0, json!({ "template": "parent heard {{result}}" })),
+        studio_node("send", "io/send_message", 840.0, serde_json::Value::Null),
+    ];
+    spell.wires = vec![
+        studio_wire("w_call", ("trigger", "out"), ("call", "in")),
+        studio_wire("w_payload", ("trigger", "content"), ("call", "payload")),
+        studio_wire("w_send", ("call", "out"), ("send", "in")),
+        studio_wire("w_result", ("call", "result"), ("words", "result")),
+        studio_wire("w_content", ("words", "text"), ("send", "content")),
+    ];
+    spell.subgraphs = vec![magicklala_graph::SubgraphRef { node_id: NodeId::from("call"), spell_id: child, release_version: Some(1) }];
+    spell
+}
+
+fn set_child_template(child: &mut SpellGraph, template: &str) {
+    if let Some(words) = child.nodes.iter_mut().find(|node| node.id.0 == "child_words") {
+        words.config = json!({ "template": template });
+    }
+}
+
+fn edited_run(rt: &mut Runtime<StudioApp>, call: &NodeId, version: &str) -> Result<serde_json::Value, String> {
+    type_release_version(rt, call, version)?;
+    let mut edited = validation_of(rt)?;
+    edited["run"] = run_once(rt)?;
+    Ok(edited)
+}
+
+fn float_pinned_run(db_path: &Path, child: SpellId) -> Result<serde_json::Value, String> {
+    let mut parent = api_shaped_parent(child);
+    if let Some(call) = parent.nodes.iter_mut().find(|node| node.id.0 == "call") {
+        call.config = json!({ "spell_id": child.0.to_string(), "release_version": 1.0 });
+    }
+    parent.subgraphs.clear();
+    let mut app = StudioApp::with_spell(parent, registry_specs());
+    app.store = Some(StudioStore::open(Some(db_path)).map_err(|error| error.to_string())?);
+    let call = NodeId::from("call");
+    let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let version_text = rt.state.versions.get(&call).map(|edit| edit.text.clone()).unwrap_or_default();
+    let mut pinned = validation_of(&mut rt)?;
+    pinned["config"] = rt.state.configs.get(&call).cloned().unwrap_or_default();
+    pinned["versionText"] = json!(version_text);
+    pinned["run"] = run_once(&mut rt)?;
+    Ok(pinned)
+}
+
+fn subgraph_ref_edit(db_path: &Path) -> Result<serde_json::Value, String> {
+    let mut child = child_spell("v1 saw {{topic}}");
+    let mut child_store = StudioStore::open(Some(db_path)).map_err(|error| error.to_string())?;
+    child_store.publish(&child).map_err(|error| error.to_string())?;
+    set_child_template(&mut child, "v2 saw {{topic}}");
+    child_store.publish(&child).map_err(|error| error.to_string())?;
+    set_child_template(&mut child, "draft saw {{topic}}");
+    child_store.save_draft(&child).map_err(|error| error.to_string())?;
+    let mut app = StudioApp::with_spell(api_shaped_parent(child.id), registry_specs());
+    app.store = Some(StudioStore::open(Some(db_path)).map_err(|error| error.to_string())?);
+    let content = app.run_payload["content"].as_str().unwrap_or_default().to_owned();
+    let call = NodeId::from("call");
+    let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let selected = call.clone();
+    rt.update(move |app, _| app.canvas.select(Some(selected)));
+    rt.frame(0.0);
+    let version_text = rt.state.versions.get(&call).map(|edit| edit.text.clone()).unwrap_or_default();
+    let mut saved = validation_of(&mut rt)?;
+    saved["versionText"] = json!(version_text);
+    saved["config"] = rt.state.configs.get(&call).cloned().unwrap_or_default();
+    saved["run"] = run_once(&mut rt)?;
+    let second = edited_run(&mut rt, &call, "2")?;
+    type_release_version(&mut rt, &call, "zero")?;
+    let bad_version = validation_of(&mut rt)?;
+    let cleared = edited_run(&mut rt, &call, "")?;
+    let float_pinned = float_pinned_run(db_path, child.id)?;
+    Ok(json!({
+        "content": content,
+        "childSpellId": child.id.0.to_string(),
+        "callNode": call.0,
+        "saved": saved,
+        "second": second,
+        "badVersion": bad_version,
+        "cleared": cleared,
+        "floatPinned": float_pinned,
+    }))
+}
 fn trace_entry(event: &magicklala_graph::TraceEvent) -> Option<serde_json::Value> {
     use magicklala_graph::TraceEvent;
     let (kind, node) = match event {
@@ -842,6 +946,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("subgraph-ref-edit") => subgraph_ref_edit(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-collision") => subgraph_collision(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("publish-renamed") => {
             let db = args.get(1).ok_or("missing database path")?;
@@ -849,7 +954,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         }
         _ => match args {
             [desktop, compact, db_path] => probe(PathBuf::from(desktop), PathBuf::from(compact), PathBuf::from(db_path)),
-            _ => Err("usage: studio_probe <desktop.png> <compact.png> <studio.sqlite> | cancel-run <delay-ms> <deadline-ms> | publish-renamed <studio.sqlite> <name> | subgraph <studio.sqlite> | subgraph-collision <studio.sqlite>".to_owned()),
+            _ => Err("usage: studio_probe <desktop.png> <compact.png> <studio.sqlite> | cancel-run <delay-ms> <deadline-ms> | publish-renamed <studio.sqlite> <name> | subgraph <studio.sqlite> | subgraph-ref-edit <studio.sqlite> | subgraph-collision <studio.sqlite>".to_owned()),
         },
     }
 }

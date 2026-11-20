@@ -19,7 +19,7 @@ pub use services::{
     LlmStreamChunk, MemoryItem, MemoryService, NodeContext, NodeExecutor, NodeOutcome, TokenUsage,
 };
 pub use spec::{DYNAMIC_SOCKET, FieldKind, NodeConfigField, NodeSpec, SocketDirection, SocketSpec, SocketType};
-pub use subgraphs::{MAX_SUBGRAPH_DEPTH, ResolvedSubgraphs, SubgraphKey, resolve_subgraphs, verify_subgraphs};
+pub use subgraphs::{MAX_SUBGRAPH_DEPTH, ResolvedSubgraphs, SubgraphKey, resolve_subgraphs, resolve_subgraphs_from, verify_subgraphs, verify_subgraphs_from};
 pub use trace::{EmittedOutput, RunId, RunStatus, RunSummary, TraceEvent};
 pub use validator::SpellValidator;
 pub use value::Value;

@@ -15,7 +15,7 @@ use crate::subgraphs::unresolvable_subgraphs;
 use crate::{
     EmittedOutput, EventEmitter, KnowledgeService, LlmGateway, MAX_SUBGRAPH_DEPTH, MemoryService, NodeContext, NodeError, NodeExecutor, NodeId, NodeInstance,
     NodeOutcome, NodeSpec, ResolvedSubgraphs, RunId, RunStatus, RunSummary, SpellError, SpellGraph, SpellId, SpellValidator, SubgraphKey, TraceEvent, Value,
-    Wire, WireId, resolve_subgraphs,
+    Wire, WireId, resolve_subgraphs_from,
 };
 
 pub const WAIT_FOR_ALL_KIND: &str = "flow/wait_for_all";
@@ -45,6 +45,10 @@ pub trait NodeCatalog: Send + Sync {
 
 pub trait SubgraphResolver: Send + Sync {
     fn resolve(&self, spell_id: SpellId, release_version: Option<u32>) -> Option<SpellGraph>;
+
+    fn resolve_entry(&self, spell_id: SpellId, release_version: Option<u32>) -> Option<(SpellId, SpellGraph)> {
+        self.resolve(spell_id, release_version).map(|graph| (graph.id, graph))
+    }
 }
 
 #[derive(Clone, Default)]
@@ -59,6 +63,14 @@ pub struct RunBinding {
     pub agent_id: Option<String>,
     pub allow_private_http: Option<bool>,
     pub run_id: Option<RunId>,
+    pub root_subgraph: Option<SubgraphKey>,
+}
+
+impl RunBinding {
+    pub fn with_root_subgraph(mut self, key: SubgraphKey) -> Self {
+        self.root_subgraph = Some(key);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -108,6 +120,11 @@ impl SpellEngine {
         self
     }
 
+    pub fn with_root_subgraph(mut self, key: SubgraphKey) -> Self {
+        self.binding.root_subgraph = Some(key);
+        self
+    }
+
     pub fn binding(&self) -> &RunBinding {
         &self.binding
     }
@@ -148,12 +165,13 @@ impl SpellEngine {
     ) -> Result<RunSummary, SpellError> {
         let validator = self.validator();
         validator.validate(graph).map_err(SpellError::Validation)?;
-        let children = self.check_subgraphs(graph, &validator)?;
         let binding = RunBinding {
             agent_id: binding.agent_id.or_else(|| self.binding.agent_id.clone()),
             allow_private_http: binding.allow_private_http.or(self.binding.allow_private_http),
             run_id: binding.run_id.or(self.binding.run_id),
+            root_subgraph: binding.root_subgraph.or(self.binding.root_subgraph),
         };
+        let children = self.check_subgraphs(graph, binding.root_subgraph.unwrap_or((graph.id, None)), &validator)?;
         let shared = Arc::new(RunShared {
             run_id: binding.run_id.unwrap_or_default(),
             catalog: Arc::clone(&self.catalog),
@@ -177,11 +195,11 @@ impl SpellEngine {
         outcome.map(|()| summary)
     }
 
-    fn check_subgraphs(&self, graph: &SpellGraph, validator: &SpellValidator) -> Result<ResolvedSubgraphs, SpellError> {
+    fn check_subgraphs(&self, graph: &SpellGraph, root_key: SubgraphKey, validator: &SpellValidator) -> Result<ResolvedSubgraphs, SpellError> {
         let Some(resolver) = &self.subgraphs else {
             return unresolvable_subgraphs(graph).map(|()| ResolvedSubgraphs::new());
         };
-        resolve_subgraphs(graph, resolver.as_ref(), validator)
+        resolve_subgraphs_from(graph, root_key, resolver.as_ref(), validator)
     }
 }
 
@@ -228,13 +246,13 @@ enum Readiness {
     Waiting(NodeId),
 }
 
-struct WaitForData {
+struct SuspendUntilDataReady {
     memo: Memo,
     waiting_on: WaitCell,
     source: NodeId,
 }
 
-impl Future for WaitForData {
+impl Future for SuspendUntilDataReady {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
@@ -917,7 +935,7 @@ impl ExecContext {
                     event.into_iter().for_each(|event| self.state.emit(event));
                     return value;
                 }
-                Readiness::Waiting(source) => WaitForData { memo: self.memo.clone(), waiting_on: Arc::clone(&waiting_on), source }.await,
+                Readiness::Waiting(source) => SuspendUntilDataReady { memo: self.memo.clone(), waiting_on: Arc::clone(&waiting_on), source }.await,
             }
         }
     }

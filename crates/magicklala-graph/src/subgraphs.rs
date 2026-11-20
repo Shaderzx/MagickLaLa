@@ -50,21 +50,33 @@ fn unresolved(reference: &SubgraphRef) -> SpellError {
     SpellError::Internal(format!("subgraph {:?} for node {:?} cannot be resolved", reference.spell_id, reference.node_id))
 }
 
-fn resolve_child(resolved: &ResolvedSubgraphs, resolver: &dyn SubgraphResolver, reference: &SubgraphRef) -> Result<Arc<SpellGraph>, SpellError> {
-    if let Some(child) = resolved.get(&lookup_key(reference)) {
-        return Ok(Arc::clone(child));
+type CanonicalChildren = HashMap<SubgraphKey, (SpellId, Arc<SpellGraph>)>;
+
+fn resolve_child(
+    known: &mut CanonicalChildren,
+    resolver: &dyn SubgraphResolver,
+    reference: &SubgraphRef,
+) -> Result<(SubgraphKey, Arc<SpellGraph>), SpellError> {
+    let lookup = lookup_key(reference);
+    if let Some((canonical, child)) = known.get(&lookup) {
+        return Ok(((*canonical, reference.release_version), Arc::clone(child)));
     }
-    resolver.resolve(reference.spell_id, reference.release_version).map(Arc::new).ok_or_else(|| unresolved(reference))
+    let (canonical, child) = resolver.resolve_entry(reference.spell_id, reference.release_version).ok_or_else(|| unresolved(reference))?;
+    let child = Arc::new(child);
+    known.insert(lookup, (canonical, Arc::clone(&child)));
+    Ok(((canonical, reference.release_version), child))
 }
 
 fn walk_subgraphs(
     root: &SpellGraph,
+    root_key: SubgraphKey,
     resolver: &dyn SubgraphResolver,
     mut check: impl FnMut(&SpellGraph) -> Result<(), SpellError>,
 ) -> Result<ResolvedSubgraphs, SpellError> {
     let mut resolved = ResolvedSubgraphs::new();
+    let mut known = CanonicalChildren::new();
     let mut heights: HashMap<SubgraphKey, usize> = HashMap::new();
-    let mut frames = vec![Frame::new((root.id, None), root)];
+    let mut frames = vec![Frame::new(root_key, root)];
     loop {
         let depth = frames.len().saturating_sub(1);
         let Some(frame) = frames.last_mut() else {
@@ -82,8 +94,7 @@ fn walk_subgraphs(
             }
             continue;
         };
-        let child = resolve_child(&resolved, resolver, &reference)?;
-        let snapshot = (child.id, reference.release_version);
+        let (snapshot, child) = resolve_child(&mut known, resolver, &reference)?;
         if let Some(cycle) = cycle_through(&frames, snapshot, &reference) {
             return Err(cycle);
         }
@@ -107,12 +118,25 @@ fn walk_subgraphs(
     }
 }
 
+pub fn resolve_subgraphs_from(
+    root: &SpellGraph,
+    root_key: SubgraphKey,
+    resolver: &dyn SubgraphResolver,
+    validator: &SpellValidator,
+) -> Result<ResolvedSubgraphs, SpellError> {
+    walk_subgraphs(root, root_key, resolver, |child| validator.validate(child).map_err(SpellError::Validation))
+}
+
 pub fn resolve_subgraphs(root: &SpellGraph, resolver: &dyn SubgraphResolver, validator: &SpellValidator) -> Result<ResolvedSubgraphs, SpellError> {
-    walk_subgraphs(root, resolver, |child| validator.validate(child).map_err(SpellError::Validation))
+    resolve_subgraphs_from(root, (root.id, None), resolver, validator)
+}
+
+pub fn verify_subgraphs_from(root: &SpellGraph, root_key: SubgraphKey, resolver: &dyn SubgraphResolver) -> Result<(), SpellError> {
+    walk_subgraphs(root, root_key, resolver, |_| Ok(())).map(drop)
 }
 
 pub fn verify_subgraphs(root: &SpellGraph, resolver: &dyn SubgraphResolver) -> Result<(), SpellError> {
-    walk_subgraphs(root, resolver, |_| Ok(())).map(drop)
+    verify_subgraphs_from(root, (root.id, None), resolver)
 }
 
 pub(crate) fn unresolvable_subgraphs(graph: &SpellGraph) -> Result<(), SpellError> {

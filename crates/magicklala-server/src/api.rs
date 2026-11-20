@@ -18,7 +18,7 @@ use magicklala_connectors::{
 use magicklala_embedder::{ChunkConfig, DocumentInput, DocumentKind, KnowledgePipeline};
 use magicklala_graph::{
     EngineServices, EventEmitter, KnowledgeService, LlmGateway, MemoryService, NodeCatalog, NodeId, NodeInstance, NodeSpec, RunBinding, RunId, RunStatus,
-    RunSummary, RunTrigger, SpellEngine, SpellError, SpellGraph, SpellValidator, TraceEvent, ValidationError, Value, WireId,
+    RunSummary, RunTrigger, SpellEngine, SpellError, SpellGraph, SpellId, SpellValidator, SubgraphKey, TraceEvent, ValidationError, Value, WireId,
 };
 use magicklala_runtime::{
     AgentStatus, BoundedTrace, CopilotError, CopilotRequest, CopilotSuggestion, DispatchError, DispatchOptions, GraphPatchOp, LlmCallScope, MeteredLlmGateway,
@@ -480,9 +480,13 @@ pub(crate) async fn subgraph_resolver(state: &AppState, project: ProjectId, grap
     Ok(ProjectSubgraphResolver::load(state.store.as_ref(), project, graph).await?)
 }
 
-pub(crate) async fn verify_subgraphs(state: &AppState, project: ProjectId, graph: &SpellGraph) -> ApiResult<ProjectSubgraphResolver> {
+pub(crate) fn draft_root(spell: SpellRecordId) -> SubgraphKey {
+    (SpellId(spell.0), None)
+}
+
+pub(crate) async fn verify_subgraphs(state: &AppState, project: ProjectId, graph: &SpellGraph, root_key: SubgraphKey) -> ApiResult<ProjectSubgraphResolver> {
     let resolver = subgraph_resolver(state, project, graph).await?;
-    resolver.verify(graph, &SpellValidator::new(state.registry.specs())).map_err(|error| ApiError::bad_request("invalid_spell", error))?;
+    resolver.verify_from(graph, root_key, &SpellValidator::new(state.registry.specs())).map_err(|error| ApiError::bad_request("invalid_spell", error))?;
     Ok(resolver)
 }
 
@@ -609,14 +613,18 @@ pub async fn run_spell(State(state): State<AppState>, ApiPath(id): ApiPath<Uuid>
         Some(agent_id) => Some(spell_agent(&state, &spell, AgentId(agent_id)).await?),
         None => None,
     };
-    let resolver = verify_subgraphs(&state, spell.project_id, &spell.graph).await?;
+    let resolver = verify_subgraphs(&state, spell.project_id, &spell.graph, draft_root(spell.id)).await?;
     let trigger = spell_trigger(&state, &spell.graph, body.trigger_node.as_deref(), Value::from(body.input))?;
     let run_id = RunId::new();
     let trace = Arc::new(BusTrace::new(state.clone(), agent.map(|agent| agent.0)));
     let emitter: Arc<dyn EventEmitter> = Arc::clone(&trace) as Arc<dyn EventEmitter>;
     let engine = spell_engine(&state, spell.project_id, agent, run_id).with_subgraph_resolver(Arc::new(resolver));
-    let binding =
-        RunBinding { agent_id: agent.map(|agent| agent.0.to_string()), allow_private_http: Some(state.runs.allow_private_http), run_id: Some(run_id) };
+    let binding = RunBinding {
+        agent_id: agent.map(|agent| agent.0.to_string()),
+        allow_private_http: Some(state.runs.allow_private_http),
+        run_id: Some(run_id),
+        root_subgraph: Some(draft_root(spell.id)),
+    };
     let cancellation = CancellationToken::new();
     let started_at = Utc::now();
     let outcome = tokio::time::timeout(state.runs.timeout, engine.run_bound(&spell.graph, trigger.clone(), emitter, cancellation.clone(), binding)).await;
@@ -790,7 +798,7 @@ pub async fn publish_release(
     if !report.valid {
         return Err(ApiError::bad_request("invalid_spell", report.errors.join("; ")));
     }
-    verify_subgraphs(&state, agent.project_id, &snapshot).await?;
+    verify_subgraphs(&state, agent.project_id, &snapshot, draft_root(spell_id)).await?;
     let release = state.store.create_release_with_graph(NewSpellRelease { spell_id, notes: body.notes }, Some(snapshot)).await?;
     let pin = UpdateAgent { default_spell_id: Some(Some(spell_id)), pinned_release_id: Some(Some(release.id)), ..UpdateAgent::default() };
     state.store.update_agent(agent.id, pin).await?;
@@ -860,7 +868,7 @@ async fn pinned_release(state: &AppState, agent: &Agent) -> ApiResult<Option<Spe
 }
 
 async fn deploy_release(state: &AppState, agent_id: Uuid, release: &SpellRelease) -> ApiResult<()> {
-    let origin = ReleaseOrigin { spell_id: release.spell_id, release_id: Some(release.id) };
+    let origin = ReleaseOrigin { spell_id: release.spell_id, release_id: Some(release.id), release_version: Some(release.version) };
     state.supervisor.deploy_release_from(agent_id, release.graph.clone(), origin).await.map(|_| ()).map_err(dispatch_error)
 }
 
