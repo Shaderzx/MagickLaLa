@@ -1,7 +1,16 @@
+mod catalog;
+mod llm;
+mod nodes;
+mod script;
+mod stores;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use magicklala_graph::{NodeCatalog, NodeExecutor, NodeSpec};
+
+pub use llm::{HttpLlmGateway, LlmGatewayConfig, LlmProvider};
+pub use stores::{InMemoryKnowledge, InMemoryMemory};
 
 #[derive(Clone, Default)]
 pub struct NodeRegistry {
@@ -45,5 +54,9 @@ impl NodeCatalog for NodeRegistry {
 }
 
 pub fn default_registry() -> NodeRegistry {
-    NodeRegistry::new()
+    let mut registry = NodeRegistry::new();
+    for executor in catalog::standard_nodes() {
+        registry.register(executor);
+    }
+    registry
 }

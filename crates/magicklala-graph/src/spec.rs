@@ -108,7 +108,17 @@ pub struct NodeSpec {
     pub is_trigger: bool,
 }
 
+pub const DYNAMIC_SOCKET: &str = "*";
+
 impl NodeSpec {
+    pub fn resolve_input(&self, name: &str) -> Option<&SocketSpec> {
+        resolve_socket(&self.inputs, name)
+    }
+
+    pub fn resolve_output(&self, name: &str) -> Option<&SocketSpec> {
+        resolve_socket(&self.outputs, name)
+    }
+
     pub fn input(&self, name: &str) -> Option<&SocketSpec> {
         self.inputs.iter().find(|socket| socket.name == name)
     }
@@ -116,4 +126,8 @@ impl NodeSpec {
     pub fn output(&self, name: &str) -> Option<&SocketSpec> {
         self.outputs.iter().find(|socket| socket.name == name)
     }
+}
+
+fn resolve_socket<'a>(sockets: &'a [SocketSpec], name: &str) -> Option<&'a SocketSpec> {
+    sockets.iter().find(|socket| socket.name == name).or_else(|| sockets.iter().find(|socket| socket.name == DYNAMIC_SOCKET))
 }

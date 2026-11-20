@@ -1,8 +1,10 @@
+use serde::Serialize;
 use thiserror::Error;
 
-use crate::{NodeId, SocketType, WireId};
+use crate::{NodeId, SocketType, SpellId, WireId};
 
-#[derive(Debug, Clone, PartialEq, Error)]
+#[derive(Debug, Clone, PartialEq, Error, Serialize)]
+#[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
 pub enum ValidationError {
     #[error("unsupported schema version {found}, expected {expected}")]
     SchemaVersion { found: u32, expected: u32 },
@@ -28,6 +30,8 @@ pub enum ValidationError {
     NoTrigger,
     #[error("variable {0} is declared twice")]
     DuplicateVariable(String),
+    #[error("subgraph node {node:?} calls its own spell {spell:?}")]
+    SubgraphCycle { node: NodeId, spell: SpellId },
 }
 
 #[derive(Debug, Clone, PartialEq, Error)]

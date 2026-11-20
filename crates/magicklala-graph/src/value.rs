@@ -71,3 +71,56 @@ impl From<bool> for Value {
         Value::Bool(value)
     }
 }
+
+impl From<serde_json::Value> for Value {
+    fn from(json: serde_json::Value) -> Self {
+        match json {
+            serde_json::Value::Null => Value::Null,
+            serde_json::Value::Bool(flag) => Value::Bool(flag),
+            serde_json::Value::Number(number) => number.as_i64().map_or_else(|| Value::Float(number.as_f64().unwrap_or_default()), Value::Int),
+            serde_json::Value::String(text) => Value::String(text),
+            other => Value::Json(other),
+        }
+    }
+}
+
+impl Value {
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Value::Null => serde_json::Value::Null,
+            Value::Bool(flag) => serde_json::Value::Bool(*flag),
+            Value::Int(number) => serde_json::Value::from(*number),
+            Value::Float(number) => serde_json::Number::from_f64(*number).map_or(serde_json::Value::Null, serde_json::Value::Number),
+            Value::String(text) => serde_json::Value::String(text.clone()),
+            Value::Json(json) => json.clone(),
+            Value::Array(items) => serde_json::Value::Array(items.iter().map(Value::to_json).collect()),
+            Value::Embedding(vector) => serde_json::Value::Array(vector.iter().map(|item| serde_json::Value::from(f64::from(*item))).collect()),
+            Value::Event(fields) => serde_json::Value::Object(fields.iter().map(|(key, value)| (key.clone(), value.to_json())).collect()),
+        }
+    }
+
+    pub fn to_text(&self) -> String {
+        match self {
+            Value::Null => String::new(),
+            Value::String(text) | Value::Json(serde_json::Value::String(text)) => text.clone(),
+            Value::Bool(flag) => flag.to_string(),
+            Value::Int(number) => number.to_string(),
+            Value::Float(number) => number.to_string(),
+            other => other.to_json().to_string(),
+        }
+    }
+
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            Value::Null => false,
+            Value::Bool(flag) => *flag,
+            Value::Int(number) => *number != 0,
+            Value::Float(number) => *number != 0.0,
+            Value::String(text) => !text.is_empty() && text != "false",
+            Value::Json(json) => !matches!(json, serde_json::Value::Null | serde_json::Value::Bool(false)),
+            Value::Array(items) => !items.is_empty(),
+            Value::Embedding(vector) => !vector.is_empty(),
+            Value::Event(fields) => !fields.is_empty(),
+        }
+    }
+}
