@@ -6,6 +6,7 @@ import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { deflateSync } from 'node:zlib';
 
 const run = promisify(execFile);
 const repoRoot = resolve(import.meta.dirname, '..', '..');
@@ -77,7 +78,18 @@ const volcanoHtml = `<!doctype html><html><head><title>Volcanoes</title><style>.
 const sourdoughMarkdown = `# Sourdough starter\n\nA sourdough **starter** is flour and water kept alive by wild yeast.\n\n## Fermentation\n\nLong fermentation gives sourdough bread its sour taste and open crumb.\n`;
 const tidesText = 'The moon pulls the ocean and makes the tide rise and fall twice a day.';
 
+const plainPdfLine = 'Harbour tide tables list every high water';
+const compressedPdfLine = 'Spring tides arrive after each full moon';
+const compressedPdfStream = deflateSync(Buffer.from(`BT /F1 12 Tf 72 690 Td (${compressedPdfLine}) Tj ET`));
+const harbourPdf = Buffer.concat([
+  Buffer.from(`%PDF-1.4\n1 0 obj << /Length 64 >>\nstream\nBT /F1 12 Tf 72 712 Td (${plainPdfLine}) Tj ET\nendstream\nendobj\n`),
+  Buffer.from(`2 0 obj << /Length ${compressedPdfStream.length} /Filter /FlateDecode >>\nstream\n`),
+  compressedPdfStream,
+  Buffer.from('\nendstream\nendobj\n%%EOF\n'),
+]);
+
 const knowledgeDocs = [
+  { owner: 'primary', title: 'Harbour PDF', kind: 'pdf', base64: harbourPdf.toString('base64') },
   { owner: 'primary', title: 'Volcano field guide', kind: 'html', text: volcanoHtml },
   { owner: 'primary', title: 'Sourdough handbook', kind: 'markdown', text: sourdoughMarkdown },
   { owner: 'primary', title: 'Tide notes', kind: 'text', text: tidesText },
@@ -125,12 +137,13 @@ test('hybrid knowledge search ranks the matching HTML and Markdown documents fir
   const embeddings = await startEmbeddingsServer();
   try {
     for (const embedder of ['local', 'http']) {
-      await withDatabase(async (db) => {
-        const masterKey = randomBytes(32).toString('hex');
-        const spec = { db, embedder, embeddingsUrl: `${embeddings.url}/v1`, model: 'loopback-embed', docs: knowledgeDocs, limit: 5 };
+      const masterKey = randomBytes(32).toString('hex');
+      const searchFreshStore = (query: string) =>
+        withDatabase((db) => probeJson('knowledge', { db, embedder, embeddingsUrl: `${embeddings.url}/v1`, model: 'loopback-embed', docs: knowledgeDocs, limit: 5, query }, masterKey));
 
-        const volcano = await probeJson('knowledge', { ...spec, query: 'how does basalt lava form in an eruption' }, masterKey);
-        const sourdough = await probeJson('knowledge', { ...spec, query: 'sourdough starter fermentation' }, masterKey);
+      const volcano = await searchFreshStore('how does basalt lava form in an eruption');
+      const sourdough = await searchFreshStore('sourdough starter fermentation');
+      {
 
         expect(volcano.hits[0].title).toBe('Volcano field guide');
         expect(sourdough.hits[0].title).toBe('Sourdough handbook');
@@ -147,7 +160,10 @@ test('hybrid knowledge search ranks the matching HTML and Markdown documents fir
         expect(sourdoughText).toContain('A sourdough starter is flour and water kept alive by wild yeast.');
         expect(sourdoughText).not.toContain('**');
         expect(sourdoughText).not.toContain('# ');
-      });
+        const harbourText = volcano.chunks['Harbour PDF'].join(' ');
+        expect(harbourText).toContain(plainPdfLine);
+        expect(harbourText).toContain(compressedPdfLine);
+      }
     }
     const embeddingRequests = embeddings.requests.filter((request) => request.path === '/v1/embeddings');
     expect(embeddingRequests.length).toBe(embeddings.requests.length);
@@ -157,6 +173,19 @@ test('hybrid knowledge search ranks the matching HTML and Markdown documents fir
   } finally {
     await new Promise((closed) => embeddings.server.close(closed));
   }
+});
+
+test('PDF extraction rejects bytes that are not a PDF and a PDF whose stream never ends', async () => {
+  const masterKey = randomBytes(32).toString('hex');
+  const notPdf = await probe('extract', { kind: 'pdf', base64: randomBytes(256).toString('base64') }, masterKey);
+  const truncated = await probe('extract', { kind: 'pdf', base64: Buffer.from(`%PDF-1.4\n1 0 obj << /Length 64 >>\nstream\nBT (${plainPdfLine}) Tj`).toString('base64') }, masterKey);
+  const readable = await probeJson('extract', { kind: 'pdf', base64: harbourPdf.toString('base64') }, masterKey);
+
+  expect(notPdf.ok).toBe(false);
+  expect(notPdf.ok ? '' : notPdf.stderr).toContain('missing %PDF- header');
+  expect(truncated.ok).toBe(false);
+  expect(truncated.ok ? '' : truncated.stderr).toContain('stream without endstream');
+  expect(readable.text).toBe(`${plainPdfLine}\n\n${compressedPdfLine}`);
 });
 
 test('memory search returns the agent memory closest to the query first and never another agent memory', async () => {

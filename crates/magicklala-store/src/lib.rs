@@ -1,14 +1,16 @@
 mod models;
+mod sqlite;
 mod vault;
 
 use std::str::FromStr;
 
 use sqlx::SqlitePool;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use thiserror::Error;
 
 pub use models::*;
-pub use vault::{AesGcmVault, CryptoVault};
+pub use sqlite::{POSTGRES_SCHEMA, cosine_similarity};
+pub use vault::{AesGcmVault, CryptoVault, MASTER_KEY_ENV};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -71,7 +73,11 @@ pub struct SqliteStore {
 
 impl SqliteStore {
     pub async fn connect(url: &str) -> StoreResult<Self> {
-        let options = SqliteConnectOptions::from_str(url)?.create_if_missing(true).foreign_keys(true);
+        let options = SqliteConnectOptions::from_str(url)?
+            .create_if_missing(true)
+            .foreign_keys(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(std::time::Duration::from_secs(10));
         let pool = SqlitePoolOptions::new().max_connections(8).connect_with(options).await?;
         Ok(Self { pool })
     }
