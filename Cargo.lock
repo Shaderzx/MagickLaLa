@@ -2285,10 +2285,15 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "chrono",
+ "hex",
+ "hmac",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "uuid",
 ]
 
@@ -2339,12 +2344,20 @@ dependencies = [
 name = "magicklala-runtime"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "hex",
  "magicklala-connectors",
+ "magicklala-embedder",
  "magicklala-graph",
+ "magicklala-store",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "uuid",
 ]
 
