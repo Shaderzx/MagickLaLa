@@ -22,6 +22,9 @@ pub trait NodeContext: Send {
     fn trigger_socket(&self) -> Option<&str>;
     async fn input(&mut self, socket: &str) -> Result<Option<Value>, NodeError>;
     fn variable(&self, name: &str) -> Option<Value>;
+    fn variable_default(&self, _name: &str) -> Option<Value> {
+        None
+    }
     fn set_variable(&mut self, name: &str, value: Value) -> Result<(), NodeError>;
     fn llm(&self) -> Option<Arc<dyn LlmGateway>>;
     fn memory(&self) -> Option<Arc<dyn MemoryService>>;
@@ -109,6 +112,9 @@ pub type LlmStream = Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, NodeError>
 pub trait LlmGateway: Send + Sync {
     async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, NodeError>;
     async fn stream(&self, request: LlmRequest) -> Result<LlmStream, NodeError>;
+    async fn embed(&self, _model: &str, _text: &str) -> Result<Vec<f32>, NodeError> {
+        Err(NodeError::Llm("this gateway does not support embeddings".to_owned()))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -123,6 +129,9 @@ pub struct MemoryItem {
 pub trait MemoryService: Send + Sync {
     async fn add(&self, agent_id: &str, content: &str, metadata: serde_json::Value) -> Result<String, NodeError>;
     async fn recall(&self, agent_id: &str, query: &str, limit: usize) -> Result<Vec<MemoryItem>, NodeError>;
+    async fn clear(&self, _agent_id: &str) -> Result<u64, NodeError> {
+        Err(NodeError::Service("this memory service does not support clearing".to_owned()))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
