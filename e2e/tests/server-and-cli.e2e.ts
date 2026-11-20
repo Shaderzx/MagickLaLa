@@ -1262,3 +1262,75 @@ test('An agent pinned to release A@1 that calls the B draft, which calls the A d
   expect(looped.status).toBe(502);
   expect(looped.text).toContain('subgraph cycle');
 });
+
+test('A draft that calls its own published release A@1 by its inner graph id runs directly and publishes as A@2, while the same draft calling its own unpinned graph id is still refused because it calls its own spell', buildBudget, async ({ server }) => {
+  const { project, agent } = await createAgentWithRelease(server, 'own release', echoSpell('own release seed'));
+  const aId = randomUUID();
+  const reply = 'from A@1';
+  const a = await storeSpell(server, project.id, 'own release a', fixedReplySpell(aId, 'own release a', reply));
+  const release = (spellId: string) => server.api(`/api/v1/agents/${agent.id}/releases`, { body: { spell_id: spellId } });
+  const first = await release(a.id);
+  expect(first.status).toBe(201);
+  expect(first.body.version).toBe(1);
+  const pinned = await server.api(`/api/v1/spells/${a.id}/graph`, { method: 'PUT', body: callChain('own release a', aId, [{ spell: aId, version: first.body.version }]) });
+  expect(pinned.status).toBe(200);
+  const direct = await server.api(`/api/v1/spells/${a.id}/run`, { body: { input: 'pinned self' } });
+  expect(direct.text).not.toContain('calls its own spell');
+  expect(direct.status).toBe(200);
+  expect(direct.body.summary.replies).toEqual([reply]);
+  const second = await release(a.id);
+  expect(second.text).not.toContain('calls its own spell');
+  expect(second.status).toBe(201);
+  expect(second.body.version).toBe(first.body.version + 1);
+  const unpinned = await server.api(`/api/v1/spells/${a.id}/graph`, { method: 'PUT', body: callChain('own release a', aId, [{ spell: aId }]) });
+  expect(unpinned.status).toBe(200);
+  const looped = await server.api(`/api/v1/spells/${a.id}/run`, { body: { input: 'unpinned self' } });
+  expect(looped.status).toBe(400);
+  expect(looped.body.error).toContain(`calls its own spell SpellId(${aId})`);
+  const refused = await release(a.id);
+  expect(refused.status).toBe(400);
+  expect(refused.body.error).toContain(`calls its own spell SpellId(${aId})`);
+});
+
+test('magicklala spell run --db refuses to guess between two saved spells that share one inner graph id and names --spell-id, runs the caller once --spell-id picks its record, and names a --spell-id that is not saved', buildBudget, async () => {
+  await buildCli();
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-cli-spell-id-'));
+  const dbPath = join(dir, 'spells.db');
+  try {
+    const sharedId = randomUUID();
+    const reply = 'from twin leaf a';
+    const stored = await launchServe({}, () => `sqlite://${dbPath}`);
+    let records: { a: string; b: string };
+    let caller: object;
+    try {
+      const project = await stored.server.api('/api/v1/projects', { body: { name: 'cli twins' } });
+      expect(project.status).toBe(201);
+      const a = await storeSpell(stored.server, project.body.id, 'twin leaf a', fixedReplySpell(sharedId, 'twin leaf a', reply));
+      caller = callChain('twin caller b', sharedId, [{ spell: a.id }]);
+      const b = await storeSpell(stored.server, project.body.id, 'twin caller b', caller);
+      expect([a.graph.id, b.graph.id]).toEqual([sharedId, sharedId]);
+      records = { a: a.id, b: b.id };
+    } finally {
+      await stored.stop();
+    }
+    const callerFile = join(dir, 'caller.json');
+    await writeFile(callerFile, JSON.stringify(caller));
+    const guessed = await runCli(['spell', 'run', callerFile, '--db', dbPath], keylessEnv());
+    expect(guessed.code).toBe(1);
+    expect(guessed.stderr).not.toContain('subgraph cycle');
+    expect(guessed.stderr).toContain(`multiple saved spells share graph id ${sharedId}`);
+    expect(guessed.stderr).toContain(records.a);
+    expect(guessed.stderr).toContain(records.b);
+    expect(guessed.stderr).toContain('--spell-id');
+    const chosen = await run(binary, ['spell', 'run', callerFile, '--db', dbPath, '--spell-id', records.b], { env: keylessEnv(), timeout: 60_000 });
+    const summary = JSON.parse(chosen.stdout);
+    expect(summary.status).toBe('succeeded');
+    expect(summary.replies).toEqual([reply]);
+    const unsaved = randomUUID();
+    const missing = await runCli(['spell', 'run', callerFile, '--db', dbPath, '--spell-id', unsaved], keylessEnv());
+    expect(missing.code).toBe(1);
+    expect(missing.stderr).toContain(`spell record ${unsaved} was not found in ${dbPath}`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -429,3 +429,90 @@ test('a Studio run whose subgraph node call runs a child node send leaves the un
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('Studio reopens the newest saved draft instead of the demo or an older release, clears Draft saved as soon as the spell is edited, and a Save after reopening keeps that draft', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-draft-reopen-'));
+  const dbPath = join(dir, 'studio.sqlite');
+  try {
+    const report = await studioProbe(['draft-reopen', dbPath]);
+
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const prompt = `json_extract(graph, '$.nodes[' || (SELECT key FROM json_each(graph, '$.nodes') WHERE json_extract(value, '$.id') = '${report.node}') || '].config.prompt')`;
+    const drafts = db.prepare(`SELECT id, ${prompt} AS prompt FROM spells`).all() as { id: string; prompt: string }[];
+    const releases = db.prepare(`SELECT spell_id AS spellId, version, ${prompt} AS prompt FROM spell_releases ORDER BY version`).all() as { spellId: string; version: number; prompt: string }[];
+    db.close();
+
+    expect(drafts).toEqual([{ id: report.firstReopen.recordId, prompt: report.typed.afterRelease }]);
+    expect(releases).toEqual([{ spellId: report.firstReopen.recordId, version: 1, prompt: report.typed.first }]);
+
+    expect(report.firstSave).toEqual({ status: 'Draft saved', storeError: null });
+    expect(report.firstReopen.prompt).toBe(report.typed.first);
+    expect(report.firstReopen.releases).toEqual([]);
+    expect(report.firstReopen.activeRelease).toBeNull();
+
+    expect(report.published).toEqual({ version: releases[0].version, storeError: null });
+    expect(report.savedAfterRelease).toEqual({ status: 'Draft saved', storeError: null });
+    expect(report.editedAfterSave).toEqual({ prompt: report.typed.afterRelease, status: null });
+    expect(report.savedAgain).toEqual({ status: 'Draft saved', storeError: null });
+
+    expect(report.secondReopen.prompt).toBe(drafts[0].prompt);
+    expect(report.secondReopen.releases).toEqual([releases[0].version]);
+    expect(report.secondReopen.activeRelease).toBeNull();
+    expect(report.secondReopen.recordId).toBe(drafts[0].id);
+    expect(report.resaved).toEqual({ status: 'Draft saved', storeError: null, prompt: drafts[0].prompt });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Studio without --db refuses Save and Publish with a message naming --db instead of claiming Draft saved, and Save refuses a RELEASE VERSION of zero while keeping the stored draft on release 1', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-save-guards-'));
+  const dbPath = join(dir, 'studio.sqlite');
+  try {
+    const report = await studioProbe(['save-guards', dbPath]);
+
+    expect(report.noDb.status).toBeNull();
+    expect(report.noDb.saveError).toContain('pass --db <file.sqlite> to save drafts on disk');
+    expect(report.noDb.publishError).toContain('pass --db <file.sqlite> to publish releases on disk');
+    expect(report.noDb.releases).toEqual([]);
+
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const stored = db
+      .prepare("SELECT json_extract(graph, '$.nodes[1].config.release_version') AS configVersion, json_extract(graph, '$.subgraphs[0].release_version') AS refVersion FROM spells")
+      .all() as { configVersion: unknown; refVersion: unknown }[];
+    db.close();
+
+    expect(report.pinned).toEqual({ status: 'Draft saved', storeError: null });
+    expect(stored).toEqual([{ configVersion: 1, refVersion: 1 }]);
+    expect(report.zero.status).toBeNull();
+    expect(report.zero.storeError).toContain('release version "zero" must be a positive whole number');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Studio opened on release A@1, which calls the B draft that calls the leaf A draft, keeps the A@1 identity: it validates, runs with the A draft reply and publishes A@2', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-release-identity-'));
+  const dbPath = join(dir, 'studio.sqlite');
+  try {
+    const report = await studioProbe(['release-identity', dbPath]);
+
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const releases = db.prepare('SELECT spell_id AS spellId, version FROM spell_releases ORDER BY version').all() as { spellId: string; version: number }[];
+    const aRecord = db.prepare("SELECT id FROM spells WHERE json_extract(graph, '$.id') = ?").all(report.aSpellId) as { id: string }[];
+    db.close();
+
+    expect(releases).toEqual([
+      { spellId: aRecord[0].id, version: 1 },
+      { spellId: aRecord[0].id, version: 2 },
+    ]);
+    expect(report.opened).toEqual({ spellId: report.aSpellId, recordId: aRecord[0].id, activeRelease: releases[0].version, releases: [releases[0].version] });
+    expect(report.validation).toEqual({ validation: 'valid', errors: [] });
+    expect(report.run.status).toBe('Succeeded');
+    expect(report.run.error).toBeNull();
+    expect(report.run.replies).toEqual([report.aDraftReply]);
+    expect(report.published).toEqual({ version: releases[1].version, storeError: null, activeRelease: releases[1].version, releases: releases.map((release) => release.version) });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
