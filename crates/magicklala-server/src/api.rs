@@ -428,6 +428,8 @@ impl SpellRunLog<'_> {
             status: RunStatus::Failed,
             nodes_executed: self.nodes_finished(),
             outputs: std::collections::BTreeMap::new(),
+            activations: Vec::new(),
+            activations_truncated: false,
             error: None,
         });
         if summary.status == RunStatus::Succeeded {

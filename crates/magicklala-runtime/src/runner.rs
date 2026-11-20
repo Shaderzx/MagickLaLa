@@ -150,6 +150,8 @@ impl ReleaseRunner for TemplateReplyRunner {
             status: RunStatus::Succeeded,
             nodes_executed: u64::try_from(actions.len()).unwrap_or(u64::MAX),
             outputs,
+            activations: Vec::new(),
+            activations_truncated: false,
             error: None,
         };
         events.emit(TraceEvent::RunFinished { run_id, summary });
@@ -399,7 +401,7 @@ impl ReleaseRunner for EngineReleaseRunner {
         let trigger = self.trigger(&release.graph, event)?;
         let order = Arc::new(FinishOrder { inner: events, finished: Mutex::new(Vec::new()) });
         let emitter: Arc<dyn EventEmitter> = Arc::clone(&order) as Arc<dyn EventEmitter>;
-        let binding = RunBinding { agent_id: Some(release.agent_id.to_string()), allow_private_http: self.allow_private_http };
+        let binding = RunBinding { agent_id: Some(release.agent_id.to_string()), allow_private_http: self.allow_private_http, run_id: Some(scope.run_id) };
         let summary = match &self.scoped {
             Some(scoped) => {
                 let engine = scoped.engine(release.agent_id, scope.run_id, self.engine.step_limit()).await;

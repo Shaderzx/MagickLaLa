@@ -39,6 +39,8 @@ pub enum ValidationError {
     },
     #[error("subgraph node {node:?} calls its own spell {spell:?}")]
     SubgraphCycle { node: NodeId, spell: SpellId },
+    #[error("subgraph node {node:?} calls spell {spell:?} but no subgraph resolver is configured")]
+    SubgraphResolverUnavailable { node: NodeId, spell: SpellId },
 }
 
 #[derive(Debug, Clone, PartialEq, Error)]
