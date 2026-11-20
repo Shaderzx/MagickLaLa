@@ -18,7 +18,7 @@ const masterKey = 'b2'.repeat(32);
 type Reply = { status: number; body: any; text: string; headers: Headers };
 type Api = (path: string, init?: { method?: string; body?: unknown; headers?: Record<string, string> }) => Promise<Reply>;
 type Server = { baseUrl: string; wsUrl: string; api: Api };
-type Launched = { server: Server; stop: () => Promise<void> };
+type Launched = { server: Server; stop: () => Promise<void>; stderr: () => string };
 
 async function freePort(): Promise<number> {
   const probe = createServer();
@@ -76,7 +76,8 @@ async function launchServe(env: Record<string, string> = {}, databaseUrl?: (dir:
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stdout?.resume();
-  child.stderr?.resume();
+  let stderr = '';
+  child.stderr?.on('data', (chunk) => (stderr += chunk));
   const baseUrl = `http://127.0.0.1:${port}`;
   const stop = async () => {
     await stopProcess(child);
@@ -90,7 +91,7 @@ async function launchServe(env: Record<string, string> = {}, databaseUrl?: (dir:
   }
   const token = env.MAGICKLALA_API_TOKEN;
   const api = client(baseUrl, token ? { authorization: `Bearer ${token}` } : {});
-  return { server: { baseUrl, wsUrl: `ws://127.0.0.1:${port}/ws`, api }, stop };
+  return { server: { baseUrl, wsUrl: `ws://127.0.0.1:${port}/ws`, api }, stop, stderr: () => stderr };
 }
 
 const test = base.extend<{ server: Server }>({
@@ -106,15 +107,16 @@ const test = base.extend<{ server: Server }>({
 });
 
 function rawRequest(url: string, init: { method?: string; headers?: Record<string, string>; body?: string | Buffer } = {}) {
-  return new Promise<{ status: number; headers: Record<string, string | string[] | undefined> }>((resolvePromise, reject) => {
+  return new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; text: string }>((resolvePromise, reject) => {
     const outgoing = httpRequest(url, { method: init.method ?? 'GET', headers: init.headers });
     outgoing.on('response', (response) => {
-      response.resume();
-      resolvePromise({ status: response.statusCode ?? 0, headers: response.headers });
+      const chunks: Buffer[] = [];
+      response.on('data', (chunk: Buffer) => chunks.push(chunk));
+      response.on('end', () => resolvePromise({ status: response.statusCode ?? 0, headers: response.headers, text: Buffer.concat(chunks).toString('utf8') }));
     });
     outgoing.on('upgrade', (response, socket) => {
       socket.destroy();
-      resolvePromise({ status: response.statusCode ?? 0, headers: response.headers });
+      resolvePromise({ status: response.statusCode ?? 0, headers: response.headers, text: '' });
     });
     outgoing.on('error', reject);
     outgoing.end(init.body);
@@ -191,8 +193,16 @@ async function startedAgent(server: Server, label: string, graph: object) {
   return created;
 }
 
-function sign(secret: string, body: string, timestamp = Math.floor(Date.now() / 1000)) {
-  return { 'X-MagickLaLa-Timestamp': String(timestamp), 'X-MagickLaLa-Signature': `sha256=${createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex')}` };
+function sign(secret: string, body: string, timestamp = Math.floor(Date.now() / 1000), delivery: string = randomUUID()) {
+  return {
+    'X-MagickLaLa-Timestamp': String(timestamp),
+    'X-MagickLaLa-Delivery': delivery,
+    'X-MagickLaLa-Signature': `sha256=${createHmac('sha256', secret).update(`${timestamp}.${delivery}.${body}`).digest('hex')}`,
+  };
+}
+
+function withoutHeader(headers: Record<string, string>, name: string) {
+  return Object.fromEntries(Object.entries(headers).filter(([key]) => key !== name));
 }
 
 async function launchToken(token: string, extra: Record<string, string> = {}) {
@@ -240,16 +250,23 @@ test('GET /api/v1/openapi.json serves an OpenAPI 3.1 document listing every cont
       '/api/v1/copilot/suggest',
     ]),
   );
-  expect(Object.keys(doc.body.paths['/api/v1/agents/{id}/chat'].post.responses).sort()).toEqual(['200', '400', '401', '404', '409', '421', '502', '503', '504']);
+  expect(Object.keys(doc.body.paths['/api/v1/agents/{id}/chat'].post.responses).sort()).toEqual(['200', '400', '401', '403', '404', '409', '421', '502', '503', '504']);
+  expect(doc.body.paths['/api/v1/agents/{id}/chat'].post.responses['421']).toEqual({ $ref: '#/components/responses/MisdirectedRequest' });
+  expect(doc.body.paths['/api/v1/agents/{id}/chat'].post.responses['403']).toEqual({ $ref: '#/components/responses/ForeignOrigin' });
+  expect(doc.body.paths['/api/v1/agents'].get.responses['403']).toBeUndefined();
+  expect(doc.body.components.responses.MisdirectedRequest.description).toContain('MAGICKLALA_ALLOWED_HOSTS');
+  expect(doc.body.components.responses.ForeignOrigin.description).toContain('MAGICKLALA_CORS_ORIGINS');
+  expect(doc.body.paths['/api/v1/webhooks'].get.parameters.map((parameter: { name: string }) => parameter.name)).toEqual(['agent_id']);
   expect(Object.keys(doc.body.paths['/api/v1/webhooks/{id}'].delete.responses)).toEqual(expect.arrayContaining(['204', '401', '404']));
   expect(Object.keys(doc.body.paths['/api/v1/ws-ticket'].post.responses)).toEqual(expect.arrayContaining(['201', '401']));
   expect(doc.body.paths['/ws'].get.parameters.map((parameter: { name: string }) => parameter.name)).toEqual(expect.arrayContaining(['agent_id', 'ticket']));
   expect(doc.body.paths['/ws'].get.parameters.map((parameter: { name: string }) => parameter.name)).not.toContain('token');
-  expect(Object.keys(doc.body.paths['/api/v1/spells/{id}/run'].post.responses)).toEqual(expect.arrayContaining(['200', '400', '401', '404', '422', '504']));
+  expect(Object.keys(doc.body.paths['/api/v1/spells/{id}/run'].post.responses)).toEqual(expect.arrayContaining(['200', '400', '401', '403', '404', '415', '422', '504']));
   const webhook = doc.body.paths['/api/v1/webhooks/{path}'].post;
-  expect(Object.keys(webhook.responses)).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409', '413']));
+  expect(Object.keys(webhook.responses)).toEqual(expect.arrayContaining(['202', '400', '401', '403', '404', '409', '413']));
+  expect(webhook.responses['409'].description).toContain('duplicate_webhook_delivery');
   expect(webhook.parameters.map((parameter: { name: string; in: string }) => [parameter.in, parameter.name])).toEqual(
-    expect.arrayContaining([['path', 'path'], ['header', 'X-MagickLaLa-Signature'], ['header', 'X-MagickLaLa-Timestamp']]),
+    expect.arrayContaining([['path', 'path'], ['header', 'X-MagickLaLa-Signature'], ['header', 'X-MagickLaLa-Timestamp'], ['header', 'X-MagickLaLa-Delivery']]),
   );
   expect(webhook.security).toEqual([]);
   expect(doc.body.components.securitySchemes.bearer_token).toMatchObject({ type: 'http', scheme: 'bearer' });
@@ -445,7 +462,7 @@ test('CORS answers only allowlisted Studio origins and never grants a foreign Or
   }
 });
 
-test('A webhook with a secret credential runs the agent only for fresh timestamped X-MagickLaLa-Signature payloads and rejects bodies over 1 MiB', buildBudget, async ({ server }) => {
+test('A webhook with a secret credential runs the agent once per fresh signed X-MagickLaLa-Delivery, answers a replayed delivery with 409, and rejects bodies over 1 MiB', buildBudget, async ({ server }) => {
   const { project, spell, agent, release } = await startedAgent(server, 'signed webhook', webhookSpell('signed webhook spell'));
   const secret = `whsec-${randomUUID()}`;
   const credential = await server.api('/api/v1/credentials', { body: { project_id: project.id, name: 'webhook secret', provider: 'webhook', secret } });
@@ -470,17 +487,37 @@ test('A webhook with a secret credential runs the agent only for fresh timestamp
   expect((await stale.json()).error).toContain('timestamp');
   expect((await deliver(payload, { ...sign(secret, payload), 'X-MagickLaLa-Timestamp': 'yesterday' })).status).toBe(401);
   const bodyOnly = `sha256=${createHmac('sha256', secret).update(payload).digest('hex')}`;
-  expect((await deliver(payload, { 'X-MagickLaLa-Timestamp': String(Math.floor(Date.now() / 1000)), 'X-MagickLaLa-Signature': bodyOnly })).status).toBe(401);
+  expect((await deliver(payload, { ...sign(secret, payload), 'X-MagickLaLa-Signature': bodyOnly })).status).toBe(401);
+  const now = Math.floor(Date.now() / 1000);
+  const legacy = `sha256=${createHmac('sha256', secret).update(`${now}.${payload}`).digest('hex')}`;
+  expect((await deliver(payload, { ...sign(secret, payload, now), 'X-MagickLaLa-Signature': legacy })).status).toBe(401);
+  const missingDelivery = await deliver(payload, withoutHeader(sign(secret, payload), 'X-MagickLaLa-Delivery'));
+  expect(missingDelivery.status).toBe(401);
+  expect((await missingDelivery.json()).error).toContain('X-MagickLaLa-Delivery');
+  const readdressed = await deliver(payload, { ...sign(secret, payload), 'X-MagickLaLa-Delivery': randomUUID() });
+  expect(readdressed.status).toBe(401);
+  const overlong = 'd'.repeat(129);
+  expect((await deliver(payload, sign(secret, payload, now, overlong))).status).toBe(401);
   const oversized = 'x'.repeat(1024 * 1024 + 1);
   expect((await deliver(oversized, sign(secret, oversized))).status).toBe(413);
   const malformed = '{"type":';
   expect((await deliver(malformed, sign(secret, malformed))).status).toBe(400);
-  const signed = await deliver(payload, sign(secret, payload));
-  expect(signed.status).toBe(202);
-  expect(await signed.json()).toEqual({ accepted: true, webhook_id: hook.body.id, agent_id: agent.id });
-  await expect.poll(async () => (await server.api(`/api/v1/agents/${agent.id}/runs`)).body.length, { timeout: 20_000 }).toBe(1);
+  const firstDelivery = randomUUID();
+  const firstHeaders = sign(secret, payload, now, firstDelivery);
+  const attempts = await Promise.all(Array.from({ length: 5 }, () => deliver(payload, firstHeaders)));
+  expect(attempts.map((attempt) => attempt.status).sort()).toEqual([202, 409, 409, 409, 409]);
+  const accepted = attempts.find((attempt) => attempt.status === 202)!;
+  expect(await accepted.json()).toEqual({ accepted: true, webhook_id: hook.body.id, agent_id: agent.id, delivery_id: firstDelivery });
+  const replayed = attempts.find((attempt) => attempt.status === 409)!;
+  expect(await replayed.json()).toEqual({ code: 'duplicate_webhook_delivery', error: `delivery ${firstDelivery} was already received by this webhook` });
+  const freshDelivery = randomUUID();
+  expect((await deliver(payload, sign(secret, payload, now, freshDelivery))).status).toBe(202);
+  expect((await deliver(payload, sign(secret, payload, now, freshDelivery))).status).toBe(409);
+  const correlations = async () => (await server.api(`/api/v1/agents/${agent.id}/runs`)).body.map((item: { trace: { correlation_id: string } }) => item.trace.correlation_id);
+  await expect.poll(correlations, { timeout: 20_000 }).toContain(freshDelivery);
+  expect(await correlations()).toEqual([freshDelivery, firstDelivery]);
   const runs = (await server.api(`/api/v1/agents/${agent.id}/runs`)).body;
-  expect(runs).toEqual([expect.objectContaining({ agent_id: agent.id, spell_id: spell.id, release_id: release.id, status: 'succeeded', trigger: 'webhook', error: null })]);
+  for (const item of runs) expect(item).toMatchObject({ agent_id: agent.id, spell_id: spell.id, release_id: release.id, status: 'succeeded', trigger: 'webhook', error: null });
   const otherProject = await server.api('/api/v1/projects', { body: { name: 'foreign secret project' } });
   const foreignSecret = await server.api('/api/v1/credentials', { body: { project_id: otherProject.body.id, name: 'foreign', provider: 'webhook', secret: `x-${secret}` } });
   const foreignHook = await server.api('/api/v1/webhooks', { body: { agent_id: agent.id, path: 'orders/foreign', secret_credential_id: foreignSecret.body.id } });
@@ -541,7 +578,7 @@ test('Deleting an agent answers 404 for it afterwards with a message that names 
   expect(chat.status).toBe(404);
 });
 
-test('A webhook signing credential cannot be deleted while a webhook uses it, and deleting the webhook first frees it', buildBudget, async ({ server }) => {
+test('A webhook signing credential cannot be deleted while a webhook uses it, the 409 names that webhook, GET /api/v1/webhooks lists it, and deleting the webhook first frees it', buildBudget, async ({ server }) => {
   const { project, agent } = await startedAgent(server, 'rotating secret', webhookSpell('rotating secret spell'));
   const secret = `whsec-${randomUUID()}`;
   const credential = await server.api('/api/v1/credentials', { body: { project_id: project.id, name: 'rotating secret', provider: 'webhook', secret } });
@@ -550,18 +587,26 @@ test('A webhook signing credential cannot be deleted while a webhook uses it, an
   const refused = await server.api(`/api/v1/credentials/${credential.body.id}`, { method: 'DELETE' });
   expect(refused.status).toBe(409);
   expect(refused.body.code).toBe('conflict');
+  expect(refused.body.error).toBe(`conflict: credential ${credential.body.id} signs webhook ${hook.body.id}; delete those webhooks first`);
+  const other = await startedAgent(server, 'other webhook owner', webhookSpell('other webhook owner spell'));
+  const otherHook = await server.api('/api/v1/webhooks', { body: { agent_id: other.agent.id, path: 'other/hook', unsigned: true } });
+  expect(otherHook.status).toBe(201);
+  expect((await server.api(`/api/v1/webhooks?agent_id=${agent.id}`)).body).toEqual([hook.body]);
+  expect((await server.api(`/api/v1/webhooks?agent_id=${other.agent.id}`)).body).toEqual([otherHook.body]);
+  expect((await server.api('/api/v1/webhooks')).body.map((item: { id: string }) => item.id).sort()).toEqual([hook.body.id, otherHook.body.id].sort());
   const unsignedAfterRefusal = await fetch(`${server.baseUrl}/api/v1/webhooks/rotating/hook`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
   expect(unsignedAfterRefusal.status).toBe(401);
   expect((await server.api(`/api/v1/credentials?project_id=${project.id}`)).body.map((item: { id: string }) => item.id)).toEqual([credential.body.id]);
   expect((await server.api(`/api/v1/webhooks/${hook.body.id}`, { method: 'DELETE' })).status).toBe(204);
   expect((await server.api(`/api/v1/webhooks/${hook.body.id}`, { method: 'DELETE' })).status).toBe(404);
+  expect((await server.api(`/api/v1/webhooks?agent_id=${agent.id}`)).body).toEqual([]);
   const gone = await fetch(`${server.baseUrl}/api/v1/webhooks/rotating/hook`, { method: 'POST', headers: { 'content-type': 'application/json', ...sign(secret, '{}') }, body: '{}' });
   expect(gone.status).toBe(404);
   expect((await server.api(`/api/v1/credentials/${credential.body.id}`, { method: 'DELETE' })).status).toBe(204);
   expect((await server.api(`/api/v1/credentials?project_id=${project.id}`)).body).toEqual([]);
 });
 
-test('Creating a webhook requires a signing credential unless it is explicitly unsigned on a server without an API token', buildBudget, async ({ server }) => {
+test('Creating a webhook requires a signing credential unless it is explicitly unsigned on a server without an API token, and an unsigned webhook refuses a foreign browser Origin', buildBudget, async ({ server }) => {
   const { agent } = await startedAgent(server, 'unsigned policy', webhookSpell('unsigned policy spell'));
   const implicit = await server.api('/api/v1/webhooks', { body: { agent_id: agent.id, path: 'implicit/open' } });
   expect(implicit.status).toBe(400);
@@ -571,6 +616,76 @@ test('Creating a webhook requires a signing credential unless it is explicitly u
   expect(explicit.body.secret_credential_id).toBeNull();
   const delivered = await fetch(`${server.baseUrl}/api/v1/webhooks/explicit/open`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"hello":"world"}' });
   expect(delivered.status).toBe(202);
+  expect(await delivered.json()).toEqual({ accepted: true, webhook_id: explicit.body.id, agent_id: agent.id, delivery_id: null });
+  const forged = await rawRequest(`${server.baseUrl}/api/v1/webhooks/explicit/open`, { method: 'POST', headers: { 'content-type': 'application/json', origin: 'https://evil.example' }, body: '{"hello":"world"}' });
+  expect(forged.status).toBe(403);
+  expect(JSON.parse(forged.text)).toMatchObject({ code: 'foreign_origin' });
+});
+
+test('An unsigned webhook created before MAGICKLALA_API_TOKEN was set is refused with 401 after a restart with the token, and serve names it in a startup warning', buildBudget, async () => {
+  await buildCli();
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-unsigned-restart-'));
+  const databaseUrl = () => `sqlite://${join(dir, 'unsigned.db')}`;
+  try {
+    const open = await launchServe({}, databaseUrl);
+    let hookId = '';
+    try {
+      const { agent } = await startedAgent(open.server, 'legacy unsigned', webhookSpell('legacy unsigned spell'));
+      const hook = await open.server.api('/api/v1/webhooks', { body: { agent_id: agent.id, path: 'legacy/open', unsigned: true } });
+      expect(hook.status).toBe(201);
+      hookId = hook.body.id;
+      expect((await fetch(`${open.server.baseUrl}/api/v1/webhooks/legacy/open`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status).toBe(202);
+    } finally {
+      await open.stop();
+    }
+    const token = `tok-${randomUUID()}`;
+    const guarded = await launchServe({ MAGICKLALA_API_TOKEN: token }, databaseUrl);
+    try {
+      expect(guarded.stderr()).toContain(`unsigned webhook ${hookId} (legacy/open)`);
+      const refused = await fetch(`${guarded.server.baseUrl}/api/v1/webhooks/legacy/open`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      expect(refused.status).toBe(401);
+      expect(await refused.json()).toMatchObject({ code: 'unsigned_webhook_refused' });
+    } finally {
+      await guarded.stop();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('A browser write from a foreign Origin is refused with 403 before it reaches the handler, run_spell refuses non-JSON bodies with 415, and Origin-less CLI calls keep working', buildBudget, async ({ server }) => {
+  const { project, agent } = await createAgentWithRelease(server, 'origin guard', echoSpell('origin guard spell'));
+  const runnable = await server.api('/api/v1/spells', { body: { project_id: project.id, name: 'origin runnable', graph: emptySpell('origin runnable') } });
+  expect(runnable.status).toBe(201);
+  const evil = 'https://evil.example';
+  const send = (path: string, method: string, headers: Record<string, string>, body = '') => rawRequest(`${server.baseUrl}${path}`, { method, headers, body });
+  const json = { 'content-type': 'application/json' };
+  const state = async () => (await server.api(`/api/v1/agents/${agent.id}`)).body.status.state;
+
+  const foreignStart = await send(`/api/v1/agents/${agent.id}/start`, 'POST', { ...json, origin: evil }, '{}');
+  expect(foreignStart.status).toBe(403);
+  expect(JSON.parse(foreignStart.text)).toEqual({ code: 'foreign_origin', error: `origin ${evil} is not in MAGICKLALA_CORS_ORIGINS` });
+  expect(await state()).toBe('stopped');
+  expect((await send(`/api/v1/agents/${agent.id}/start`, 'POST', { ...json, origin: 'http://127.0.0.1:4242' }, '{}')).status).toBe(200);
+  expect(await state()).toBe('running');
+  expect((await send(`/api/v1/agents/${agent.id}/stop`, 'POST', { ...json, origin: evil }, '{}')).status).toBe(403);
+  expect((await send(`/api/v1/agents/${agent.id}`, 'PATCH', { ...json, origin: evil }, '{"enabled":false}')).status).toBe(403);
+  expect(await state()).toBe('running');
+  const stopped = await runCli(['agent', 'stop', agent.id, '--server', server.baseUrl], { ...process.env, MAGICKLALA_API_TOKEN: '' });
+  expect(stopped.code).toBe(0);
+  expect(await state()).toBe('stopped');
+
+  const runPath = `/api/v1/spells/${runnable.body.id}/run`;
+  const body = JSON.stringify({ input: 'hello' });
+  expect((await send(runPath, 'POST', { ...json, origin: evil }, body)).status).toBe(403);
+  const plain = await send(runPath, 'POST', { 'content-type': 'text/plain' }, body);
+  expect(plain.status).toBe(415);
+  expect(JSON.parse(plain.text)).toEqual({ code: 'unsupported_media_type', error: 'a spell run body must be sent as Content-Type: application/json' });
+  expect((await send(runPath, 'POST', { 'content-type': 'application/x-www-form-urlencoded' }, 'input=hello')).status).toBe(415);
+  expect((await send(runPath, 'POST', {}, body)).status).toBe(415);
+  expect((await send(runPath, 'POST', { 'content-type': 'application/json; charset=utf-8' }, body)).status).toBe(200);
+  expect((await send(runPath, 'POST', {}, '')).status).toBe(200);
+  expect((await send(runPath, 'POST', { ...json, origin: 'http://localhost:3000' }, body)).status).toBe(200);
 });
 
 test('With MAGICKLALA_API_TOKEN set, an unsigned webhook is refused and a timestamped signed delivery is accepted', buildBudget, async () => {
@@ -615,7 +730,7 @@ test('The server rejects a foreign Origin on /ws with 403 and an unknown Host he
   }
 });
 
-test('magicklala serve refuses a non-loopback bind without MAGICKLALA_API_TOKEN unless --insecure-no-auth is passed', buildBudget, async () => {
+test('magicklala serve refuses a non-loopback bind without MAGICKLALA_API_TOKEN unless --insecure-no-auth is passed, and then warns that only loopback hosts are served until MAGICKLALA_ALLOWED_HOSTS is set', buildBudget, async () => {
   await buildCli();
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-public-'));
   try {
@@ -625,11 +740,13 @@ test('magicklala serve refuses a non-loopback bind without MAGICKLALA_API_TOKEN 
     expect(refused.code).toBe(1);
     expect(refused.stderr).toContain('MAGICKLALA_API_TOKEN');
     expect(refused.stderr).toContain('--insecure-no-auth');
-    const child = spawn(binary, ['serve', '--bind', `0.0.0.0:${port}`, '--database-url', `sqlite://${join(dir, 'public.db')}`, '--insecure-no-auth'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(binary, ['serve', '--bind', `0.0.0.0:${port}`, '--database-url', `sqlite://${join(dir, 'public.db')}`, '--insecure-no-auth'], { env: { ...env, MAGICKLALA_ALLOWED_HOSTS: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout?.resume();
-    child.stderr?.resume();
+    let stderr = '';
+    child.stderr?.on('data', (chunk) => (stderr += chunk));
     try {
       await expect.poll(() => fetch(`http://127.0.0.1:${port}/health`).then((response) => response.status, () => 0), { timeout: 30_000 }).toBe(200);
+      expect(stderr).toContain(`warning: bound to 0.0.0.0:${port}; only loopback Host headers are accepted until MAGICKLALA_ALLOWED_HOSTS lists the names clients use`);
     } finally {
       await stopProcess(child);
     }
@@ -733,7 +850,7 @@ test('PATCH /api/v1/agents/{id} rejects a default spell from another project and
   expect(start.body.code).toBe('no_release');
 });
 
-test('Publishing a release rejects a spell whose subgraph reference is missing, from another project or cyclic, and accepts one in the same project', buildBudget, async ({ server }) => {
+test('Publishing a release and running a spell directly both reject a subgraph reference that is missing, from another project or cyclic with 400 invalid_spell, and accept one in the same project', buildBudget, async ({ server }) => {
   const { project, agent } = await createAgentWithRelease(server, 'subgraphs', echoSpell('subgraph parent seed'));
   const foreign = await createAgentWithRelease(server, 'subgraphs foreign', echoSpell('foreign child'));
   const child = echoSpell('subgraph child');
@@ -755,7 +872,11 @@ test('Publishing a release rejects a spell whose subgraph reference is missing, 
   const missing = await publish('missing child', withSubgraph('missing child', randomUUID()));
   expect(missing.status).toBe(400);
   expect(missing.body.error).toContain('cannot be resolved');
-  const crossProject = await publish('foreign child ref', withSubgraph('foreign child ref', foreign.spell.graph.id));
+  const missingRunSpell = await server.api('/api/v1/spells', { body: { project_id: project.id, name: 'missing child direct', graph: withSubgraph('missing child direct', randomUUID()) } });
+  const missingRun = await server.api(`/api/v1/spells/${missingRunSpell.body.id}/run`, { body: { input: 'hello' } });
+  expect(missingRun.status).toBe(400);
+  expect(missingRun.body.code).toBe('invalid_spell');
+  expect(missingRun.body.error).toContain('cannot be resolved');  const crossProject = await publish('foreign child ref', withSubgraph('foreign child ref', foreign.spell.graph.id));
   expect(crossProject.status).toBe(400);
   expect(crossProject.body.error).toContain('cannot be resolved');
   const ownId = randomUUID();
@@ -764,4 +885,71 @@ test('Publishing a release rejects a spell whose subgraph reference is missing, 
   const accepted = await publish('good parent', withSubgraph('good parent', child.id));
   expect(accepted.status).toBe(201);
   expect((await server.api(`/api/v1/agents/${agent.id}`)).body.pinned_release_id).toBe(accepted.body.id);
+});
+
+test('magicklala spell run --db runs a parent spell whose flow/subgraph child is stored in that SQLite database and still refuses subgraphs without --db', buildBudget, async () => {
+  await buildCli();
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-cli-subgraph-'));
+  const dbPath = join(dir, 'spells.db');
+  try {
+    const childId = randomUUID();
+    const child = {
+      ...emptySpell('stored child'),
+      id: childId,
+      nodes: [
+        { id: 'child_start', kind: 'event/on_start', position: [0, 0], config: {} },
+        { id: 'child_words', kind: 'text/template', position: [280, 120], config: { template: 'child reply from sqlite' } },
+        { id: 'child_send', kind: 'io/send_message', position: [560, 0], config: {} },
+      ],
+      wires: [
+        { id: 'cw_flow', from_node: 'child_start', from_socket: 'out', to_node: 'child_send', to_socket: 'in' },
+        { id: 'cw_text', from_node: 'child_words', from_socket: 'text', to_node: 'child_send', to_socket: 'content' },
+      ],
+    };
+    const parent = {
+      ...emptySpell('stored parent'),
+      nodes: [
+        { id: 'start', kind: 'event/on_start', position: [0, 0], config: {} },
+        { id: 'call', kind: 'flow/subgraph', position: [280, 0], config: {} },
+        { id: 'words', kind: 'text/template', position: [560, 120], config: { template: 'parent heard {{result}}' } },
+        { id: 'send', kind: 'io/send_message', position: [840, 0], config: {} },
+      ],
+      wires: [
+        { id: 'w_call', from_node: 'start', from_socket: 'out', to_node: 'call', to_socket: 'in' },
+        { id: 'w_send', from_node: 'call', from_socket: 'out', to_node: 'send', to_socket: 'in' },
+        { id: 'w_result', from_node: 'call', from_socket: 'result', to_node: 'words', to_socket: 'result' },
+        { id: 'w_content', from_node: 'words', from_socket: 'text', to_node: 'send', to_socket: 'content' },
+      ],
+      subgraphs: [{ node_id: 'call', spell_id: childId }],
+    };
+    const stored = await launchServe({}, () => `sqlite://${dbPath}`);
+    try {
+      const project = await stored.server.api('/api/v1/projects', { body: { name: 'cli subgraphs' } });
+      expect((await stored.server.api('/api/v1/spells', { body: { project_id: project.body.id, name: 'stored child', graph: child } })).status).toBe(201);
+      expect((await stored.server.api('/api/v1/spells', { body: { project_id: project.body.id, name: 'stored parent', graph: parent } })).status).toBe(201);
+    } finally {
+      await stored.stop();
+    }
+    const parentFile = join(dir, 'parent.json');
+    await writeFile(parentFile, JSON.stringify(parent));
+    const ran = await run(binary, ['spell', 'run', parentFile, '--db', dbPath], { env: keylessEnv(), timeout: 60_000 });
+    const summary = JSON.parse(ran.stdout);
+    expect(summary.status).toBe('succeeded');
+    expect(summary.replies).toEqual(['child reply from sqlite', 'parent heard child reply from sqlite']);
+    expect(summary.outputs['call.result']).toEqual({ type: 'string', value: 'child reply from sqlite' });
+    const unresolved = await runCli(['spell', 'run', parentFile], { ...keylessEnv(), MAGICKLALA_DB: '' });
+    expect(unresolved.code).toBe(1);
+    expect(unresolved.stderr).toContain('SubgraphResolverUnavailable');
+    const stranger = join(dir, 'stranger.json');
+    const strangerSpell = { ...parent, id: randomUUID() };
+    await writeFile(stranger, JSON.stringify(strangerSpell));
+    const unknown = await runCli(['spell', 'run', stranger, '--db', dbPath], keylessEnv());
+    expect(unknown.code).toBe(1);
+    expect(unknown.stderr).toContain(`spell ${strangerSpell.id} is not stored in ${dbPath}`);
+    const absent = await runCli(['spell', 'run', parentFile, '--db', join(dir, 'absent.db')], keylessEnv());
+    expect(absent.code).toBe(1);
+    expect(absent.stderr).toContain(`database ${join(dir, 'absent.db')} does not exist`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

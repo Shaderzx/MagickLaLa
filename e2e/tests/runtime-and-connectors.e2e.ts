@@ -183,12 +183,18 @@ test('A webhook inbound event fires the event/on_webhook trigger with top-level 
   ]);
 });
 
-test('AgentSupervisor times out a stuck run, returns active runs to zero, and forget removes the agent completely', { timeout: 900_000 }, async () => {
+test('AgentSupervisor times out a stuck run, saves it with a closing timed_out run_finished event, returns active runs to zero, and forget removes the agent completely', { timeout: 900_000 }, async () => {
   const result = await probe(['forget', '--timeout-ms', '200']);
   expect(result.completed).toHaveLength(1);
   expect(result.completed[0].correlation_id).toBe(result.correlation);
   expect(result.completed[0].status).toBe('timed_out');
   expect(result.completed[0].error).toContain('200 ms');
+  expect(result.recorded.trace.events.at(0).event).toBe('run_started');
+  expect(result.recorded.trace.events.at(-1)).toMatchObject({
+    event: 'run_finished',
+    run_id: result.completed[0].run_id,
+    summary: { run_id: result.completed[0].run_id, status: 'timed_out', error: result.completed[0].error, outputs: {}, replies: [] },
+  });
   expect(result.active_runs_after_timeout).toBe(0);
   expect(result.runs_failed).toBe(1);
   expect(result.status_after_forget).toBeNull();
@@ -213,15 +219,28 @@ test('A saturated channel lane rejects overflow with busy completions while a si
   ]);
 });
 
-test('WebhookConnector.verify_timestamped accepts an HMAC over timestamp.body inside the five minute window and rejects stale, future, missing or forged signatures', { timeout: 900_000 }, async () => {
+test('WebhookConnector.verify_timestamped accepts an HMAC over timestamp.delivery.body inside the five minute window and rejects stale, future, legacy, re-addressed, missing or malformed deliveries', { timeout: 900_000 }, async () => {
   const secret = `whsec-${randomUUID()}`;
   const body = JSON.stringify({ order: 'A-9', amount: 9 });
   const now = Math.floor(Date.now() / 1000);
-  const signAt = (timestamp: number, key = secret) => `sha256=${createHmac('sha256', key).update(`${timestamp}.${body}`).digest('hex')}`;
-  const verify = (timestamp: number, signature: string) =>
-    probe(['webhook-timestamped', '--secret', secret, '--timestamp', String(timestamp), '--now', String(now), '--signature', signature], body);
+  const delivery = randomUUID();
+  const hmac = (key: string, message: string) => `sha256=${createHmac('sha256', key).update(message).digest('hex')}`;
+  const signAt = (timestamp: number, key = secret, id = delivery) => hmac(key, `${timestamp}.${id}.${body}`);
+  const verify = (timestamp: number, signature: string, id: string | null = delivery) =>
+    probe(['webhook-timestamped', '--secret', secret, '--timestamp', String(timestamp), '--now', String(now), '--signature', signature, ...(id === null ? [] : ['--delivery', id])], body);
 
-  expect(await verify(now - 299, signAt(now - 299))).toEqual({ accepted: true, max_skew_secs: 300 });
+  expect(await verify(now - 299, signAt(now - 299))).toEqual({ accepted: true, max_skew_secs: 300, delivery_id: delivery, max_delivery_id_len: 128 });
+  const legacy = await verify(now, hmac(secret, `${now}.${body}`));
+  expect(legacy.accepted).toBe(false);
+  expect(legacy.error).toContain('timestamp.delivery.body');
+  const readdressed = await verify(now, signAt(now), randomUUID());
+  expect(readdressed.accepted).toBe(false);
+  expect(readdressed.error).toContain('signature');
+  const missing = await verify(now, signAt(now), null);
+  expect(missing).toEqual({ accepted: false, error: 'missing X-MagickLaLa-Delivery header' });
+  const overlong = 'd'.repeat(129);
+  expect(await verify(now, signAt(now, secret, overlong), overlong)).toEqual({ accepted: false, error: 'X-MagickLaLa-Delivery must be 1 to 128 printable ASCII characters without spaces' });
+  expect((await verify(now, signAt(now, secret, 'has space'), 'has space')).accepted).toBe(false);
   const stale = await verify(now - 301, signAt(now - 301));
   expect(stale.accepted).toBe(false);
   expect(stale.error).toContain('timestamp');
@@ -256,13 +275,16 @@ test('An agent past its live channel lane cap answers new channels with a busy c
   expect(result.repeat_on_c0).toEqual(expect.objectContaining({ status: 'succeeded', reply: 'cap:c0 again' }));
 });
 
-test('Stopping an agent turns every event still queued in its mailbox and channel lanes into a recorded cancelled run with a completion, dropping none', { timeout: 900_000 }, async () => {
+test('Stopping an agent turns every event still queued in its mailbox and channel lanes into a recorded cancelled run with a completion and a closing run_finished event, dropping none', { timeout: 900_000 }, async () => {
   const count = 40;
   const result = await probe(['stop-drain', '--count', String(count)]);
   expect(result.completed.map((event: any) => event.correlation_id).sort()).toEqual([...result.correlations].sort());
   expect(result.completed.every((event: any) => event.status === 'cancelled')).toBe(true);
   expect(result.recorded_runs.map((run: any) => run.trace.correlation_id).sort()).toEqual([...result.correlations].sort());
   expect(result.recorded_runs.every((run: any) => run.status === 'cancelled')).toBe(true);
+  for (const run of result.recorded_runs) {
+    expect(run.trace.events.at(-1)).toMatchObject({ event: 'run_finished', run_id: run.run_id, summary: { run_id: run.run_id, status: 'cancelled', error: run.error } });
+  }
   expect(result.replies.map((reply: any) => reply.status)).toEqual(Array(count).fill('cancelled'));
 });
 
@@ -303,11 +325,32 @@ test('One run id ties together the live trace events, the run completion, the re
   expect(result.found_by_correlation).toBe(completion.run_id);
 });
 
-test('A run with more trace events than the cap saves a truncated trace that still ends with run_finished', { timeout: 900_000 }, async () => {
+test('A run with more trace events than the cap saves a truncated trace of at most 256 events and 65536 bytes that still ends with a slim run_finished', { timeout: 900_000 }, async () => {
   const result = await probe(['trace-cap']);
   expect(result.completed[0].status).toBe('succeeded');
+  expect(result.trace_event_cap).toBe(256);
+  expect(result.trace_byte_cap).toBe(65_536);
   expect(result.recorded.trace.truncated).toBe(true);
-  expect(result.recorded.trace.events.length).toBeLessThanOrEqual(257);
-  expect(result.recorded.trace.events.at(-1).event).toBe('run_finished');
+  expect(result.recorded.trace.events.length).toBeGreaterThan(200);
+  expect(result.recorded.trace.events.length).toBeLessThanOrEqual(256);
+  expect(Buffer.byteLength(JSON.stringify(result.recorded.trace))).toBeLessThanOrEqual(65_536);
+  expect(result.recorded.trace.events.at(-1)).toMatchObject({ event: 'run_finished', run_id: result.completed[0].run_id, summary: { status: 'succeeded', outputs: {}, activations: [], replies: [] } });
+  expect(result.recorded.trace.events.filter((event: any) => event.event === 'run_finished')).toHaveLength(1);
   expect(result.recorded.trace.correlation_id).toBe(result.correlation);
+});
+
+test('Busy rejections are saved through a bounded persistence queue that stop drains before it returns, so every rejected run is in SQLite with a closing run_finished the moment stop finishes', { timeout: 900_000 }, async () => {
+  const result = await probe(['busy-persist']);
+  expect(result.rejected_run_queue_capacity).toBe(256);
+  const busy = result.completed.filter((event: any) => event.status === 'failed');
+  expect(busy.length).toBeGreaterThan(0);
+  const rejected = result.recorded_after_stop.filter((run: any) => run.status === 'failed');
+  expect(rejected.map((run: any) => run.trace.correlation_id).sort()).toEqual(busy.map((event: any) => event.correlation_id).sort());
+  expect(new Set(rejected.map((run: any) => run.run_id))).toEqual(new Set(busy.map((event: any) => event.run_id)));
+  for (const run of rejected) {
+    expect(run.error).toBe(`channel stalled-lane of agent ${result.agent_id} is busy`);
+    expect(run.trace.events.at(-1)).toMatchObject({ event: 'run_finished', run_id: run.run_id, summary: { status: 'failed', error: run.error } });
+  }
+  expect(result.runs_unrecorded).toBe(0);
+  expect(result.recorded_after_stop.length).toBe(result.dispatched);
 });

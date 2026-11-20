@@ -305,7 +305,7 @@ test('deleting a credential that signs a webhook is refused as a conflict and th
     const credentialRows = queryDatabase<{ id: string }>(db, 'SELECT id FROM credentials WHERE id = ?', guarded.credentialId);
     const revealed = await probeJson('reveal', { db, id: guarded.credentialId }, masterKey);
 
-    expect(guarded.blockedError).toBe('conflict: credential is referenced by a webhook');
+    expect(guarded.blockedError).toBe(`conflict: credential ${guarded.credentialId} signs webhook ${guarded.webhookId}; delete those webhooks first`);
     expect(guarded.signedWebhookSecret).toBe(guarded.credentialId);
     expect(webhookRows).toEqual([{ secret_credential_id: guarded.credentialId }]);
     expect(credentialRows).toEqual([{ id: guarded.credentialId }]);
@@ -316,6 +316,31 @@ test('deleting a credential that signs a webhook is refused as a conflict and th
     expect(released).toEqual({ webhookDeleted: true, credentialDeleted: true, missingWebhookError: `not found: webhook ${guarded.webhookId}` });
     expect(queryDatabase(db, 'SELECT id FROM webhooks WHERE id = ?', guarded.webhookId)).toEqual([]);
     expect(queryDatabase(db, 'SELECT id FROM credentials WHERE id = ?', guarded.credentialId)).toEqual([]);
+  });
+});
+
+test('a webhook delivery id is recorded once per webhook even under concurrent inserts, pruned once it falls out of the replay window, listed webhooks follow their agent, and deliveries go with their webhook', async () => {
+  await withDatabase(async (db) => {
+    const masterKey = randomBytes(32).toString('hex');
+    const deliveries = await probeJson('webhook-deliveries', { db, concurrent: 16, now: 1_700_000_000, window: 600 }, masterKey);
+
+    expect(deliveries.concurrentFresh).toBe(1);
+    expect(deliveries.concurrentDuplicates).toBe(15);
+    expect(deliveries.replayed).toBe(false);
+    expect(deliveries.sameKeyOtherWebhook).toBe(true);
+    expect(deliveries.staleBeforePrune).toBe(false);
+    expect(deliveries.staleAfterPrune).toBe(true);
+    expect(deliveries.listedForPrimary).toEqual([deliveries.primaryWebhookId]);
+    expect(deliveries.listedForSecondary).toEqual([deliveries.secondaryWebhookId]);
+    expect([...deliveries.listedAll].sort()).toEqual([deliveries.primaryWebhookId, deliveries.secondaryWebhookId].sort());
+
+    const rows = queryDatabase<{ webhook_id: string; delivery_key: string; received_at: number }>(db, 'SELECT webhook_id, delivery_key, received_at FROM webhook_deliveries ORDER BY delivery_key');
+    expect(rows).toEqual([
+      { webhook_id: deliveries.primaryWebhookId, delivery_key: 'delivery-fresh', received_at: 1_700_000_000 },
+      { webhook_id: deliveries.primaryWebhookId, delivery_key: 'delivery-stale', received_at: 1_700_001_000 },
+    ]);
+    expect(queryDatabase<{ name: string }>(db, "SELECT name FROM pragma_table_info('agents') WHERE name = 'autostart'")).toEqual([{ name: 'autostart' }]);
+    expect(queryDatabase<{ version: number }>(db, 'SELECT version FROM schema_migrations ORDER BY version')).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
   });
 });
 
