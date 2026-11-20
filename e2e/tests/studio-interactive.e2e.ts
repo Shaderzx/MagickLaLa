@@ -203,6 +203,7 @@ test('studio probe keeps example configs and dynamic wires, runs spells and chat
 
     expect(report.toolbar.map((layout) => [layout.width, layout.theme])).toEqual([[960, 'dark'], [960, 'light'], [1280, 'dark'], [1280, 'light']]);
     for (const layout of report.toolbar) {
+      expect(layout.items.map((item) => item.key)).toEqual(['toolbar-left', 'validation-pill', 'validate', 'run-spell', 'save', 'publish', 'theme-toggle', 'zoom-out', 'zoom-readout', 'zoom-in', 'zoom-fit']);
       const placed = layout.items.filter((item): item is { key: string; left: number; right: number; top: number; bottom: number } => item.left !== null && item.right !== null && item.top !== null && item.bottom !== null);
       expect(placed.map((item) => item.key)).toEqual(layout.items.map((item) => item.key));
       expect(Math.max(...placed.map((item) => item.right))).toBeLessThanOrEqual(layout.width - 8);
@@ -314,7 +315,7 @@ test('Publishing keeps one stable spell record through a rename, so v1 and v2 bo
   }
 });
 
-test('a flow/subgraph node placed in Studio runs the saved draft of its child when unpinned and the pinned release once RELEASE VERSION is set, exactly like the server, and leaves no orphan entry once deleted', { timeout: 900_000 }, async () => {
+test('a child spell published and then saved with the Save button in Studio keeps one release and a new draft, and a flow/subgraph node placed in Studio runs that saved draft of its child when unpinned and the pinned release once RELEASE VERSION is set, exactly like the server, and leaves no orphan entry once deleted', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-subgraph-'));
   const dbPath = join(dir, 'studio.sqlite');
   try {
@@ -326,6 +327,7 @@ test('a flow/subgraph node placed in Studio runs the saved draft of its child wh
     db.close();
     expect(published).toEqual([{ version: 1, spellId: report.childSpellId, template: 'v1 saw {{topic}}' }]);
     expect(drafts).toEqual([{ template: 'draft saw {{topic}}' }]);
+    expect(report.childSave).toEqual({ published: published[0].version, saveButton: true, status: 'Draft saved', releases: [published[0].version], storeError: null });
     const said = (template: string) => template.replace('{{topic}}', report.content);
 
     expect(report.placed).toEqual({ kind: 'flow/subgraph', editor: true, caption: 'SPELL ID', versionField: true, versionCaption: 'RELEASE VERSION' });
@@ -364,6 +366,55 @@ test('a flow/subgraph node placed in Studio runs the saved draft of its child wh
   }
 });
 
+test('a Studio spell saved through the API with an empty flow/subgraph config follows RELEASE VERSION edits: it runs v1 as saved, v2 once 2 is typed, refuses zero and runs the saved draft once the field is cleared, and reads a saved release_version of 1.0 as release 1', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-subgraph-ref-'));
+  const dbPath = join(dir, 'studio.sqlite');
+  try {
+    const report = await studioProbe(['subgraph-ref-edit', dbPath]);
+
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const published = db.prepare("SELECT version, json_extract(graph, '$.nodes[1].config.template') AS template FROM spell_releases ORDER BY version").all() as { version: number; template: string }[];
+    const drafts = db.prepare("SELECT json_extract(graph, '$.nodes[1].config.template') AS template FROM spells WHERE json_extract(graph, '$.id') = ?").all(report.childSpellId) as { template: string }[];
+    db.close();
+    expect(published).toEqual([
+      { version: 1, template: 'v1 saw {{topic}}' },
+      { version: 2, template: 'v2 saw {{topic}}' },
+    ]);
+    expect(drafts).toEqual([{ template: 'draft saw {{topic}}' }]);
+    const said = (template: string) => template.replace('{{topic}}', report.content);
+    const replies = (template: string) => [said(template), `parent heard ${said(template)}`];
+    const target = (version: number | null) => [{ node_id: report.callNode, spell_id: report.childSpellId, release_version: version }];
+
+    expect(report.saved.config).toEqual({});
+    expect(report.saved.versionText).toBe(String(published[0].version));
+    expect(report.saved.subgraphs).toEqual(target(published[0].version));
+    expect(report.saved.run.status).toBe('Succeeded');
+    expect(report.saved.run.replies).toEqual(replies(published[0].template));
+
+    expect(report.second.validation).toBe('valid');
+    expect(report.second.subgraphs).toEqual(target(published[1].version));
+    expect(report.second.run.status).toBe('Succeeded');
+    expect(report.second.run.replies).toEqual(replies(published[1].template));
+
+    expect(report.badVersion.validation).toBe('invalid');
+    expect(report.badVersion.errors.join('\n')).toContain('release version "zero" must be a positive whole number');
+
+    expect(report.cleared.validation).toBe('valid');
+    expect(report.cleared.subgraphs).toEqual(target(null));
+    expect(report.cleared.run.status).toBe('Succeeded');
+    expect(report.cleared.run.replies).toEqual(replies(drafts[0].template));
+
+    expect(report.floatPinned.config).toEqual({ spell_id: report.childSpellId, release_version: 1.0 });
+    expect(report.floatPinned.versionText).toBe(String(published[0].version));
+    expect(report.floatPinned.validation).toBe('valid');
+    expect(report.floatPinned.errors).toEqual([]);
+    expect(report.floatPinned.subgraphs).toEqual(target(published[0].version));
+    expect(report.floatPinned.run.status).toBe('Succeeded');
+    expect(report.floatPinned.run.replies).toEqual(replies(published[0].template));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 test('a Studio run whose subgraph node call runs a child node send leaves the unrelated root node named call/send idle and shows the child event under its call path', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-collision-'));
   const dbPath = join(dir, 'studio.sqlite');

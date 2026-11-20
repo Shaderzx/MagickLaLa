@@ -1193,3 +1193,72 @@ test('A spell whose flow/subgraph node calls its own database record id is refus
   expect(refusedRun.body.error).toContain('subgraph cycle');
   expect(refusedRun.body.error).not.toContain('levels');
 });
+
+function callChain(name: string, id: string, calls: { spell: string; version?: number }[]) {
+  const callIds = calls.map((_, index) => `call_${index}`);
+  const flow = ['message', ...callIds];
+  return {
+    ...emptySpell(name),
+    id,
+    nodes: [
+      { id: 'message', kind: 'event/on_message', position: [0, 0], config: {} },
+      ...callIds.map((callId, index) => ({ id: callId, kind: 'flow/subgraph', position: [280 + index * 280, 0], config: {} })),
+    ],
+    wires: callIds.map((callId, index) => ({ id: `w_${callId}`, from_node: flow[index], from_socket: 'out', to_node: callId, to_socket: 'in' })),
+    subgraphs: calls.map((call, index) => ({ node_id: callIds[index], spell_id: call.spell, release_version: call.version ?? null })),
+  };
+}
+
+async function storeSpell(server: Server, projectId: string, name: string, graph: object) {
+  const spell = await server.api('/api/v1/spells', { body: { project_id: projectId, name, graph } });
+  expect(spell.status).toBe(201);
+  return spell.body as { id: string; graph: { id: string } };
+}
+
+test('Two saved spells that share one inner graph id stay separate subgraph snapshots, so a root calling both by record id runs every grandchild on a direct run and in an agent chat in either call order', buildBudget, async ({ server }) => {
+  const { project, agent } = await startedAgent(server, 'shared graph id', echoSpell('shared graph seed'));
+  const [cId, dId, sharedId] = [randomUUID(), randomUUID(), randomUUID()];
+  await storeSpell(server, project.id, 'leaf c', fixedReplySpell(cId, 'leaf c', 'from c'));
+  await storeSpell(server, project.id, 'leaf d', fixedReplySpell(dId, 'leaf d', 'from d'));
+  const a = await storeSpell(server, project.id, 'twin a', callChain('twin a', sharedId, [{ spell: cId }]));
+  const b = await storeSpell(server, project.id, 'twin b', callChain('twin b', sharedId, [{ spell: dId }]));
+  expect([a.graph.id, b.graph.id]).toEqual([sharedId, sharedId]);
+  expect(a.id).not.toBe(b.id);
+  const orders = [
+    ['a first', [a.id, b.id], ['from c', 'from d']],
+    ['b first', [b.id, a.id], ['from d', 'from c']],
+  ] as const;
+  for (const [label, order, replies] of orders) {
+    const root = await storeSpell(server, project.id, `twin root ${label}`, callChain(`twin root ${label}`, randomUUID(), order.map((spell) => ({ spell }))));
+    const direct = await server.api(`/api/v1/spells/${root.id}/run`, { body: { input: label } });
+    expect(direct.text).not.toContain('was not resolved');
+    expect(direct.status).toBe(200);
+    expect(direct.body.summary.replies).toEqual([...replies]);
+    const published = await server.api(`/api/v1/agents/${agent.id}/releases`, { body: { spell_id: root.id } });
+    expect(published.status).toBe(201);
+    const chat = await server.api(`/api/v1/agents/${agent.id}/chat`, { body: { content: label } });
+    expect(chat.text).not.toContain('was not resolved');
+    expect(chat.status).toBe(200);
+    expect(chat.body.reply.content).toBe(replies[0]);
+  }
+});
+
+test('An agent pinned to release A@1 that calls the B draft, which calls the A draft, replies from the A draft because a release and its own draft are separate snapshots, while B calling A@1 back is refused as a subgraph cycle', buildBudget, async ({ server }) => {
+  const { project, agent } = await startedAgent(server, 'release root', echoSpell('release root seed'));
+  const [aId, bId] = [randomUUID(), randomUUID()];
+  const b = await storeSpell(server, project.id, 'release b', callChain('release b', bId, []));
+  const a = await storeSpell(server, project.id, 'release a', callChain('release a', aId, [{ spell: bId }]));
+  const published = await server.api(`/api/v1/agents/${agent.id}/releases`, { body: { spell_id: a.id } });
+  expect(published.status).toBe(201);
+  expect(published.body.version).toBe(1);
+  expect((await server.api(`/api/v1/spells/${a.id}/graph`, { method: 'PUT', body: fixedReplySpell(aId, 'release a', 'from A draft') })).status).toBe(200);
+  expect((await server.api(`/api/v1/spells/${b.id}/graph`, { method: 'PUT', body: callChain('release b', bId, [{ spell: aId }]) })).status).toBe(200);
+  const chat = await server.api(`/api/v1/agents/${agent.id}/chat`, { body: { content: 'which snapshot?' } });
+  expect(chat.text).not.toContain('subgraph cycle');
+  expect(chat.status).toBe(200);
+  expect(chat.body.reply.content).toBe('from A draft');
+  expect((await server.api(`/api/v1/spells/${b.id}/graph`, { method: 'PUT', body: callChain('release b', bId, [{ spell: aId, version: published.body.version }]) })).status).toBe(200);
+  const looped = await server.api(`/api/v1/agents/${agent.id}/chat`, { body: { content: 'loop back' } });
+  expect(looped.status).toBe(502);
+  expect(looped.text).toContain('subgraph cycle');
+});
