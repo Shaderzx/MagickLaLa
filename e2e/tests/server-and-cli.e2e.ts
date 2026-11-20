@@ -3,6 +3,7 @@ import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { DatabaseSync } from 'node:sqlite';
 import { request as httpRequest } from 'node:http';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -265,6 +266,10 @@ test('GET /api/v1/openapi.json serves an OpenAPI 3.1 document listing every cont
   const webhook = doc.body.paths['/api/v1/webhooks/{path}'].post;
   expect(Object.keys(webhook.responses)).toEqual(expect.arrayContaining(['202', '400', '401', '403', '404', '409', '413']));
   expect(webhook.responses['409'].description).toContain('duplicate_webhook_delivery');
+  expect(webhook.responses['503'].description).toBe('Agent mailbox or channel lane is full');
+  const deliveryHeader = webhook.parameters.find((parameter: { name: string }) => parameter.name === 'X-MagickLaLa-Delivery');
+  expect(deliveryHeader.description).toContain('[A-Za-z0-9_-]');
+  expect(doc.body.paths['/api/v1/agents/{id}/releases'].post.responses['400'].description).toContain('nests subgraphs deeper than 16 levels');
   expect(webhook.parameters.map((parameter: { name: string; in: string }) => [parameter.in, parameter.name])).toEqual(
     expect.arrayContaining([['path', 'path'], ['header', 'X-MagickLaLa-Signature'], ['header', 'X-MagickLaLa-Timestamp'], ['header', 'X-MagickLaLa-Delivery']]),
   );
@@ -952,4 +957,171 @@ test('magicklala spell run --db runs a parent spell whose flow/subgraph child is
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+const CHANNEL_LANE_CAPACITY = 256;
+
+function holdWebhookSpell(name: string) {
+  return {
+    ...emptySpell(name),
+    nodes: [
+      { id: 'hook', kind: 'event/on_webhook', position: [0, 0], config: {} },
+      { id: 'plan', kind: 'code/rhai_script', position: [280, 0], config: { script: 'if body.hold { 60000 } else { 0 }', inputs: ['body'] } },
+      { id: 'wait', kind: 'time/delay', position: [560, 0], config: {} },
+    ],
+    wires: [
+      { id: 'w_plan', from_node: 'hook', from_socket: 'out', to_node: 'plan', to_socket: 'in' },
+      { id: 'w_body', from_node: 'hook', from_socket: 'body', to_node: 'plan', to_socket: 'body' },
+      { id: 'w_wait', from_node: 'plan', from_socket: 'out', to_node: 'wait', to_socket: 'in' },
+      { id: 'w_ms', from_node: 'plan', from_socket: 'result', to_node: 'wait', to_socket: 'ms' },
+    ],
+  };
+}
+
+async function signedHook(server: Server, label: string, graph: object, path: string) {
+  const created = await startedAgent(server, label, graph);
+  const secret = `whsec-${randomUUID()}`;
+  const credential = await server.api('/api/v1/credentials', { body: { project_id: created.project.id, name: `${label} secret`, provider: 'webhook', secret } });
+  expect(credential.status).toBe(201);
+  const hook = await server.api('/api/v1/webhooks', { body: { agent_id: created.agent.id, path, secret_credential_id: credential.body.id } });
+  expect(hook.status).toBe(201);
+  const deliver = (body: string, headers: Record<string, string>) =>
+    fetch(`${server.baseUrl}/api/v1/webhooks/${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body });
+  return { ...created, secret, hook: hook.body, deliver };
+}
+
+async function runCorrelations(server: Server, agentId: string) {
+  return (await server.api(`/api/v1/agents/${agentId}/runs?limit=1000`)).body.map((item: { trace: { correlation_id: string } }) => item.trace.correlation_id);
+}
+
+test('A signed webhook whose X-MagickLaLa-Delivery holds a dot is refused with 401 before it is claimed or run, so one HMAC over timestamp.delivery.body cannot be re-split into another delivery id and body', buildBudget, async ({ server }) => {
+  const { agent, secret, deliver } = await signedHook(server, 'dotted delivery', webhookSpell('dotted delivery spell'), 'dotted/hook');
+  const payload = JSON.stringify({ order: 7 });
+  const now = Math.floor(Date.now() / 1000);
+  for (const dotted of ['evil.1', 'a.b', '.leading', 'trailing.']) {
+    const refused = await deliver(payload, sign(secret, payload, now, dotted));
+    expect(refused.status).toBe(401);
+    expect(await refused.json()).toEqual({ code: 'invalid_signature', error: "X-MagickLaLa-Delivery must be 1 to 128 characters of ASCII letters, digits, '-' or '_'" });
+  }
+  const plain = 'evil-1_ok';
+  const accepted = await deliver(payload, sign(secret, payload, now, plain));
+  expect(accepted.status).toBe(202);
+  expect((await accepted.json()).delivery_id).toBe(plain);
+  await expect.poll(() => runCorrelations(server, agent.id), { timeout: 20_000 }).toEqual([plain]);
+});
+
+test('A signed webhook that finds its channel lane full is answered 503 agent_busy and releases its X-MagickLaLa-Delivery, so the same signed delivery is accepted with 202 and runs once the lane has room', buildBudget, async ({ server }) => {
+  const { agent, secret, deliver } = await signedHook(server, 'lane full', holdWebhookSpell('lane full spell'), 'lane/full');
+  const hold = JSON.stringify({ hold: true });
+  const holding = await deliver(hold, sign(secret, hold));
+  expect(holding.status).toBe(202);
+  const fill = JSON.stringify({ hold: false });
+  const burst = CHANNEL_LANE_CAPACITY + 44;
+  const answers = await Promise.all(
+    Array.from({ length: burst }, async () => {
+      const headers = sign(secret, fill);
+      const response = await deliver(fill, headers);
+      return { status: response.status, body: await response.json(), headers };
+    }),
+  );
+  const accepted = answers.filter((answer) => answer.status === 202);
+  const refused = answers.filter((answer) => answer.status === 503);
+  expect(accepted.length + refused.length).toBe(burst);
+  expect(accepted.length).toBeLessThanOrEqual(CHANNEL_LANE_CAPACITY);
+  expect(refused.length).toBeGreaterThanOrEqual(burst - CHANNEL_LANE_CAPACITY);
+  for (const answer of refused) expect(answer.body).toEqual({ code: 'agent_busy', error: 'the agent mailbox or channel lane is full; retry shortly' });
+  const replayedAccepted = await deliver(fill, accepted[0].headers);
+  expect(replayedAccepted.status).toBe(409);
+  expect((await server.api(`/api/v1/agents/${agent.id}/stop`, { body: {} })).status).toBe(200);
+  expect((await server.api(`/api/v1/agents/${agent.id}/start`, { body: {} })).status).toBe(200);
+  const retried = refused[0].headers;
+  const retryDelivery = retried['X-MagickLaLa-Delivery'];
+  const again = await deliver(fill, retried);
+  expect(again.status).toBe(202);
+  expect((await again.json()).delivery_id).toBe(retryDelivery);
+  const retriedRun = async () =>
+    (await server.api(`/api/v1/agents/${agent.id}/runs?limit=1000`)).body.find((item: { trace: { correlation_id: string } }) => item.trace.correlation_id === retryDelivery)?.status;
+  await expect.poll(retriedRun, { timeout: 30_000 }).toBe('succeeded');
+  expect((await deliver(fill, retried)).status).toBe(409);
+});
+
+test('A chat reply of more than 20 KiB packed with control characters, quotes and backslashes is saved whole in the run reply column while the saved trace stays within 65536 bytes and ends with run_finished', buildBudget, async () => {
+  await buildCli();
+  let databaseFile = '';
+  const launched = await launchServe({}, (dir) => {
+    databaseFile = join(dir, 'magicklala.db');
+    return `sqlite://${databaseFile}`;
+  });
+  try {
+    const { agent } = await startedAgent(launched.server, 'long reply', echoSpell('long reply spell'));
+    const contents = [`x${'\u0001'.repeat(12 * 1024)}`, `y${'\u0001"\\'.repeat(8 * 1024)}`];
+    const correlations: string[] = [];
+    for (const content of contents) {
+      const chat = await launched.server.api(`/api/v1/agents/${agent.id}/chat`, { body: { content } });
+      expect(chat.status).toBe(200);
+      expect(chat.body.reply.content).toBe(content);
+      correlations.push(chat.body.reply.metadata.correlation_id);
+    }
+    await expect.poll(async () => (await launched.server.api(`/api/v1/agents/${agent.id}/runs`)).body.length, { timeout: 20_000 }).toBe(contents.length);
+    const runs = (await launched.server.api(`/api/v1/agents/${agent.id}/runs`)).body;
+    const database = new DatabaseSync(databaseFile, { readOnly: true });
+    try {
+      const stored = database.prepare('SELECT run_id, length(CAST(trace AS BLOB)) AS trace_bytes, reply FROM execution_runs WHERE agent_id = ?');
+      const rows = stored.all(agent.id) as { run_id: string; trace_bytes: number; reply: string }[];
+      expect(rows).toHaveLength(contents.length);
+      contents.forEach((content, index) => {
+        const recorded = runs.find((item: { trace: { correlation_id: string } }) => item.trace.correlation_id === correlations[index]);
+        expect(recorded.status).toBe('succeeded');
+        expect(recorded.reply).toBe(content);
+        expect(recorded.trace).not.toHaveProperty('reply');
+        expect(Buffer.byteLength(JSON.stringify(recorded.trace), 'utf8')).toBeLessThanOrEqual(65_536);
+        expect(recorded.trace.events.at(-1)).toMatchObject({ event: 'run_finished', run_id: recorded.run_id, summary: { status: 'succeeded' } });
+        const row = rows.find((candidate) => candidate.run_id === recorded.run_id)!;
+        expect(row.reply).toBe(content);
+        expect(row.trace_bytes).toBeLessThanOrEqual(65_536);
+      });
+    } finally {
+      database.close();
+    }
+  } finally {
+    await launched.stop();
+  }
+});
+
+test('Publishing a release or running a spell whose flow/subgraph chain nests 17 levels deep is refused with 400 invalid_spell naming the 16 level limit, while a 16 level chain publishes', buildBudget, async ({ server }) => {
+  const { project, agent } = await createAgentWithRelease(server, 'deep subgraphs', echoSpell('deep subgraph seed'));
+  const caller = (name: string, childId: string) => {
+    const base = echoSpell(name);
+    return {
+      ...base,
+      nodes: [...base.nodes, { id: 'call', kind: 'flow/subgraph', position: [560, 0], config: {} }],
+      wires: [...base.wires, { id: 'w_call', from_node: 'send', from_socket: 'out', to_node: 'call', to_socket: 'in' }],
+      subgraphs: [{ node_id: 'call', spell_id: childId }],
+    };
+  };
+  const store = async (name: string, graph: { id: string }) => {
+    const spell = await server.api('/api/v1/spells', { body: { project_id: project.id, name, graph } });
+    expect(spell.status).toBe(201);
+    return spell.body;
+  };
+  const leaf = echoSpell('deep leaf');
+  await store('deep leaf', leaf);
+  const chain = [leaf.id];
+  for (let level = 1; level < 17; level += 1) {
+    const link = caller(`deep link ${level}`, chain[0]);
+    await store(`deep link ${level}`, link);
+    chain.unshift(link.id);
+  }
+  const tooDeep = await store('seventeen deep', caller('seventeen deep', chain[0]));
+  const refused = await server.api(`/api/v1/agents/${agent.id}/releases`, { body: { spell_id: tooDeep.id } });
+  expect(refused.status).toBe(400);
+  expect(refused.body.code).toBe('invalid_spell');
+  expect(refused.body.error).toContain('reaches 17 levels and exceeds 16 levels');
+  const refusedRun = await server.api(`/api/v1/spells/${tooDeep.id}/run`, { body: { input: 'hello' } });
+  expect(refusedRun.status).toBe(400);
+  expect(refusedRun.body.error).toContain('exceeds 16 levels');
+  const deepEnough = await store('sixteen deep', caller('sixteen deep', chain[1]));
+  const published = await server.api(`/api/v1/agents/${agent.id}/releases`, { body: { spell_id: deepEnough.id } });
+  expect(published.status).toBe(201);
+  expect((await server.api(`/api/v1/agents/${agent.id}`)).body.pinned_release_id).toBe(published.body.id);
 });

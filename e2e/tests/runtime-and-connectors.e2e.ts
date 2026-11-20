@@ -226,8 +226,9 @@ test('WebhookConnector.verify_timestamped accepts an HMAC over timestamp.deliver
   const delivery = randomUUID();
   const hmac = (key: string, message: string) => `sha256=${createHmac('sha256', key).update(message).digest('hex')}`;
   const signAt = (timestamp: number, key = secret, id = delivery) => hmac(key, `${timestamp}.${id}.${body}`);
-  const verify = (timestamp: number, signature: string, id: string | null = delivery) =>
-    probe(['webhook-timestamped', '--secret', secret, '--timestamp', String(timestamp), '--now', String(now), '--signature', signature, ...(id === null ? [] : ['--delivery', id])], body);
+  const verify = (timestamp: number, signature: string, id: string | null = delivery, mode = 'header') =>
+    probe(['webhook-timestamped', '--secret', secret, '--timestamp', String(timestamp), '--now', String(now), '--signature', signature, '--mode', mode, ...(id === null ? [] : ['--delivery', id])], body);
+  const charsetError = "X-MagickLaLa-Delivery must be 1 to 128 characters of ASCII letters, digits, '-' or '_'";
 
   expect(await verify(now - 299, signAt(now - 299))).toEqual({ accepted: true, max_skew_secs: 300, delivery_id: delivery, max_delivery_id_len: 128 });
   const legacy = await verify(now, hmac(secret, `${now}.${body}`));
@@ -239,8 +240,13 @@ test('WebhookConnector.verify_timestamped accepts an HMAC over timestamp.deliver
   const missing = await verify(now, signAt(now), null);
   expect(missing).toEqual({ accepted: false, error: 'missing X-MagickLaLa-Delivery header' });
   const overlong = 'd'.repeat(129);
-  expect(await verify(now, signAt(now, secret, overlong), overlong)).toEqual({ accepted: false, error: 'X-MagickLaLa-Delivery must be 1 to 128 printable ASCII characters without spaces' });
+  expect(await verify(now, signAt(now, secret, overlong), overlong)).toEqual({ accepted: false, error: charsetError });
   expect((await verify(now, signAt(now, secret, 'has space'), 'has space')).accepted).toBe(false);
+  for (const dotted of ['evil.1', 'a.b']) {
+    expect(await verify(now, signAt(now, secret, dotted), dotted)).toEqual({ accepted: false, error: charsetError });
+    expect(await verify(now, signAt(now, secret, dotted), dotted, 'direct')).toEqual({ accepted: false, error: charsetError });
+  }
+  expect(await verify(now, signAt(now, secret, 'Ab-9_z'), 'Ab-9_z', 'direct')).toEqual({ accepted: true, max_skew_secs: 300, delivery_id: 'Ab-9_z', max_delivery_id_len: 128 });
   const stale = await verify(now - 301, signAt(now - 301));
   expect(stale.accepted).toBe(false);
   expect(stale.error).toContain('timestamp');
@@ -353,4 +359,18 @@ test('Busy rejections are saved through a bounded persistence queue that stop dr
   }
   expect(result.runs_unrecorded).toBe(0);
   expect(result.recorded_after_stop.length).toBe(result.dispatched);
+});
+
+test('Closing a trace with the final timed out summary replaces an earlier succeeded run_finished, so the sealed trace holds exactly one run_finished matching the recorded outcome and stays within 65536 bytes even with escaped envelope fields', { timeout: 900_000 }, async () => {
+  const result = await probe(['trace-close']);
+  expect(result.early_status).toBe('succeeded');
+  expect(result.final_status).toBe('timed_out');
+  const finished = result.sealed.events.filter((event: any) => event.event === 'run_finished');
+  expect(finished).toHaveLength(1);
+  expect(result.sealed.events.at(0).event).toBe('run_started');
+  expect(result.sealed.events.at(-1)).toMatchObject({ event: 'run_finished', run_id: result.run_id, summary: { run_id: result.run_id, status: result.final_status, error: result.final_error } });
+  expect(result.serialized_bytes).toBeLessThanOrEqual(65_536);
+  expect(Buffer.byteLength(JSON.stringify(result.sealed), 'utf8')).toBeLessThanOrEqual(65_536);
+  expect(Buffer.byteLength(JSON.stringify(result.sealed.correlation_id), 'utf8')).toBeLessThanOrEqual(result.trace_field_cap);
+  expect(result.sealed.correlation_id.startsWith('\u0001')).toBe(true);
 });
