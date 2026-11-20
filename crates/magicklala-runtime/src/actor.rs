@@ -25,6 +25,7 @@ pub const CHANNEL_LANE_IDLE: Duration = Duration::from_secs(300);
 pub const DEFAULT_RUN_TIMEOUT: Duration = Duration::from_secs(120);
 pub const MAX_LANES_PER_AGENT: usize = 64;
 
+const AGENT_STOPPED: &str = "run cancelled because the agent stopped";
 const STOPPED_BEFORE_START: &str = "run cancelled because the agent stopped before it started";
 const DEADLINE_EXPIRED: &str = "run deadline expired while queued; it was never started";
 
@@ -221,9 +222,13 @@ impl ActorContext {
         let scope = RunScope { run_id, cancellation: child.clone() };
         let guarded = AssertUnwindSafe(self.runner.run(&queued.release, &queued.event, emitter, scope)).catch_unwind();
         let outcome = tokio::select! {
-            () = child.cancelled() => Err(RunOutcome::failed(RunStatus::Cancelled, "run cancelled because the agent stopped".to_owned())),
+            biased;
+            () = child.cancelled() => Err(RunOutcome::failed(RunStatus::Cancelled, AGENT_STOPPED.to_owned())),
             finished = tokio::time::timeout(budget, guarded) => Ok(finished),
         };
+        if cancel.is_cancelled() && !matches!(outcome, Ok(Ok(Ok(Ok(_))))) {
+            return RunOutcome::failed(RunStatus::Cancelled, AGENT_STOPPED.to_owned());
+        }
         match outcome {
             Err(cancelled) => cancelled,
             Ok(Ok(Ok(Ok(actions)))) => RunOutcome { status: RunStatus::Succeeded, actions, error: None },
