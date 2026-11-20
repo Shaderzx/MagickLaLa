@@ -340,7 +340,8 @@ test('a webhook delivery id is recorded once per webhook even under concurrent i
       { webhook_id: deliveries.primaryWebhookId, delivery_key: 'delivery-stale', received_at: 1_700_001_000 },
     ]);
     expect(queryDatabase<{ name: string }>(db, "SELECT name FROM pragma_table_info('agents') WHERE name = 'autostart'")).toEqual([{ name: 'autostart' }]);
-    expect(queryDatabase<{ version: number }>(db, 'SELECT version FROM schema_migrations ORDER BY version')).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
+    expect(queryDatabase<{ name: string }>(db, "SELECT name FROM pragma_table_info('execution_runs') WHERE name = 'reply'")).toEqual([{ name: 'reply' }]);
+    expect(queryDatabase<{ version: number }>(db, 'SELECT version FROM schema_migrations ORDER BY version')).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
   });
 });
 

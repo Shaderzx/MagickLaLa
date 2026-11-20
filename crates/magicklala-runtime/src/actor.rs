@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::runner::{AgentRelease, ReleaseOrigin, ReleaseRunner, RunScope, correlation_id};
-use crate::trace::{BoundedTrace, TRACE_REPLY_KEY};
+use crate::trace::BoundedTrace;
 use crate::{EventBus, RuntimeError, RuntimeEvent};
 
 pub const MAILBOX_CAPACITY: usize = 1_024;
@@ -106,11 +106,23 @@ pub(crate) struct QueuedEvent {
     release: Arc<AgentRelease>,
     deadline: Option<Instant>,
     reply: Option<oneshot::Sender<RunCompletion>>,
+    admitted: Option<oneshot::Sender<Result<(), DispatchError>>>,
 }
 
 impl QueuedEvent {
     pub(crate) fn new(event: InboundEvent, release: Arc<AgentRelease>, options: DispatchOptions, reply: Option<oneshot::Sender<RunCompletion>>) -> Self {
-        Self { event, release, deadline: options.deadline, reply }
+        Self { event, release, deadline: options.deadline, reply, admitted: None }
+    }
+
+    pub(crate) fn with_admission(mut self, admitted: Option<oneshot::Sender<Result<(), DispatchError>>>) -> Self {
+        self.admitted = admitted;
+        self
+    }
+
+    fn admit(&mut self, verdict: Result<(), DispatchError>) {
+        if let Some(admitted) = self.admitted.take() {
+            let _notified = admitted.send(verdict).is_ok();
+        }
     }
 
     fn closing_summary(&self, run_id: RunId, started_at: DateTime<Utc>, nodes_executed: u64, outcome: &RunOutcome) -> RunSummary {
@@ -296,12 +308,12 @@ impl ActorContext {
             finished_at: Some(Utc::now()),
             nodes_executed: finished.nodes_executed,
             error: finished.outcome.error.clone(),
+            reply: finished.first_reply().map(str::to_owned),
             trace: finished.trace.seal(serde_json::Map::from_iter([
                 ("correlation_id".to_owned(), serde_json::json!(correlation_id(&event.payload))),
                 ("channel".to_owned(), serde_json::json!(event.channel)),
                 ("connector_id".to_owned(), serde_json::json!(event.connector_id)),
                 ("release_version".to_owned(), serde_json::json!(release.version)),
-                (TRACE_REPLY_KEY.to_owned(), serde_json::json!(finished.first_reply())),
             ])),
         }
     }
@@ -495,29 +507,36 @@ impl LaneRouter {
         self.lanes.insert(channel.to_owned(), Lane { sender, drained });
     }
 
-    fn route(&mut self, queued: QueuedEvent) {
-        let mut pending = queued;
+    fn refuse(&self, mut queued: QueuedEvent, error: String) {
+        queued.admit(Err(DispatchError::Busy(self.context.agent_id)));
+        self.reject(queued, error);
+    }
+
+    fn route(&mut self, mut queued: QueuedEvent) {
         loop {
-            let channel = pending.event.channel.clone();
+            let channel = queued.event.channel.clone();
             if !self.lanes.contains_key(&channel) {
                 if self.lanes.len() >= self.context.max_lanes {
                     let error = format!("agent {} is busy: {} channel lanes are already live", self.context.agent_id, self.context.max_lanes);
-                    return self.reject(pending, error);
+                    return self.refuse(queued, error);
                 }
                 self.open(&channel);
             }
-            let Some(lane) = self.lanes.get(&channel) else { return };
-            match lane.sender.try_send(pending) {
-                Ok(()) => return,
-                Err(mpsc::error::TrySendError::Full(rejected)) => {
-                    let error = format!("channel {} of agent {} is busy", rejected.event.channel, self.context.agent_id);
-                    return self.reject(rejected, error);
+            let Some(lane) = self.lanes.get(&channel) else {
+                return queued.admit(Err(DispatchError::NotRunning(self.context.agent_id)));
+            };
+            match lane.sender.try_reserve() {
+                Ok(permit) => {
+                    queued.admit(Ok(()));
+                    return permit.send(queued);
                 }
-                Err(mpsc::error::TrySendError::Closed(returned)) => {
-                    self.retire(&channel);
-                    pending = returned;
+                Err(mpsc::error::TrySendError::Full(())) => {
+                    let error = format!("channel {channel} of agent {} is busy", self.context.agent_id);
+                    return self.refuse(queued, error);
                 }
+                Err(mpsc::error::TrySendError::Closed(())) => {}
             }
+            self.retire(&channel);
         }
     }
 
@@ -551,7 +570,8 @@ async fn agent_actor(
     }
     cancel.cancel();
     mailbox.close();
-    while let Some(queued) = mailbox.recv().await {
+    while let Some(mut queued) = mailbox.recv().await {
+        queued.admit(Err(DispatchError::NotRunning(context.agent_id)));
         context.settle_unstarted(queued, RunStatus::Cancelled, STOPPED_BEFORE_START).await;
     }
     router.shutdown().await;

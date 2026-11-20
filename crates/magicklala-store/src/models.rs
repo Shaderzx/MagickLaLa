@@ -256,6 +256,8 @@ pub struct ExecutionRun {
     pub finished_at: Option<DateTime<Utc>>,
     pub nodes_executed: u64,
     pub error: Option<String>,
+    #[serde(default)]
+    pub reply: Option<String>,
     pub trace: serde_json::Value,
 }
 

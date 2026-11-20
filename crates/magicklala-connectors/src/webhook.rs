@@ -20,10 +20,14 @@ pub fn signed_webhook_message(timestamp: i64, delivery: &str, body: &[u8]) -> Ve
     message
 }
 
+fn is_delivery_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
+}
+
 pub fn parse_webhook_delivery(raw: Option<&str>) -> Result<&str, String> {
     let delivery = raw.filter(|value| !value.is_empty()).ok_or_else(|| format!("missing {WEBHOOK_DELIVERY_HEADER} header"))?;
-    if delivery.len() > MAX_WEBHOOK_DELIVERY_ID_LEN || !delivery.bytes().all(|byte| byte.is_ascii_graphic()) {
-        return Err(format!("{WEBHOOK_DELIVERY_HEADER} must be 1 to {MAX_WEBHOOK_DELIVERY_ID_LEN} printable ASCII characters without spaces"));
+    if delivery.len() > MAX_WEBHOOK_DELIVERY_ID_LEN || !delivery.bytes().all(is_delivery_byte) {
+        return Err(format!("{WEBHOOK_DELIVERY_HEADER} must be 1 to {MAX_WEBHOOK_DELIVERY_ID_LEN} characters of ASCII letters, digits, '-' or '_'"));
     }
     Ok(delivery)
 }
@@ -74,6 +78,7 @@ impl WebhookConnector {
         now_unix: i64,
         max_skew_secs: i64,
     ) -> Result<(), String> {
+        let delivery = parse_webhook_delivery(Some(delivery))?;
         let skew = now_unix.abs_diff(timestamp);
         if skew > max_skew_secs.unsigned_abs() {
             return Err(format!("{WEBHOOK_TIMESTAMP_HEADER} timestamp is {skew} s away from server time; the limit is {max_skew_secs} s"));

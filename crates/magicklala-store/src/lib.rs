@@ -9,7 +9,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use thiserror::Error;
 
 pub use models::*;
-pub use sqlite::{POSTGRES_SCHEMA, cosine_similarity};
+pub use sqlite::{POSTGRES_MIGRATIONS, POSTGRES_SCHEMA, cosine_similarity};
 pub use vault::{AesGcmVault, CryptoVault, MASTER_KEY_ENV};
 
 #[derive(Debug, Error)]

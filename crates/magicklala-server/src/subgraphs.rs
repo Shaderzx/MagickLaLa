@@ -50,35 +50,7 @@ impl ProjectSubgraphResolver {
     }
 
     pub fn verify(&self, root: &SpellGraph, validator: &SpellValidator) -> Result<(), String> {
-        let mut path = vec![root.id];
-        let mut finished = HashSet::new();
-        self.visit(root, validator, &mut path, &mut finished)
-    }
-
-    fn visit(&self, graph: &SpellGraph, validator: &SpellValidator, path: &mut Vec<SpellId>, finished: &mut HashSet<SubgraphKey>) -> Result<(), String> {
-        for reference in &graph.subgraphs {
-            let key = (reference.spell_id, reference.release_version);
-            if let Some(start) = path.iter().position(|ancestor| *ancestor == reference.spell_id) {
-                let chain: Vec<String> = path[start..].iter().chain(std::iter::once(&reference.spell_id)).map(|spell| spell.0.to_string()).collect();
-                return Err(format!("subgraph cycle through node {:?}: {}", reference.node_id.0, chain.join(" -> ")));
-            }
-            if finished.contains(&key) {
-                continue;
-            }
-            let child = self
-                .graphs
-                .get(&key)
-                .ok_or_else(|| format!("subgraph {} for node {:?} cannot be resolved in this project", reference.spell_id.0, reference.node_id.0))?;
-            validator.validate(child).map_err(|errors| {
-                format!("subgraph {} is invalid: {}", reference.spell_id.0, errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
-            })?;
-            path.push(reference.spell_id);
-            let nested = self.visit(child, validator, path, finished);
-            path.pop();
-            nested?;
-            finished.insert(key);
-        }
-        Ok(())
+        magicklala_graph::resolve_subgraphs(root, self, validator).map(drop).map_err(|error| error.to_string())
     }
 }
 

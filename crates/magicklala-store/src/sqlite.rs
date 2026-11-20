@@ -18,9 +18,15 @@ const SQLITE_MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_initial.sql")),
     (2, include_str!("../migrations/0002_protect_webhook_secrets.sql")),
     (3, include_str!("../migrations/0003_webhook_deliveries_and_autostart.sql")),
+    (4, include_str!("../migrations/0004_run_reply_column.sql")),
 ];
 const CREDENTIAL_SIGNS_WEBHOOK: &str = "credential is referenced by a webhook";
 pub const POSTGRES_SCHEMA: &str = include_str!("../migrations_pg/0001_initial.sql");
+pub const POSTGRES_MIGRATIONS: &[(i64, &str)] = &[
+    (1, POSTGRES_SCHEMA),
+    (2, include_str!("../migrations_pg/0002_webhook_deliveries_and_autostart.sql")),
+    (3, include_str!("../migrations_pg/0003_run_reply_column.sql")),
+];
 const KEYWORD_WEIGHT: f32 = 0.5;
 const VECTOR_WEIGHT: f32 = 0.5;
 const KEYWORD_CANDIDATES_PER_RESULT: i64 = 10;
@@ -32,7 +38,7 @@ const WEBHOOK_COLUMNS: &str = "id, agent_id, path, secret_credential_id, enabled
 const SPELL_COLUMNS: &str = "id, project_id, name, graph, content_hash, created_at, updated_at";
 const RELEASE_COLUMNS: &str = "id, spell_id, version, notes, graph, content_hash, created_at";
 const CREDENTIAL_COLUMNS: &str = "id, project_id, name, provider, hint, created_at, rotated_at";
-const RUN_COLUMNS: &str = "run_id, agent_id, spell_id, release_id, status, trigger_kind, started_at, finished_at, nodes_executed, error, trace";
+const RUN_COLUMNS: &str = "run_id, agent_id, spell_id, release_id, status, trigger_kind, started_at, finished_at, nodes_executed, error, reply, trace";
 
 impl SqliteStore {
     pub async fn migrate(&self) -> StoreResult<()> {
@@ -425,6 +431,7 @@ fn run_from(row: &SqliteRow) -> StoreResult<ExecutionRun> {
         finished_at: optional_time_column(row, "finished_at")?,
         nodes_executed: u64::try_from(nodes).unwrap_or(0),
         error: row.try_get("error")?,
+        reply: row.try_get("reply")?,
         trace: json_column(row, "trace")?,
     })
 }
@@ -949,8 +956,8 @@ impl Repository for SqliteStore {
 
     async fn record_run(&self, run: ExecutionRun) -> StoreResult<()> {
         sqlx::query(&format!(
-            "INSERT INTO execution_runs ({RUN_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT (run_id) DO UPDATE SET status = excluded.status, finished_at = excluded.finished_at, nodes_executed = excluded.nodes_executed, error = excluded.error, trace = excluded.trace"
+            "INSERT INTO execution_runs ({RUN_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (run_id) DO UPDATE SET status = excluded.status, finished_at = excluded.finished_at, nodes_executed = excluded.nodes_executed, error = excluded.error, reply = excluded.reply, trace = excluded.trace"
         ))
         .bind(run.run_id.to_string())
         .bind(run.agent_id.map(|agent| agent.0.to_string()))
@@ -962,6 +969,7 @@ impl Repository for SqliteStore {
         .bind(run.finished_at.map(stamp))
         .bind(i64::try_from(run.nodes_executed).unwrap_or(i64::MAX))
         .bind(&run.error)
+        .bind(&run.reply)
         .bind(serde_json::to_string(&run.trace)?)
         .execute(&self.pool)
         .await

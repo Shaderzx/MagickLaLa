@@ -6,10 +6,12 @@ use magicklala_connectors::{
     Connector, ConnectorConfig, ConnectorKind, DiscordConnector, InboundEvent, MAX_WEBHOOK_DELIVERY_ID_LEN, OutboundAction, SlackConnector, TickConnector,
     WEBHOOK_MAX_SKEW_SECS, WEBHOOK_SIGNATURE_HEADER, WebhookConnector, parse_webhook_delivery,
 };
-use magicklala_graph::{EngineServices, NodeCatalog, NodeInstance, NodeSpec, SocketSpec, SocketType, SpellGraph, SpellValidator, TraceEvent};
+use magicklala_graph::{
+    EngineServices, NodeCatalog, NodeInstance, NodeSpec, RunId, RunStatus, RunSummary, SocketSpec, SocketType, SpellGraph, SpellId, SpellValidator, TraceEvent,
+};
 use magicklala_runtime::{
-    AgentStatus, AgentSupervisor, CHANNEL_LANE_CAPACITY, CopilotEngine, DispatchOptions, EngineReleaseRunner, EventBus, GraphPatchOp, InMemoryEventBus,
-    REJECTED_RUN_QUEUE_CAPACITY, ReleaseOrigin, RuntimeEvent, StoreScope, TRACE_BYTE_CAP, TRACE_EVENT_CAP,
+    AgentStatus, AgentSupervisor, BoundedTrace, CHANNEL_LANE_CAPACITY, CopilotEngine, DispatchOptions, EngineReleaseRunner, EventBus, GraphPatchOp,
+    InMemoryEventBus, REJECTED_RUN_QUEUE_CAPACITY, ReleaseOrigin, RuntimeEvent, StoreScope, TRACE_BYTE_CAP, TRACE_EVENT_CAP, TRACE_FIELD_CAP,
 };
 use magicklala_store::{AgentId, NewAgent, NewProject, NewSpell, Repository, SqliteStore};
 use serde_json::{Value, json};
@@ -452,7 +454,10 @@ fn webhook_timestamped(args: &[String]) -> ProbeResult {
     let now: i64 = flag(args, "--now")?.parse().map_err(|_| "bad --now".to_owned())?;
     let body = stdin_text()?;
     let delivery_flag = flag(args, "--delivery").ok();
-    let verified = parse_webhook_delivery(delivery_flag.as_deref()).and_then(|delivery| {
+    let direct = flag(args, "--mode").is_ok_and(|mode| mode == "direct");
+    let parsed =
+        if direct { delivery_flag.as_deref().ok_or_else(|| "missing --delivery".to_owned()) } else { parse_webhook_delivery(delivery_flag.as_deref()) };
+    let verified = parsed.and_then(|delivery| {
         WebhookConnector::verify_timestamped(&secret, timestamp, delivery, body.as_bytes(), &signature, now, WEBHOOK_MAX_SKEW_SECS)
             .map(|()| delivery.to_owned())
     });
@@ -768,6 +773,46 @@ async fn busy_persist() -> ProbeResult {
     Ok(output)
 }
 
+fn probe_summary(run_id: RunId, spell_id: SpellId, status: RunStatus, error: Option<String>) -> RunSummary {
+    let now = chrono::Utc::now();
+    RunSummary {
+        run_id,
+        spell_id,
+        started_at: now,
+        finished_at: now,
+        status,
+        nodes_executed: 1,
+        outputs: std::collections::BTreeMap::new(),
+        activations: Vec::new(),
+        activations_truncated: false,
+        replies: Vec::new(),
+        error,
+    }
+}
+
+fn trace_close() -> ProbeResult {
+    let trace = BoundedTrace::new();
+    let (run_id, spell_id) = (RunId::new(), SpellId::new());
+    let early = probe_summary(run_id, spell_id, RunStatus::Succeeded, None);
+    trace.push(&TraceEvent::RunStarted { run_id, spell_id, at: early.started_at });
+    trace.push(&TraceEvent::RunFinished { run_id, summary: early.clone() });
+    let final_error = "run exceeded 200 ms".to_owned();
+    let last = probe_summary(run_id, spell_id, RunStatus::TimedOut, Some(final_error.clone()));
+    trace.close(&last);
+    let envelope = serde_json::Map::from_iter([("correlation_id".to_owned(), json!("\u{1}".repeat(4_096)))]);
+    let sealed = trace.seal(envelope);
+    let serialized_bytes = serde_json::to_string(&sealed).map_err(text_error)?.len();
+    Ok(json!({
+        "run_id": run_id,
+        "early_status": early.status,
+        "final_status": last.status,
+        "final_error": final_error,
+        "sealed": sealed,
+        "serialized_bytes": serialized_bytes,
+        "trace_field_cap": TRACE_FIELD_CAP,
+    }))
+}
+
 async fn dispatch(args: Vec<String>) -> ProbeResult {
     match args.first().map(String::as_str) {
         Some("tick") => tick(&args).await,
@@ -790,7 +835,8 @@ async fn dispatch(args: Vec<String>) -> ProbeResult {
         Some("trace-run-id") => trace_run_id().await,
         Some("trace-cap") => trace_cap().await,
         Some("busy-persist") => busy_persist().await,
-        _ => Err("usage: runtime_probe <tick|webhook|webhook-timestamped|discord|slack|supervisor|copilot|correlated-runs|webhook-run|forget|busy|lane-drain|lane-cap|stop-drain|deadline|strict-trigger|loop-replies|trace-run-id|trace-cap|busy-persist> [flags]".to_owned()),
+        Some("trace-close") => trace_close(),
+        _ => Err("usage: runtime_probe <tick|webhook|webhook-timestamped|discord|slack|supervisor|copilot|correlated-runs|webhook-run|forget|busy|lane-drain|lane-cap|stop-drain|deadline|strict-trigger|loop-replies|trace-run-id|trace-cap|busy-persist|trace-close> [flags]".to_owned()),
     }
 }
 

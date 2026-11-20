@@ -28,7 +28,7 @@ pub use runner::{
     AgentRelease, CORRELATION_ID_KEY, EngineReleaseRunner, ProjectLlmFactory, ReleaseOrigin, ReleaseRunner, RunScope, StoreScope, SubgraphLoader,
     TemplateReplyRunner, correlation_id, inbound_payload, ordered_replies, structural_errors, trigger_kinds, trigger_payload,
 };
-pub use trace::{BoundedTrace, TRACE_BYTE_CAP, TRACE_ERROR_CAP, TRACE_EVENT_CAP, TRACE_FIELD_CAP, TRACE_REPLY_CAP, TRACE_REPLY_KEY, clamp_text, trace_summary};
+pub use trace::{BoundedTrace, TRACE_BYTE_CAP, TRACE_ERROR_CAP, TRACE_EVENT_CAP, TRACE_FIELD_CAP, clamp_encoded, clamp_text, trace_summary};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RuntimeError {
@@ -185,16 +185,29 @@ impl AgentSupervisor {
     }
 
     pub async fn dispatch_inbound_with_options(&self, event: InboundEvent, options: DispatchOptions) -> Result<(), DispatchError> {
-        self.enqueue(event, options, None).await
+        self.enqueue(event, options, None, None).await
+    }
+
+    pub async fn dispatch_admitted(&self, event: InboundEvent) -> Result<(), DispatchError> {
+        let agent_id = event.agent_id;
+        let (admitted, admission) = oneshot::channel();
+        self.enqueue(event, DispatchOptions::default(), None, Some(admitted)).await?;
+        admission.await.unwrap_or(Err(DispatchError::NotRunning(agent_id)))
     }
 
     pub async fn dispatch_with_reply(&self, event: InboundEvent, options: DispatchOptions) -> Result<oneshot::Receiver<RunCompletion>, DispatchError> {
         let (reply, completion) = oneshot::channel();
-        self.enqueue(event, options, Some(reply)).await?;
+        self.enqueue(event, options, Some(reply), None).await?;
         Ok(completion)
     }
 
-    async fn enqueue(&self, event: InboundEvent, options: DispatchOptions, reply: Option<oneshot::Sender<RunCompletion>>) -> Result<(), DispatchError> {
+    async fn enqueue(
+        &self,
+        event: InboundEvent,
+        options: DispatchOptions,
+        reply: Option<oneshot::Sender<RunCompletion>>,
+        admitted: Option<oneshot::Sender<Result<(), DispatchError>>>,
+    ) -> Result<(), DispatchError> {
         let agent_id = event.agent_id;
         match self.status(agent_id).await {
             None => return Err(RuntimeError::UnknownAgent(agent_id).into()),
@@ -208,7 +221,7 @@ impl AgentSupervisor {
             tokio::sync::mpsc::error::TrySendError::Closed(()) => DispatchError::NotRunning(agent_id),
         })?;
         self.bus.publish(RuntimeEvent::Inbound { event: event.clone() });
-        slot.send(actor::QueuedEvent::new(event, release, options, reply));
+        slot.send(actor::QueuedEvent::new(event, release, options, reply).with_admission(admitted));
         Ok(())
     }
 

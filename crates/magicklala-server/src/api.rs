@@ -22,7 +22,7 @@ use magicklala_graph::{
 };
 use magicklala_runtime::{
     AgentStatus, BoundedTrace, CopilotError, CopilotRequest, CopilotSuggestion, DispatchError, DispatchOptions, GraphPatchOp, LlmCallScope, MeteredLlmGateway,
-    ReleaseOrigin, RunCompletion, RuntimeEvent, SharedEmbedder, StoreKnowledgeBridge, StoreMemoryBridge, TRACE_REPLY_KEY, UnboundAgentStore,
+    ReleaseOrigin, RunCompletion, RuntimeEvent, SharedEmbedder, StoreKnowledgeBridge, StoreMemoryBridge, UnboundAgentStore,
 };
 use magicklala_store::*;
 use serde::{Deserialize, Serialize};
@@ -533,7 +533,7 @@ impl SpellRunLog<'_> {
         });
     }
 
-    fn execution_run(&self, status: RunStatus, error: Option<String>, nodes_executed: u64) -> ExecutionRun {
+    fn execution_run(&self, status: RunStatus, error: Option<String>, reply: Option<String>, nodes_executed: u64) -> ExecutionRun {
         self.close(status, error.clone(), nodes_executed);
         ExecutionRun {
             run_id: self.run_id.0,
@@ -546,6 +546,7 @@ impl SpellRunLog<'_> {
             finished_at: Some(Utc::now()),
             nodes_executed,
             error,
+            reply,
             trace: self.trace.kept.seal(serde_json::Map::new()),
         }
     }
@@ -623,7 +624,7 @@ pub async fn run_spell(State(state): State<AppState>, ApiPath(id): ApiPath<Uuid>
     let log = SpellRunLog { spell: &spell, trigger: &trigger, agent, run_id, started_at, trace: &trace };
     match outcome {
         Ok(Ok(summary)) => {
-            state.store.record_run(log.execution_run(summary.status, summary.error.clone(), summary.nodes_executed)).await?;
+            state.store.record_run(log.execution_run(summary.status, summary.error.clone(), summary.replies.first().cloned(), summary.nodes_executed)).await?;
             Ok(Json(log.body(serde_json::json!({ "run_id": run_id, "summary": summary }))).into_response())
         }
         Ok(Err(SpellError::Validation(errors))) => {
@@ -632,13 +633,13 @@ pub async fn run_spell(State(state): State<AppState>, ApiPath(id): ApiPath<Uuid>
         Ok(Err(error)) => {
             let summary = log.failed_summary(&error);
             let message = summary.error.clone().unwrap_or_else(|| error.to_string());
-            state.store.record_run(log.execution_run(summary.status, Some(message.clone()), summary.nodes_executed)).await?;
+            state.store.record_run(log.execution_run(summary.status, Some(message.clone()), None, summary.nodes_executed)).await?;
             let body = log.body(serde_json::json!({ "error": message, "code": "spell_failed", "run_id": run_id, "summary": summary }));
             Ok((StatusCode::UNPROCESSABLE_ENTITY, Json(body)).into_response())
         }
         Err(_elapsed) => {
             let message = format!("spell run exceeded {} ms and was cancelled", state.runs.timeout.as_millis());
-            state.store.record_run(log.execution_run(RunStatus::TimedOut, Some(message.clone()), trace.nodes_finished())).await?;
+            state.store.record_run(log.execution_run(RunStatus::TimedOut, Some(message.clone()), None, trace.nodes_finished())).await?;
             let body = log.body(serde_json::json!({ "error": message, "code": "run_timeout", "run_id": run_id }));
             Ok((StatusCode::GATEWAY_TIMEOUT, Json(body)).into_response())
         }
@@ -766,7 +767,7 @@ pub async fn delete_agent(State(state): State<AppState>, ApiPath(id): ApiPath<Uu
     request_body = PublishRelease,
     responses(
         (status = 201, description = "Release snapshot published, pinned and deployed"),
-        (status = 400, description = "Spell is invalid, references a missing, foreign or cyclic subgraph, or belongs to another project"),
+        (status = 400, description = "Spell is invalid, references a missing, foreign or cyclic subgraph, nests subgraphs deeper than 16 levels, or belongs to another project"),
         (status = 404, description = "Unknown agent or spell"),
         (status = 413, description = "Body larger than 1 MiB")
     )
@@ -868,7 +869,7 @@ fn dispatch_error(error: DispatchError) -> ApiError {
         DispatchError::InvalidRelease(detail) => ApiError::bad_request("invalid_spell", detail),
         DispatchError::NotRunning(_) => ApiError::conflict("agent_not_running", "start the agent before sending it events"),
         DispatchError::NoRelease(_) => ApiError::conflict("no_release", "publish a release before starting the agent"),
-        DispatchError::Busy(_) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "agent_busy", "the agent mailbox is full; retry shortly"),
+        DispatchError::Busy(_) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "agent_busy", "the agent mailbox or channel lane is full; retry shortly"),
         DispatchError::Runtime(runtime) => runtime.into(),
         other => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "dispatch_failed", other.to_string()),
     }
@@ -893,8 +894,7 @@ impl From<RunCompletion> for Completion {
 
 async fn recorded_completion(state: &AppState, agent_id: Uuid, correlation: &str) -> Option<Completion> {
     let run = state.store.find_run_by_correlation(AgentId(agent_id), correlation).await.ok()??;
-    let recorded_reply = run.trace.get(TRACE_REPLY_KEY).and_then(serde_json::Value::as_str).map(str::to_owned);
-    Some(match (run.status, recorded_reply) {
+    Some(match (run.status, run.reply) {
         (RunStatus::Succeeded, Some(reply)) => Completion::Finished { status: RunStatus::Succeeded, reply: Some(reply), error: None },
         (RunStatus::Succeeded, None) => Completion::ReplyLost,
         (status, _) => Completion::Finished { status, reply: None, error: run.error },
@@ -1213,7 +1213,7 @@ fn webhook_content(body: &serde_json::Value) -> String {
     params(
         ("path" = String, Path, description = "Registered webhook path"),
         ("X-MagickLaLa-Timestamp" = Option<String>, Header, description = "Unix seconds when the payload was signed; must be within 300 seconds of server time when the webhook has a secret credential"),
-        ("X-MagickLaLa-Delivery" = Option<String>, Header, description = "Unique delivery id of 1 to 128 printable ASCII characters, required when the webhook has a secret credential; each id is accepted once within the 600 second replay window and becomes the run's correlation_id"),
+        ("X-MagickLaLa-Delivery" = Option<String>, Header, description = "Unique delivery id of 1 to 128 characters from [A-Za-z0-9_-] (ASCII letters, digits, '-' and '_'), required when the webhook has a secret credential; each id is accepted once within the 600 second replay window and becomes the run's correlation_id"),
         ("X-MagickLaLa-Signature" = Option<String>, Header, description = "sha256=<hex HMAC-SHA256 of \"<timestamp>.<delivery>.<raw body>\">, required when the webhook has a secret credential")
     ),
     responses(
@@ -1224,7 +1224,7 @@ fn webhook_content(body: &serde_json::Value) -> String {
         (status = 404, description = "Unknown webhook"),
         (status = 409, description = "duplicate_webhook_delivery: this X-MagickLaLa-Delivery was already received, so the agent is not run again; or the webhook is disabled or its agent is not running"),
         (status = 413, description = "Body larger than 1 MiB"),
-        (status = 503, description = "Agent mailbox is full")
+        (status = 503, description = "Agent mailbox or channel lane is full")
     )
 )]
 pub async fn receive_webhook(
@@ -1266,9 +1266,11 @@ pub async fn receive_webhook(
         received_at: Utc::now(),
     };
     state.supervisor.register(webhook.agent_id.0).await;
-    if let Err(error) = state.supervisor.dispatch_inbound(event).await {
-        if let Some(delivery) = &delivery {
-            state.store.forget_webhook_delivery(webhook.id, delivery).await?;
+    if let Err(error) = state.supervisor.dispatch_admitted(event).await {
+        if let Some(delivery) = &delivery
+            && let Err(forget_error) = state.store.forget_webhook_delivery(webhook.id, delivery).await
+        {
+            tracing::warn!(webhook_id = %webhook.id.0, delivery_id = %delivery, error = %forget_error, "failed to release webhook delivery claim after dispatch failure");
         }
         return Err(dispatch_error(error));
     }

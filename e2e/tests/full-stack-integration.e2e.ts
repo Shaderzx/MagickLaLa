@@ -808,7 +808,8 @@ test('A run whose node outputs pass 1 MiB saves a trace of at most 65536 bytes a
     expect(chat.body.reply.content).toBe('grew past one mebibyte');
     const runs = (await stack.api(`/api/v1/agents/${agent.id}/runs`)).body as { run_id: string; trace: { correlation_id?: string; reply?: string } }[];
     const chatRun = runs.find((item) => item.trace.correlation_id === chat.body.reply.metadata.correlation_id)!;
-    expect(chatRun.trace.reply).toBe('grew past one mebibyte');
+    expect(chatRun.reply).toBe('grew past one mebibyte');
+    expect(chatRun.trace).not.toHaveProperty('reply');
     for (const runId of [direct.body.run_id, chatRun.run_id]) {
       const saved = storedTrace(stack.dbPath, runId);
       expect(saved.bytes).toBeLessThanOrEqual(65_536);

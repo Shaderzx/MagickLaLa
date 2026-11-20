@@ -477,6 +477,7 @@ fn correlated_run(agent: AgentId, spell: SpellRecordId, correlation: &str, age_s
         finished_at: Some(started_at),
         nodes_executed: 1,
         error: None,
+        reply: None,
         trace: json!({ "correlation_id": correlation, "channel": "probe" }),
     }
 }
