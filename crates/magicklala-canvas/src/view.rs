@@ -75,13 +75,19 @@ fn flow_wire_color(ty: SocketType, light: bool) -> Color {
 
 pub fn category_accent(category: &str) -> Color {
     match category.to_ascii_lowercase().as_str() {
-        "events" | "event" => rgba(0.86, 0.55, 0.16, 1.0),
-        "flow" => rgba(0.34, 0.38, 0.47, 1.0),
-        "ai" => rgba(0.47, 0.36, 0.92, 1.0),
-        "memory" => rgba(0.1, 0.6, 0.58, 1.0),
-        "knowledge" => rgba(0.18, 0.47, 0.9, 1.0),
-        "data" => rgba(0.2, 0.62, 0.36, 1.0),
-        "script" => rgba(0.84, 0.3, 0.56, 1.0),
+        "events" | "event" => rgba(0.93, 0.56, 0.13, 1.0),
+        "flow" => rgba(0.45, 0.52, 0.64, 1.0),
+        "ai" => rgba(0.55, 0.4, 0.98, 1.0),
+        "memory" => rgba(0.08, 0.68, 0.64, 1.0),
+        "knowledge" => rgba(0.2, 0.5, 0.95, 1.0),
+        "io" => rgba(0.26, 0.74, 0.38, 1.0),
+        "code" | "script" => rgba(0.9, 0.3, 0.58, 1.0),
+        "variables" => rgba(0.96, 0.78, 0.2, 1.0),
+        "text" => rgba(0.62, 0.8, 0.22, 1.0),
+        "logic" => rgba(0.94, 0.38, 0.3, 1.0),
+        "json" | "data" => rgba(0.12, 0.78, 0.9, 1.0),
+        "network" => rgba(0.36, 0.34, 0.86, 1.0),
+        "time" => rgba(0.78, 0.5, 0.3, 1.0),
         _ => rgba(0.4, 0.43, 0.5, 1.0),
     }
 }

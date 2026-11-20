@@ -116,7 +116,7 @@ pub trait NodeExecutor: Send + Sync {
 ## 5. Phase 0 & Phase 1 Verification Plan
 
 1. **Phase 0**:
-   - `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`.
+   - `ci/verify --full` (fmt, clippy, check, build, landmines and the e2e suite) and `cd e2e && npx e2e run`; the test suite is e2e only, with no unit test runner.
    - Headless Rune smoke test renders a sample canvas PNG (`--snap`) without a display server.
 2. **Phase 1**:
    - Deterministic graph tests covering branching, `split` + `wait_for_all`, `while_loop` step-limit guardrails, value memoization, cycle rejection, and Rhai script sandboxing.

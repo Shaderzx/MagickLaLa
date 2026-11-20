@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use magicklala_canvas::ExecutionStatus;
-use magicklala_graph::{NodeCatalog, SpellValidator};
-use magicklala_studio::{StudioApp, Theme, ValidationState, render_headless_snapshot_themed, studio_view};
+use magicklala_canvas::{ExecutionStatus, category_accent};
+use magicklala_graph::{NodeCatalog, NodeId, NodeInstance, SpellGraph, SpellValidator, Wire, WireId};
+use magicklala_studio::{
+    PALETTE_CATEGORY_ORDER, StudioApp, StudioConfig, Theme, ValidationState, palette_categories, registry_specs, render_headless_snapshot_themed, studio_view,
+};
 use rune::{Env, Runtime};
 use serde_json::json;
 
@@ -141,9 +143,170 @@ fn context_menu(rt: &mut Runtime<StudioApp>) -> Result<serde_json::Value, String
     }))
 }
 
-fn probe(desktop: PathBuf, compact: PathBuf) -> Result<serde_json::Value, String> {
+fn run_report(app: &StudioApp) -> serde_json::Value {
+    let report = app.last_run.clone();
+    let failed: Vec<String> = app.canvas.nodes.iter().filter(|card| card.status == ExecutionStatus::Failed).map(|card| card.id.0.clone()).collect();
+    json!({
+        "status": report.as_ref().map(|report| report.outcome.label()),
+        "events": app.trace.iter().map(|line| line.kind).collect::<Vec<_>>(),
+        "failedNodes": failed,
+        "replies": report.as_ref().map(|report| report.replies.clone()).unwrap_or_default(),
+        "error": report.and_then(|report| report.error),
+        "validation": app.validation.label(),
+    })
+}
+
+fn example(name: &str) -> Result<SpellGraph, String> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples").join(name);
+    let text = std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    serde_json::from_str(&text).map_err(|error| format!("{name}: {error}"))
+}
+
+fn runtime_for(spell: SpellGraph) -> Runtime<StudioApp> {
+    let mut rt = Runtime::new(StudioApp::with_spell(spell, registry_specs()), studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt
+}
+
+fn preserve(name: &str) -> Result<serde_json::Value, String> {
+    let mut rt = runtime_for(example(name)?);
+    let canvas_wires = rt.state.canvas.wires.len();
+    rt.update(|app, _| app.sync_spell());
+    click(&mut rt, "validate")?;
+    if let ValidationState::Invalid(errors) = &rt.state.validation {
+        eprintln!("{name} validation errors: {errors:?}");
+    }
+    let configs: serde_json::Map<String, serde_json::Value> = rt.state.spell.nodes.iter().map(|node| (node.id.0.clone(), node.config.clone())).collect();
+    Ok(json!({
+        "file": name,
+        "canvasWires": canvas_wires,
+        "validation": rt.state.validation.label(),
+        "wireIds": rt.state.spell.wires.iter().map(|wire| wire.id.0.clone()).collect::<Vec<_>>(),
+        "configs": configs,
+    }))
+}
+
+fn edit_script() -> Result<serde_json::Value, String> {
+    let mut rt = runtime_for(example("webhook_router.json")?);
+    let node = NodeId::from("classify");
+    let script = "#{ route: \"orders\", message: \"Order \" + body[\"id\"] + \" edited\" }".to_owned();
+    let edited = script.clone();
+    rt.update(move |app, _| {
+        app.canvas.select(Some(node.clone()));
+        if let Some(edit) = app.prompts.get_mut(&node) {
+            *edit = rune::TextEdit::new(&edited);
+        }
+    });
+    click(&mut rt, "validate")?;
+    let config = rt.state.spell.nodes.iter().find(|node| node.id.0 == "classify").map(|node| node.config.clone()).unwrap_or_default();
+    Ok(json!({ "node": "classify", "script": script, "config": config }))
+}
+
+fn echo_spell() -> SpellGraph {
+    let mut spell = SpellGraph::new("Echo Agent");
+    let place =
+        |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position: [x, 0.0], config };
+    spell.nodes = vec![
+        place("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        place("echo", "text/template", 280.0, json!({ "template": "Echo: {{content}}" })),
+        place("reply", "io/send_message", 560.0, serde_json::Value::Null),
+    ];
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    spell.wires = vec![
+        wire("w1", ("trigger", "out"), ("reply", "in")),
+        wire("w2", ("trigger", "content"), ("echo", "content")),
+        wire("w3", ("echo", "text"), ("reply", "content")),
+    ];
+    spell
+}
+
+fn type_chat(rt: &mut Runtime<StudioApp>, message: &str) -> Result<String, String> {
+    click(rt, "tab-playground")?;
+    let text = message.to_owned();
+    rt.update(move |app, _| {
+        app.chat_input = rune::TextEdit::new(&text);
+        app.send_chat();
+    });
+    rt.frame(0.0);
+    rt.state.chat.last().filter(|reply| !reply.from_user).map(|reply| reply.text.clone()).ok_or_else(|| "no chat reply".to_owned())
+}
+
+fn execution() -> Result<serde_json::Value, String> {
+    let mut webhook = runtime_for(example("webhook_router.json")?);
+    webhook.update(|app, _| app.run_payload = json!({ "method": "POST", "path": "/hooks/router", "body": { "type": "order", "id": "42" } }));
+    click(&mut webhook, "run-spell")?;
+    let mut broken = StudioApp::with_spell(example("webhook_router.json")?, registry_specs());
+    broken.spell.nodes.push(NodeInstance {
+        id: NodeId::from("mystery"),
+        kind: "nope/unknown".to_owned(),
+        position: [0.0, 400.0],
+        config: serde_json::Value::Null,
+    });
+    broken.canvas = magicklala_canvas::CanvasState::from_graph(&broken.spell, &broken.specs);
+    let mut invalid = Runtime::new(broken, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    click(&mut invalid, "run-spell")?;
+    Ok(json!({ "webhook": run_report(&webhook.state), "invalid": run_report(&invalid.state) }))
+}
+
+fn chat() -> Result<serde_json::Value, String> {
+    let message = "hello studio";
+    let mut echo = runtime_for(echo_spell());
+    let echo_reply = type_chat(&mut echo, message)?;
+    let mut failing = Runtime::new(StudioApp::from_registry(), studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    let failing_reply = type_chat(&mut failing, message)?;
+    let failing_error = failing.state.last_run.as_ref().and_then(|report| report.error.clone());
+    Ok(json!({ "message": message, "echoReply": echo_reply, "failingReply": failing_reply, "failingError": failing_error }))
+}
+
+fn publish(db_path: &std::path::Path) -> Result<serde_json::Value, String> {
+    let config = StudioConfig { db_path: Some(db_path.to_path_buf()), ..StudioConfig::default() };
+    let app = StudioApp::open(&config).map_err(|error| error.to_string())?;
+    let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    click(&mut rt, "publish")?;
+    if let Some(error) = &rt.state.store_error {
+        return Err(format!("publish failed: {error}"));
+    }
+    let version = rt.state.releases.last().map(|release| release.version).ok_or("publish created no release")?;
+    let graph = serde_json::to_value(&rt.state.last_published.as_ref().ok_or("no published release")?.graph).map_err(|error| error.to_string())?;
+    drop(rt);
+    let reopened = StudioApp::open(&config).map_err(|error| error.to_string())?;
+    let spell = serde_json::to_value(&reopened.spell).map_err(|error| error.to_string())?;
+    Ok(json!({
+        "version": version,
+        "graph": graph,
+        "reopened": { "versions": reopened.releases.iter().map(|release| release.version).collect::<Vec<_>>(), "spell": spell },
+    }))
+}
+
+fn palette() -> serde_json::Value {
+    let specs = registry_specs();
+    let accents: serde_json::Map<String, serde_json::Value> = PALETTE_CATEGORY_ORDER
+        .iter()
+        .map(|category| {
+            let color = category_accent(category);
+            ((*category).to_owned(), json!([color.r, color.g, color.b, color.a]))
+        })
+        .collect();
+    json!({ "categories": palette_categories(&specs), "order": PALETTE_CATEGORY_ORDER, "accents": accents })
+}
+
+fn inspector() -> serde_json::Value {
+    let rt = sized_runtime((960.0, 640.0), Theme::Dark);
+    let editor = rect(&rt, "prompt-editor").map(|[_, y, _, h]| y + h);
+    let panel = rect(&rt, "inspector").map(|[_, y, _, h]| y + h);
+    json!({ "width": 960, "height": 640, "editorBottom": editor, "panelBottom": panel })
+}
+
+fn probe(desktop: PathBuf, compact: PathBuf, db_path: PathBuf) -> Result<serde_json::Value, String> {
     let registry = magicklala_nodes::default_registry();
     let registry_kinds: Vec<String> = registry.specs().into_iter().map(|spec| spec.kind).collect();
+    let registry_categories = palette_categories(&registry_specs());
     let mut rt = Runtime::new(StudioApp::demo(), studio_view, (1280.0, 800.0), Env::new(true, 1.0));
     rt.frame(0.0);
     let default_nodes = rt.state.canvas.nodes.len();
@@ -185,7 +348,7 @@ fn probe(desktop: PathBuf, compact: PathBuf) -> Result<serde_json::Value, String
     }
 
     click(&mut rt, "run-spell")?;
-    let events: Vec<String> = rt.state.trace.iter().map(|line| line.kind.to_owned()).collect();
+    let run = run_report(&rt.state);
     let succeeded = rt.state.canvas.nodes.iter().filter(|card| card.status == ExecutionStatus::Succeeded).count();
     let active_wires = rt.state.canvas.wires.iter().filter(|wire| wire.active).count();
 
@@ -195,6 +358,12 @@ fn probe(desktop: PathBuf, compact: PathBuf) -> Result<serde_json::Value, String
     if rt.state.theme != Theme::Light || !rt.state.canvas.light {
         return Err("theme toggle did not reach the canvas".to_owned());
     }
+
+    let preserved = vec![preserve("webhook_router.json")?, preserve("parallel_research.json")?];
+    let edit = edit_script()?;
+    let execution = execution()?;
+    let chat = chat()?;
+    let published = publish(&db_path)?;
 
     let mut menu_rt = sized_runtime((1280.0, 800.0), Theme::Dark);
     let menu = context_menu(&mut menu_rt)?;
@@ -216,12 +385,19 @@ fn probe(desktop: PathBuf, compact: PathBuf) -> Result<serde_json::Value, String
     }
 
     Ok(json!({
-        "registry": { "kinds": registry_kinds, "appKinds": app_kinds, "paletteKinds": palette_kinds },
+        "registry": { "kinds": registry_kinds, "appKinds": app_kinds, "paletteKinds": palette_kinds, "categories": registry_categories },
         "defaultSpell": { "nodes": default_nodes, "wires": default_wires, "titles": titles, "kinds": kinds, "registryErrors": registry_validation },
         "spawn": { "paletteKind": palette_kind, "nodesBefore": nodes_before, "nodesAfter": nodes_after, "spawnedKind": spawned_kind },
         "drag": { "node": dragged, "before": before, "after": after, "pointerDelta": [pointer_delta.0, pointer_delta.1] },
         "validate": { "status": validation.label() },
-        "run": { "events": events, "succeededNodes": succeeded, "activeWires": active_wires },
+        "run": { "status": run["status"], "events": run["events"], "failedNodes": run["failedNodes"], "replies": run["replies"], "error": run["error"], "validation": run["validation"], "succeededNodes": succeeded, "activeWires": active_wires },
+        "preserve": preserved,
+        "edit": edit,
+        "execution": execution,
+        "chat": chat,
+        "publish": published,
+        "palette": palette(),
+        "inspector": inspector(),
         "theme": { "before": theme_before, "after": theme_after },
         "toolbar": toolbar,
         "contextMenu": menu,
@@ -231,11 +407,11 @@ fn probe(desktop: PathBuf, compact: PathBuf) -> Result<serde_json::Value, String
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1).map(PathBuf::from);
-    let (Some(desktop), Some(compact)) = (args.next(), args.next()) else {
-        eprintln!("usage: studio_probe <desktop.png> <compact.png>");
+    let (Some(desktop), Some(compact), Some(db_path)) = (args.next(), args.next(), args.next()) else {
+        eprintln!("usage: studio_probe <desktop.png> <compact.png> <studio.sqlite>");
         return ExitCode::from(2);
     };
-    match probe(desktop, compact) {
+    match probe(desktop, compact, db_path) {
         Ok(report) => {
             println!("{report}");
             ExitCode::SUCCESS
