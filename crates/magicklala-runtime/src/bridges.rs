@@ -41,21 +41,35 @@ fn clamp_limit(limit: usize) -> u32 {
     u32::try_from(limit.clamp(1, 100)).unwrap_or(100)
 }
 
+fn trusted_agent(pinned: Option<AgentId>, requested: &str) -> Result<AgentId, NodeError> {
+    pinned.map_or_else(|| agent(requested), Ok)
+}
+
 pub struct StoreMemoryBridge {
     repository: Arc<dyn Repository>,
     embedder: Arc<dyn Embedder>,
+    pinned: Option<AgentId>,
 }
 
 impl StoreMemoryBridge {
     pub fn new(repository: Arc<dyn Repository>, embedder: Arc<dyn Embedder>) -> Self {
-        Self { repository, embedder }
+        Self { repository, embedder, pinned: None }
+    }
+
+    pub fn pinned_to(mut self, agent_id: AgentId) -> Self {
+        self.pinned = Some(agent_id);
+        self
+    }
+
+    pub fn pinned_agent(&self) -> Option<AgentId> {
+        self.pinned
     }
 }
 
 #[async_trait]
 impl MemoryService for StoreMemoryBridge {
     async fn add(&self, agent_id: &str, content: &str, metadata: serde_json::Value) -> Result<String, NodeError> {
-        let agent_id = agent(agent_id)?;
+        let agent_id = trusted_agent(self.pinned, agent_id)?;
         if content.trim().is_empty() {
             return Err(NodeError::Service("memory content is empty".to_owned()));
         }
@@ -66,7 +80,7 @@ impl MemoryService for StoreMemoryBridge {
     }
 
     async fn recall(&self, agent_id: &str, query: &str, limit: usize) -> Result<Vec<MemoryItem>, NodeError> {
-        let agent_id = agent(agent_id)?;
+        let agent_id = trusted_agent(self.pinned, agent_id)?;
         let embedding = embed_one(self.embedder.as_ref(), query).await?;
         let hits = self.repository.search_memories(agent_id, &embedding, clamp_limit(limit)).await.map_err(service)?;
         Ok(hits
@@ -80,11 +94,21 @@ pub struct StoreKnowledgeBridge {
     repository: Arc<dyn Repository>,
     embedder: Arc<dyn Embedder>,
     chunking: ChunkConfig,
+    pinned: Option<AgentId>,
 }
 
 impl StoreKnowledgeBridge {
     pub fn new(repository: Arc<dyn Repository>, embedder: Arc<dyn Embedder>) -> Self {
-        Self { repository, embedder, chunking: ChunkConfig::default() }
+        Self { repository, embedder, chunking: ChunkConfig::default(), pinned: None }
+    }
+
+    pub fn pinned_to(mut self, agent_id: AgentId) -> Self {
+        self.pinned = Some(agent_id);
+        self
+    }
+
+    pub fn pinned_agent(&self) -> Option<AgentId> {
+        self.pinned
     }
 
     pub fn with_chunking(mut self, chunking: ChunkConfig) -> Self {
@@ -96,7 +120,7 @@ impl StoreKnowledgeBridge {
 #[async_trait]
 impl KnowledgeService for StoreKnowledgeBridge {
     async fn add(&self, agent_id: &str, title: &str, content: &str) -> Result<String, NodeError> {
-        let agent_id = agent(agent_id)?;
+        let agent_id = trusted_agent(self.pinned, agent_id)?;
         let pipeline = KnowledgePipeline::new(SharedEmbedder(Arc::clone(&self.embedder)), self.chunking).map_err(service)?;
         let document = DocumentInput { title: title.to_owned(), kind: DocumentKind::Markdown, source_uri: None, bytes: content.as_bytes().to_vec() };
         let doc_id = KnowledgeDocId::new();
@@ -114,7 +138,7 @@ impl KnowledgeService for StoreKnowledgeBridge {
     }
 
     async fn search(&self, agent_id: &str, query: &str, limit: usize) -> Result<Vec<KnowledgeHit>, NodeError> {
-        let agent_id = agent(agent_id)?;
+        let agent_id = trusted_agent(self.pinned, agent_id)?;
         let embedding = embed_one(self.embedder.as_ref(), query).await?;
         let hits = self.repository.search_knowledge(agent_id, query, &embedding, clamp_limit(limit)).await.map_err(service)?;
         Ok(hits
