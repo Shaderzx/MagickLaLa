@@ -31,7 +31,7 @@ function completion(response: ServerResponse, content: string) {
   response.end(JSON.stringify({ model: 'loopback', choices: [{ message: { content }, finish_reason: 'stop' }], usage: { prompt_tokens: 3, completion_tokens: 4 } }));
 }
 
-async function startLoopbackLlm(options: { holdUntil: number; streamDeltas: string[]; deltaSeen: (delta: string) => Promise<void> }) {
+async function startLoopbackLlm(options: { holdUntil: number; streamDeltas: string[]; deltaSeen: (delta: string) => Promise<void>; beforeAnswer?: () => Promise<void> }) {
   const held: { prompt: string; response: ServerResponse }[] = [];
   const completionPrompts: string[] = [];
   const streamPrompts: string[] = [];
@@ -57,6 +57,7 @@ async function startLoopbackLlm(options: { holdUntil: number; streamDeltas: stri
     held.push({ prompt, response });
     concurrentPeak = Math.max(concurrentPeak, held.length);
     if (held.length < options.holdUntil) return;
+    await options.beforeAnswer?.();
     for (const waiting of held.splice(0)) completion(waiting.response, `loopback answer about ${waiting.prompt}`);
   });
   server.listen(0, '127.0.0.1');
@@ -223,6 +224,54 @@ test('magicklala serve keeps a project, sealed credential, knowledge, spell rele
   }
 });
 
+test('two concurrent chats to one running agent on the same channel each get the reply to their own message, correlated end to end', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-concurrent-chat-'));
+  const databaseUrl = `sqlite://${join(dir, 'concurrent.db')}`;
+  type Frame = { type: string; event?: { content?: string; payload?: { correlation_id?: string } }; action?: { content: string; channel: string; payload?: { correlation_id?: string } } };
+  const frames: Frame[] = [];
+  const bothInboundSeen = () => expect.poll(() => frames.filter((frame) => frame.type === 'inbound').length, { timeout: 20_000 }).toBe(2);
+  const llm = await startLoopbackLlm({ holdUntil: 1, streamDeltas: [], deltaSeen: async () => {}, beforeAnswer: bothInboundSeen });
+  const port = await freePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const api = client(baseUrl);
+  const serve = startServe(port, databaseUrl, llm.baseUrl, dir);
+  let socket: WebSocket | undefined;
+  try {
+    await waitHealthy(baseUrl);
+    const project = await api('/api/v1/projects', { name: 'Concurrent chat' });
+    const spellGraph = JSON.parse(await readFile(join(repoRoot, 'examples', 'hello_llm.json'), 'utf8'));
+    const spell = await api('/api/v1/spells', { project_id: project.body.id, name: 'Hello LLM', graph: spellGraph });
+    const agent = await api('/api/v1/agents', { project_id: project.body.id, name: 'Twin' });
+    expect((await api(`/api/v1/agents/${agent.body.id}/releases`, { spell_id: spell.body.id })).status).toBe(201);
+    expect((await api(`/api/v1/agents/${agent.body.id}/start`, {})).body.status.state).toBe('running');
+    socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    socket.addEventListener('message', (message) => frames.push(JSON.parse(String(message.data))));
+    await once(socket as unknown as EventTarget, 'open');
+
+    const questions = ['tell me about owls', 'tell me about bats'];
+    const answers = await Promise.all(questions.map((content) => api(`/api/v1/agents/${agent.body.id}/chat`, { content, channel: 'shared' })));
+
+    expect(answers.map((answer) => answer.status)).toEqual([200, 200]);
+    expect(answers.map((answer) => answer.body.message.content)).toEqual(questions);
+    expect(answers.map((answer) => answer.body.reply.content)).toEqual(questions.map((question) => `loopback answer about ${question}`));
+    expect(answers.map((answer) => answer.body.reply.metadata.in_reply_to)).toEqual(answers.map((answer) => answer.body.message.id));
+    expect([...llm.completionPrompts].sort()).toEqual([...questions].sort());
+
+    await expect.poll(() => frames.filter((frame) => frame.type === 'outbound').length, { timeout: 20_000 }).toBe(2);
+    const inboundIds = new Map(frames.filter((frame) => frame.type === 'inbound').map((frame) => [frame.event?.content, frame.event?.payload?.correlation_id]));
+    const outboundIds = new Map(frames.filter((frame) => frame.type === 'outbound').map((frame) => [frame.action?.content, frame.action?.payload?.correlation_id]));
+    expect(new Set(inboundIds.values()).size).toBe(2);
+    for (const question of questions) {
+      expect(inboundIds.get(question)).toMatch(/^[0-9a-f-]{36}$/);
+      expect(outboundIds.get(`loopback answer about ${question}`)).toBe(inboundIds.get(question));
+    }
+  } finally {
+    socket?.close();
+    await stopProcess(serve.child);
+    await llm.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 for (const [width, height] of [[960, 640], [1280, 800]]) {
   test(`magicklala studio --snap renders a ${width}x${height} PNG with no accessibility warnings`, async () => {
     const dir = await mkdtemp(join(tmpdir(), 'magicklala-snap-size-'));
