@@ -1,6 +1,6 @@
 import { test, expect } from 'e2e';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -512,6 +512,123 @@ test('Studio opened on release A@1, which calls the B draft that calls the leaf 
     expect(report.run.error).toBeNull();
     expect(report.run.replies).toEqual([report.aDraftReply]);
     expect(report.published).toEqual({ version: releases[1].version, storeError: null, activeRelease: releases[1].version, releases: releases.map((release) => release.version) });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Studio treats --db :memory: and every in-memory SQLite form as not on disk, so Save and Publish refuse with a message naming --db and claim nothing was saved', { timeout: 900_000 }, async () => {
+  const forms = [':memory:', 'sqlite::memory:', 'sqlite://:memory:', 'file::memory:', 'file:studio?mode=memory'];
+  const report = await studioProbe(['memory-db', ...forms]);
+
+  expect(report.forms.map((form: { db: string }) => form.db)).toEqual(forms);
+  for (const form of report.forms) {
+    expect(form.persistent).toBe(false);
+    expect(form.status).toBeNull();
+    expect(form.saveError).toBe('pass --db <file.sqlite> to save drafts on disk');
+    expect(form.publishError).toBe('pass --db <file.sqlite> to publish releases on disk');
+    expect(form.releases).toEqual([]);
+  }
+});
+
+test('Save and Publish show their outcome in the TRACE strip on the default Nodes tab: the --db hint without a database, Draft saved and Published v1 with one, and Draft saved disappears after the next edit', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-visible-status-'));
+  const dbPath = join(dir, 'studio.sqlite');
+  try {
+    const report = await studioProbe(['visible-status', dbPath]);
+
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const releases = db.prepare('SELECT version FROM spell_releases ORDER BY version').all() as { version: number }[];
+    const drafts = db.prepare('SELECT id FROM spells').all() as { id: string }[];
+    db.close();
+    expect(releases).toEqual([{ version: 1 }]);
+    expect(drafts).toHaveLength(1);
+
+    expect(report.noDb.leftTab).toBe('Palette');
+    expect(report.noDb.storeError).toBe('pass --db <file.sqlite> to save drafts on disk');
+    expect(report.noDb.shown).toEqual({ text: report.noDb.storeError, insideTrace: true, onScreen: true });
+
+    expect(report.saved.leftTab).toBe('Palette');
+    expect(report.saved.status).toBe('Draft saved');
+    expect(report.saved.shown).toEqual({ text: 'Draft saved', insideTrace: true, onScreen: true });
+
+    expect(report.published.leftTab).toBe('Palette');
+    expect(report.published.version).toBe(releases[0].version);
+    expect(report.published.shown).toEqual({ text: `Published v${releases[0].version}`, insideTrace: true, onScreen: true });
+
+    expect(report.resaved.shown).toEqual({ text: 'Draft saved', insideTrace: true, onScreen: true });
+    expect(report.edited.status).toBeNull();
+    expect(report.edited.shown).toBeNull();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Studio launched with a --db it cannot open keeps that open error on Save and Publish instead of telling the user to pass --db', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-unopenable-db-'));
+  const blocker = join(dir, 'blocker');
+  const dbPath = join(blocker, 'studio.sqlite');
+  try {
+    await writeFile(blocker, 'a plain file where a folder should be');
+    const report = await studioProbe(['unopenable-db', dbPath]);
+
+    expect(report.persistent).toBeNull();
+    expect(report.saveError).toContain('the database passed with --db could not be opened: ');
+    expect(report.saveError).not.toContain('pass --db');
+    expect(report.publishError).toContain('the database passed with --db could not be opened: ');
+    expect(report.publishError).not.toContain('pass --db');
+    expect(report.status).toBeNull();
+    expect(report.shown).toEqual({ text: report.publishError, insideTrace: true, onScreen: true });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Studio runs a subgraph from the opened spell project only: a Project 2 parent calling a graph id that a Project 1 child also uses replies from the Project 2 child', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-project-scope-'));
+  const dbPath = join(dir, 'studio.sqlite');
+  try {
+    const report = await studioProbe(['project-scope', dbPath]);
+
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const spells = db.prepare("SELECT s.id AS id, s.name AS name, p.name AS project, json_extract(s.graph, '$.id') AS graphId FROM spells s JOIN projects p ON p.id = s.project_id ORDER BY s.name").all() as { id: string; name: string; project: string; graphId: string }[];
+    db.close();
+    const byName = Object.fromEntries(spells.map((spell) => [spell.name, spell]));
+    expect(spells.map((spell) => spell.name)).toEqual(['child one', 'child two', 'parent two']);
+    expect(byName['child one'].project).toBe('Project 1');
+    expect(byName['child two'].project).toBe('Project 2');
+    expect(byName['parent two'].project).toBe('Project 2');
+    expect(byName['child one'].graphId).toBe(report.sharedId);
+    expect(byName['child two'].graphId).toBe(report.sharedId);
+
+    expect(report.opened.recordId).toBe(byName['parent two'].id);
+    expect(report.validation).toEqual({ validation: 'valid', errors: [] });
+    expect(report.run.status).toBe('Succeeded');
+    expect(report.run.error).toBeNull();
+    expect(report.run.replies).toEqual([report.replies.two]);
+    expect(report.run.replies).not.toContain(report.replies.one);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Studio opened on A@1 publishes A@3 after another session published A@2 into the same database, even when A now calls A@2, and lists releases 1, 2 and 3', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-out-of-band-release-'));
+  const dbPath = join(dir, 'studio.sqlite');
+  try {
+    const report = await studioProbe(['out-of-band-release', dbPath]);
+
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const releases = db.prepare('SELECT spell_id AS spellId, version FROM spell_releases ORDER BY version').all() as { spellId: string; version: number }[];
+    const latest = db.prepare("SELECT json_extract(graph, '$.subgraphs') AS subgraphs FROM spell_releases WHERE version = 3").all() as { subgraphs: string }[];
+    db.close();
+
+    expect(releases).toEqual([1, 2, 3].map((version) => ({ spellId: report.recordId, version })));
+    expect(report.opened).toEqual({ recordId: report.recordId, activeRelease: 1, releases: [1] });
+    expect(report.outside).toEqual({ version: 2 });
+    expect(report.edited.subgraphs).toEqual([{ node_id: report.callNode, spell_id: report.recordId, release_version: 2 }]);
+    expect(report.published).toEqual({ version: 3, storeError: null, validation: 'valid', releases: [1, 2, 3] });
+    expect(JSON.parse(latest[0].subgraphs)).toEqual([{ node_id: report.callNode, spell_id: report.recordId, release_version: 2 }]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

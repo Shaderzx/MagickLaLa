@@ -1334,3 +1334,48 @@ test('magicklala spell run --db refuses to guess between two saved spells that s
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('magicklala spell run refuses --spell-id without --db or MAGICKLALA_DB, names --db and does not run the file', buildBudget, async () => {
+  await buildCli();
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-cli-spell-id-no-db-'));
+  try {
+    const file = join(dir, 'spell.json');
+    await writeFile(file, JSON.stringify(fixedReplySpell(randomUUID(), 'no db spell', 'should never run')));
+    const env = keylessEnv();
+    delete env.MAGICKLALA_DB;
+    delete env.MAGICKLALA_DATABASE_URL;
+    const refused = await runCli(['spell', 'run', file, '--spell-id', randomUUID()], env);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain('--spell-id requires --db <file.sqlite> (or MAGICKLALA_DB)');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('magicklala spell run --db refuses a --spell-id whose saved record has another graph id and names both graph ids', buildBudget, async () => {
+  await buildCli();
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-cli-spell-id-mismatch-'));
+  const dbPath = join(dir, 'spells.db');
+  try {
+    const [fileId, otherId] = [randomUUID(), randomUUID()];
+    const fileSpell = fixedReplySpell(fileId, 'file spell', 'from the file spell');
+    const stored = await launchServe({}, () => `sqlite://${dbPath}`);
+    let other: { id: string; graph: { id: string } };
+    try {
+      const project = await stored.server.api('/api/v1/projects', { body: { name: 'cli mismatch' } });
+      expect(project.status).toBe(201);
+      await storeSpell(stored.server, project.body.id, 'file spell', fileSpell);
+      other = await storeSpell(stored.server, project.body.id, 'other spell', fixedReplySpell(otherId, 'other spell', 'from the other spell'));
+    } finally {
+      await stored.stop();
+    }
+    expect(other.graph.id).toBe(otherId);
+    const file = join(dir, 'file.json');
+    await writeFile(file, JSON.stringify(fileSpell));
+    const refused = await runCli(['spell', 'run', file, '--db', dbPath, '--spell-id', other.id], keylessEnv());
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain(`spell record ${other.id} has graph id ${otherId}, which does not match file graph id ${fileId}`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
