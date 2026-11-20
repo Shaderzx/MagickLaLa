@@ -1,0 +1,123 @@
+# MagickLaLa Technical Architecture & Phase 0–1 Specification
+
+This document expands [`docs/PLAN.md`](PLAN.md) into concrete crate contracts, data structures, and execution semantics for **MagickLaLa** (100% Rust + [Anomaly Rune](https://github.com/anomalyco/rune)).
+
+---
+
+## 1. Spell Graph IR (`magicklala-graph`)
+
+A **Spell** is a versioned JSON document describing a dual-socket directed graph:
+
+- **Flow sockets** (`SocketType::Flow`): imperative execution pulses that trigger async side effects (`on_message` → `generate_text` → `send_message`).
+- **Value sockets** (`String`, `Int`, `Float`, `Bool`, `Json`, `Array`, `Embedding`, `Event`, `Any`): strongly typed data edges evaluated lazily on demand with per-activation memoization.
+
+```rust
+pub struct SpellGraph {
+    pub schema_version: u32,
+    pub id: SpellId,
+    pub name: String,
+    pub description: String,
+    pub variables: Vec<VariableDef>,
+    pub nodes: Vec<NodeInstance>,
+    pub wires: Vec<Wire>,
+    pub subgraphs: Vec<SubgraphRef>,
+}
+
+pub struct NodeInstance {
+    pub id: NodeId,
+    pub kind: String,                 // e.g. "core/generate_text", "flow/split"
+    pub position: [f32; 2],           // Studio canvas world coordinates
+    pub config: serde_json::Value,    // Static node parameters & dynamic socket defs
+}
+
+pub struct Wire {
+    pub id: WireId,
+    pub from_node: NodeId,
+    pub from_socket: String,
+    pub to_node: NodeId,
+    pub to_socket: String,
+}
+```
+
+### Static Validation Rules (`SpellValidator`)
+
+Before any Spell executes or is published as a **Spell Release**, `magicklala-graph` enforces:
+
+1. Every wire references an existing `NodeId` and declared `SocketSpec` on both endpoints.
+2. Wire direction is strictly `output -> input`.
+3. Value socket types are compatible (exact match or `Any`); Flow sockets only connect to Flow sockets.
+4. Value-pull subgraphs contain no unguarded cycles (imperative Flow loops are allowed only through explicit loop nodes with a `max_steps` watchdog).
+5. Subgraph references resolve cleanly without recursive self-cycles.
+
+### Async Execution Engine & Live Telemetry
+
+- Each Spell invocation runs inside an `ExecutionContext` carrying:
+  - `run_id: RunId`
+  - `cancellation: CancellationToken`
+  - `step_budget: usize` (default 1,000 flow hops to prevent runaway loops)
+  - `variables: VariableStore` (scoped per run or persisted per agent)
+  - `trace: mpsc::Sender<TraceEvent>`
+- `TraceEvent` variants (`NodeStarted`, `WireActivated`, `NodeCompleted`, `NodeFailed`, `RunFinished`) stream in real time to both CLI logs and `magicklala-canvas` wire animations.
+
+---
+
+## 2. Standard Node Contract (`magicklala-nodes`)
+
+Every node implements a single trait so built-in nodes, Rust plugins, and future WASM plugins behave identically:
+
+```rust
+#[async_trait]
+pub trait NodeExecutor: Send + Sync {
+    fn spec(&self) -> NodeSpec;
+    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<NodeOutcome, NodeError>;
+}
+```
+
+### Phase 1 Starter Node Set
+
+| Category | Node Kinds |
+| :--- | :--- |
+| **Entry / Flow** | `event/on_start`, `flow/branch`, `flow/switch`, `flow/split`, `flow/wait_for_all`, `flow/while_loop`, `time/delay` |
+| **Variables** | `var/get`, `var/set`, `var/reset` |
+| **Text & Data** | `text/template`, `text/replace`, `logic/regex_match`, `json/parse`, `json/stringify`, `json/destructure` |
+| **Network & AI** | `net/http_fetch`, `ai/generate_text`, `ai/stream_text` (OpenAI-compatible, Anthropic, Gemini, Ollama) |
+| **Scripting** | `code/rhai_script` (sandboxed Rhai engine with operation & memory limits and user-defined sockets) |
+
+---
+
+## 3. Storage & Security Boundary (`magicklala-store`)
+
+- Repository traits (`SpellStore`, `AgentStore`, `MemoryStore`, `KnowledgeStore`, `CredentialStore`, `ExecutionLogStore`) decouple runtime logic from SQL dialect details.
+- **SQLite** is the zero-config default (`magicklala.db`) using WAL mode and `sqlx` migrations.
+- **PostgreSQL + `pgvector`** shares the same trait surface for multi-agent cloud deployments (Phase 4).
+- **Secrets at rest**: `credentials.ciphertext` is encrypted with AES-256-GCM using a master key from the OS keychain or `MAGICKLALA_MASTER_KEY`. Plaintext secrets are injected only into outbound provider/connector calls and are never serialized to logs, execution traces, or API responses.
+
+---
+
+## 4. Rune Visual Studio & Graph Canvas (`magicklala-canvas` + `magicklala-studio`)
+
+`anomalyco/rune` renders the entire desktop Studio natively via `wgpu` (macOS Metal, Windows DX12, Linux Vulkan) and supports experimental WebGPU/WASM builds.
+
+### Rune Dependency Strategy (Phase 0)
+
+- Pin `anomalyco/rune` as a git submodule at `third_party/rune` to a fixed commit on `dev`.
+- Mirror Rune's required `[patch.crates-io]` vendor entries (`wgpu-hal`, `winit`, `sctk-adwaita`, `parley_engine`, `accesskit_windows`, `accesskit_macos`) in the root `Cargo.toml`.
+
+### `magicklala-canvas` Architecture
+
+- **Camera**: `(pan_x, pan_y, zoom)` world-to-screen transform supporting trackpad/wheel zoom toward pointer and space/middle-drag panning.
+- **Wire Layer**: GPU-rendered via Rune `canvas(Shape)` + `Path` cubic Bézier curves colored by `SocketType`, with animated progress strokes driven by live `TraceEvent::WireActivated` events.
+- **Node Layer**: Positioned with `El::absolute` in screen coordinates, dragged via Rune's `on_drag` (`Phase::Down` / move / up) with `Tx::instant()` for zero-lag movement.
+- **Interaction & Chrome**: Right-click `on_secondary_press` opens a `rune-kit` `context_menu` node picker; Inspector uses `rune-kit` controls and `rune-edit` for prompts and Rhai code.
+- **Headless Testing**: Every canvas interaction (node drag, wire connect, socket type rejection, live trace highlight) is verified via `rune::Runtime::new(...)` scripted pointer tests and `--snap` PNG captures.
+
+---
+
+## 5. Phase 0 & Phase 1 Verification Plan
+
+1. **Phase 0**:
+   - `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`.
+   - Headless Rune smoke test renders a sample canvas PNG (`--snap`) without a display server.
+2. **Phase 1**:
+   - Deterministic graph tests covering branching, `split` + `wait_for_all`, `while_loop` step-limit guardrails, value memoization, cycle rejection, and Rhai script sandboxing.
+   - CLI end-to-end run: `magicklala spell run examples/parallel_research.json` completes with live structured trace output.
