@@ -126,6 +126,27 @@ pub trait LlmGateway: Send + Sync {
     async fn embed(&self, _model: &str, _text: &str) -> Result<Vec<f32>, NodeError> {
         Err(NodeError::Llm("this gateway does not support embeddings".to_owned()))
     }
+    async fn embed_request(&self, request: EmbeddingRequest) -> Result<Vec<Vec<f32>>, NodeError> {
+        if let Some(credential_id) = request.credential_id.as_deref().filter(|id| !id.is_empty()) {
+            return Err(NodeError::InvalidConfig(format!(
+                "credential {credential_id} cannot be resolved: this gateway does not resolve embedding credentials"
+            )));
+        }
+        let mut vectors = Vec::with_capacity(request.inputs.len());
+        for input in &request.inputs {
+            vectors.push(self.embed(&request.model, input).await?);
+        }
+        Ok(vectors)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbeddingRequest {
+    pub provider: String,
+    pub model: String,
+    pub inputs: Vec<String>,
+    #[serde(default)]
+    pub credential_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

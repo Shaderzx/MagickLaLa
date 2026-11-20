@@ -73,6 +73,12 @@ impl Def {
         .field("credential_id", FieldKind::Credential { provider: "llm".to_owned() }, None, false)
     }
 
+    fn embedding_fields(self) -> Self {
+        self.field("provider", FieldKind::Select { options: ["openai", "gemini", "ollama"].map(String::from).to_vec() }, None, false)
+            .field("model", FieldKind::Model { provider: None }, Some(json!("text-embedding-3-small")), false)
+            .field("credential_id", FieldKind::Credential { provider: "llm".to_owned() }, None, false)
+    }
+
     fn build(self, op: Op) -> Arc<dyn NodeExecutor> {
         Arc::new(StdNode { spec: self.spec, op })
     }
@@ -291,7 +297,7 @@ fn network_and_ai() -> Vec<Arc<dyn NodeExecutor>> {
             .required("text", SocketType::String)
             .flow_out()
             .output("embedding", SocketType::Embedding)
-            .model_fields()
+            .embedding_fields()
             .build(Op::Embedding),
     ]
 }

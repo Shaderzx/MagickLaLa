@@ -68,5 +68,15 @@ pub struct RunSummary {
     pub status: RunStatus,
     pub nodes_executed: u64,
     pub outputs: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub activations: Vec<EmittedOutput>,
+    #[serde(default)]
+    pub activations_truncated: bool,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EmittedOutput {
+    pub node_id: NodeId,
+    pub outputs: BTreeMap<String, Value>,
 }

@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use magicklala_graph::{LlmGateway, LlmMessage, LlmRequest, LlmRole, NodeContext, NodeError, NodeExecutor, NodeOutcome, NodeSpec, TraceEvent, Value};
+use magicklala_graph::{
+    EmbeddingRequest, LlmGateway, LlmMessage, LlmRequest, LlmRole, NodeContext, NodeError, NodeExecutor, NodeOutcome, NodeSpec, TraceEvent, Value,
+};
 use regex::Regex;
 use serde_json::json;
 
@@ -12,6 +14,7 @@ use crate::script::run_rhai;
 
 pub(crate) const MAX_HTTP_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 const MAX_HTTP_REDIRECTS: usize = 5;
+const CREDENTIAL_HEADERS: [&str; 4] = ["authorization", "proxy-authorization", "cookie", "x-api-key"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Op {
@@ -119,12 +122,7 @@ impl NodeExecutor for StdNode {
             Op::GenerateText => generate_text(ctx).await,
             Op::StreamText => stream_text(ctx).await,
             Op::StructuredJson => structured_json(ctx).await,
-            Op::Embedding => {
-                let text = required_text(ctx, "text").await?;
-                let model = config_text(ctx, "model").unwrap_or_else(|| "text-embedding-3-small".to_owned());
-                let vector = gateway(ctx)?.embed(&model, &text).await?;
-                Ok(NodeOutcome::fire("out").with_output("embedding", Value::Embedding(vector)))
-            }
+            Op::Embedding => embedding(ctx).await,
             Op::MemoryAdd | Op::MemorySearch | Op::MemoryClear => memory(self.op, ctx).await,
             Op::KnowledgeAdd | Op::KnowledgeSearch => knowledge(self.op, ctx).await,
             Op::KnowledgeChunk => chunk(ctx).await,
@@ -326,8 +324,25 @@ fn is_private_address(ip: IpAddr) -> bool {
             if let Some(mapped) = v6.to_ipv4_mapped() {
                 return is_private_address(IpAddr::V4(mapped));
             }
-            let head = v6.segments()[0];
-            v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() || (head & 0xfe00) == 0xfc00 || (head & 0xffc0) == 0xfe80
+            let segments = v6.segments();
+            let head = segments[0];
+            let nat64 = head == 0x64 && segments[1] == 0xff9b && (segments[2..6] == [0; 4] || segments[2] == 1);
+            let ipv4_compatible = segments[..6] == [0; 6];
+            let discard = segments[..4] == [0x100, 0, 0, 0];
+            let documentation = head == 0x2001 && segments[1] == 0xdb8;
+            let six_to_four_private =
+                head == 0x2002 && is_private_address(IpAddr::V4(std::net::Ipv4Addr::from((u32::from(segments[1]) << 16) | u32::from(segments[2]))));
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (head & 0xfe00) == 0xfc00
+                || (head & 0xffc0) == 0xfe80
+                || (head & 0xffc0) == 0xfec0
+                || nat64
+                || ipv4_compatible
+                || discard
+                || documentation
+                || six_to_four_private
         }
     }
 }
@@ -378,15 +393,31 @@ struct FetchPlan {
     allow_private: bool,
 }
 
+fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
+    left.scheme() == right.scheme() && left.host_str() == right.host_str() && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn is_credential_header(name: &str) -> bool {
+    CREDENTIAL_HEADERS.iter().any(|credential| name.eq_ignore_ascii_case(credential))
+}
+
 impl FetchPlan {
-    async fn send(&self, url: &reqwest::Url, method: &reqwest::Method, with_body: bool) -> Result<reqwest::Response, NodeError> {
-        let mut builder = reqwest::Client::builder().timeout(self.timeout).redirect(reqwest::redirect::Policy::none());
+    fn has_body(&self) -> bool {
+        match &self.body {
+            Value::Null => false,
+            Value::String(text) => !text.is_empty(),
+            _ => true,
+        }
+    }
+
+    async fn send(&self, url: &reqwest::Url, method: &reqwest::Method, headers: &[(String, String)], with_body: bool) -> Result<reqwest::Response, NodeError> {
+        let mut builder = reqwest::Client::builder().no_proxy().timeout(self.timeout).redirect(reqwest::redirect::Policy::none());
         if let Some((host, addresses)) = resolve_target(url, self.allow_private).await? {
             builder = builder.resolve_to_addrs(&host, &addresses);
         }
         let client = builder.build().map_err(|error| NodeError::Service(error.to_string()))?;
         let mut request = client.request(method.clone(), url.clone());
-        for (name, header) in &self.headers {
+        for (name, header) in headers {
             request = request.header(name, header);
         }
         if with_body {
@@ -403,8 +434,9 @@ impl FetchPlan {
         let mut url = start;
         let mut method = self.method.clone();
         let mut with_body = true;
+        let mut headers = self.headers.clone();
         for _ in 0..=MAX_HTTP_REDIRECTS {
-            let response = self.send(&url, &method, with_body).await?;
+            let response = self.send(&url, &method, &headers, with_body).await?;
             if !response.status().is_redirection() {
                 return Ok(response);
             }
@@ -415,6 +447,12 @@ impl FetchPlan {
             if !matches!(response.status().as_u16(), 307 | 308) {
                 method = reqwest::Method::GET;
                 with_body = false;
+            }
+            if !same_origin(&url, &next) {
+                if with_body && self.has_body() {
+                    return Err(NodeError::Service(format!("refused cross-origin redirect with request body from {url} to {next}")));
+                }
+                headers.retain(|(name, _)| !is_credential_header(name));
             }
             url = next;
         }
@@ -450,6 +488,24 @@ async fn http_fetch(ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeError>
     let text = String::from_utf8_lossy(&bytes).into_owned();
     let json = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
     Ok(NodeOutcome::fire("out").with_output("status", status).with_output("body", text).with_output("json", Value::Json(json)))
+}
+
+async fn embedding(ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeError> {
+    let text = required_text(ctx, "text").await?;
+    let request = EmbeddingRequest {
+        provider: config_text(ctx, "provider").unwrap_or_default(),
+        model: config_text(ctx, "model").unwrap_or_else(|| "text-embedding-3-small".to_owned()),
+        inputs: vec![text],
+        credential_id: config_text(ctx, "credential_id"),
+    };
+    let llm = gateway(ctx)?;
+    let cancellation = ctx.cancellation();
+    let vectors = tokio::select! {
+        vectors = llm.embed_request(request) => vectors?,
+        () = cancellation.cancelled() => return Err(NodeError::Cancelled),
+    };
+    let vector = vectors.into_iter().next().ok_or_else(|| NodeError::Llm("embedding response had no vector".to_owned()))?;
+    Ok(NodeOutcome::fire("out").with_output("embedding", Value::Embedding(vector)))
 }
 
 fn gateway(ctx: &dyn NodeContext) -> Result<Arc<dyn LlmGateway>, NodeError> {

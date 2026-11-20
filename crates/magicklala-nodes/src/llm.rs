@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use magicklala_graph::{CredentialResolver, LlmGateway, LlmMessage, LlmRequest, LlmResponse, LlmRole, LlmStream, LlmStreamChunk, NodeError, TokenUsage};
+use magicklala_graph::{
+    CredentialResolver, EmbeddingRequest, LlmGateway, LlmMessage, LlmRequest, LlmResponse, LlmRole, LlmStream, LlmStreamChunk, NodeError, TokenUsage,
+};
 use serde_json::{Value as Json, json};
 
 pub const BASE_URL_ENV: &str = "MAGICKLALA_LLM_BASE_URL";
@@ -102,8 +104,8 @@ impl HttpLlmGateway {
         self
     }
 
-    async fn request_key(&self, provider: LlmProvider, request: &LlmRequest) -> Result<Option<String>, NodeError> {
-        let Some(credential_id) = request.credential_id.as_deref().filter(|id| !id.is_empty()) else {
+    async fn request_key(&self, provider: LlmProvider, credential_id: Option<&str>) -> Result<Option<String>, NodeError> {
+        let Some(credential_id) = credential_id.filter(|id| !id.is_empty()) else {
             return Ok(self.api_key(provider));
         };
         let resolver = self
@@ -311,7 +313,13 @@ fn chunk_from_event(provider: LlmProvider, json: &Json) -> Option<LlmStreamChunk
             Some("message_stop") => Some(LlmStreamChunk { delta: String::new(), done: true, usage: None }),
             _ => None,
         },
-        LlmProvider::Gemini => Some(LlmStreamChunk { delta: gemini_text(json), done: false, usage: None }),
+        LlmProvider::Gemini => {
+            let usage = json.get("usageMetadata").filter(|usage| usage.is_object()).map(|_| TokenUsage {
+                prompt_tokens: number(json, "/usageMetadata/promptTokenCount"),
+                completion_tokens: number(json, "/usageMetadata/candidatesTokenCount"),
+            });
+            Some(LlmStreamChunk { delta: gemini_text(json), done: false, usage })
+        }
         LlmProvider::Ollama => {
             let done = json.get("done").and_then(Json::as_bool).unwrap_or(false);
             let usage = done.then(|| TokenUsage { prompt_tokens: number(json, "/prompt_eval_count"), completion_tokens: number(json, "/eval_count") });
@@ -328,6 +336,17 @@ struct StreamDecoder {
     framing: Framing,
     finished: bool,
     completed: bool,
+    finish_reason_seen: bool,
+}
+
+fn frame_too_large() -> NodeError {
+    NodeError::Llm("stream frame exceeds 1 MiB".to_owned())
+}
+
+fn gemini_finish_reason(json: &Json) -> bool {
+    json.get("candidates").and_then(Json::as_array).is_some_and(|candidates| {
+        candidates.iter().any(|candidate| candidate.get("finishReason").and_then(Json::as_str).is_some_and(|reason| !reason.is_empty()))
+    })
 }
 
 fn sse_data(event: &str) -> Option<String> {
@@ -343,17 +362,23 @@ fn sse_data(event: &str) -> Option<String> {
 impl StreamDecoder {
     fn new(bytes: ByteStream, provider: LlmProvider) -> Self {
         let framing = if provider == LlmProvider::Ollama { Framing::JsonLines } else { Framing::ServerSentEvents };
-        Self { bytes, buffer: Vec::new(), pending: VecDeque::new(), provider, framing, finished: false, completed: false }
+        Self { bytes, buffer: Vec::new(), pending: VecDeque::new(), provider, framing, finished: false, completed: false, finish_reason_seen: false }
     }
 
-    fn take_frame(&mut self) -> Option<String> {
+    fn take_frame(&mut self) -> Result<Option<String>, NodeError> {
         let delimiter: &[u8] = match self.framing {
             Framing::ServerSentEvents => b"\n\n",
             Framing::JsonLines => b"\n",
         };
-        let end = self.buffer.windows(delimiter.len()).position(|window| window == delimiter)?;
+        let searchable = self.buffer.len().min(MAX_STREAM_FRAME_BYTES + delimiter.len());
+        let Some(end) = self.buffer[..searchable].windows(delimiter.len()).position(|window| window == delimiter) else {
+            return if self.buffer.len() > MAX_STREAM_FRAME_BYTES { Err(frame_too_large()) } else { Ok(None) };
+        };
+        if end > MAX_STREAM_FRAME_BYTES {
+            return Err(frame_too_large());
+        }
         let frame: Vec<u8> = self.buffer.drain(..end + delimiter.len()).collect();
-        Some(String::from_utf8_lossy(&frame[..end]).into_owned())
+        Ok(Some(String::from_utf8_lossy(&frame[..end]).into_owned()))
     }
 
     fn ingest(&mut self, bytes: &[u8]) {
@@ -380,6 +405,9 @@ impl StreamDecoder {
         if let Some(message) = json.pointer("/error/message").and_then(Json::as_str) {
             return Err(NodeError::Llm(message.to_owned()));
         }
+        if self.provider == LlmProvider::Gemini && gemini_finish_reason(&json) {
+            self.finish_reason_seen = true;
+        }
         if let Some(chunk) = chunk_from_event(self.provider, &json) {
             let done = chunk.done;
             if !chunk.delta.is_empty() || chunk.usage.is_some() || done {
@@ -402,6 +430,9 @@ impl StreamDecoder {
     }
 
     fn close(&mut self) -> Result<(), NodeError> {
+        if self.buffer.len() > MAX_STREAM_FRAME_BYTES {
+            return Err(frame_too_large());
+        }
         let rest = String::from_utf8_lossy(&std::mem::take(&mut self.buffer)).into_owned();
         if !rest.trim().is_empty() {
             self.accept_frame(&rest)?;
@@ -412,6 +443,9 @@ impl StreamDecoder {
         }
         if self.provider.has_completion_marker() {
             return Err(NodeError::Llm("upstream stream closed before completion marker".to_owned()));
+        }
+        if self.provider == LlmProvider::Gemini && !self.finish_reason_seen {
+            return Err(NodeError::Llm("gemini stream ended without a finishReason".to_owned()));
         }
         self.finish();
         Ok(())
@@ -425,12 +459,9 @@ impl StreamDecoder {
             if self.finished {
                 return Ok(None);
             }
-            if let Some(frame) = self.take_frame() {
+            if let Some(frame) = self.take_frame()? {
                 self.accept_frame(&frame)?;
                 continue;
-            }
-            if self.buffer.len() > MAX_STREAM_FRAME_BYTES {
-                return Err(NodeError::Llm("stream frame exceeds 1 MiB".to_owned()));
             }
             match self.bytes.next().await {
                 Some(Ok(bytes)) => self.ingest(&bytes),
@@ -445,7 +476,7 @@ impl StreamDecoder {
 impl LlmGateway for HttpLlmGateway {
     async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, NodeError> {
         let provider = LlmProvider::from_name(&request.provider);
-        let key = self.request_key(provider, &request).await?;
+        let key = self.request_key(provider, request.credential_id.as_deref()).await?;
         let url = self.endpoint(provider, &request.model, false);
         let response = self.post(provider, &url, &request_body(provider, &request, false), key).await?;
         let json: Json = response.json().await.map_err(|error| NodeError::Llm(format!("invalid response body: {error}")))?;
@@ -454,7 +485,7 @@ impl LlmGateway for HttpLlmGateway {
 
     async fn stream(&self, request: LlmRequest) -> Result<LlmStream, NodeError> {
         let provider = LlmProvider::from_name(&request.provider);
-        let key = self.request_key(provider, &request).await?;
+        let key = self.request_key(provider, request.credential_id.as_deref()).await?;
         let url = self.endpoint(provider, &request.model, true);
         let response = self.post(provider, &url, &request_body(provider, &request, true), key).await?;
         let bytes: ByteStream = Box::pin(response.bytes_stream().map(|item| item.map(|bytes| bytes.to_vec()).map_err(|error| error.to_string())));
@@ -463,21 +494,81 @@ impl LlmGateway for HttpLlmGateway {
     }
 
     async fn embed(&self, model: &str, text: &str) -> Result<Vec<f32>, NodeError> {
-        let provider = LlmProvider::from_name(if model.starts_with("gemini") || model.starts_with("text-embedding-004") { "gemini" } else { "openai" });
-        let provider = if std::env::var("MAGICKLALA_EMBEDDING_PROVIDER").is_ok_and(|name| name == "ollama") { LlmProvider::Ollama } else { provider };
+        let request = EmbeddingRequest { provider: String::new(), model: model.to_owned(), inputs: vec![text.to_owned()], credential_id: None };
+        self.embed_request(request).await?.into_iter().next().ok_or_else(|| NodeError::Llm("embedding response had no vector".to_owned()))
+    }
+
+    async fn embed_request(&self, request: EmbeddingRequest) -> Result<Vec<Vec<f32>>, NodeError> {
+        let provider = embedding_provider(&request);
+        if provider == LlmProvider::Anthropic {
+            return Err(NodeError::InvalidConfig("anthropic does not provide embeddings".to_owned()));
+        }
+        let key = self.request_key(provider, request.credential_id.as_deref()).await?;
+        if request.inputs.is_empty() {
+            return Ok(Vec::new());
+        }
         let base = self.base_url(provider);
-        let (url, body, pointer) = match provider {
+        let model = &request.model;
+        let (url, body) = match provider {
             LlmProvider::Gemini => {
-                (format!("{base}/v1beta/models/{model}:embedContent"), json!({ "content": { "parts": [{ "text": text }] } }), "/embedding/values")
+                let requests: Vec<Json> =
+                    request.inputs.iter().map(|input| json!({ "model": format!("models/{model}"), "content": { "parts": [{ "text": input }] } })).collect();
+                (format!("{base}/v1beta/models/{model}:batchEmbedContents"), json!({ "requests": requests }))
             }
-            LlmProvider::Ollama => (format!("{base}/api/embed"), json!({ "model": model, "input": text }), "/embeddings/0"),
-            LlmProvider::OpenAi | LlmProvider::Anthropic => (format!("{base}/v1/embeddings"), json!({ "model": model, "input": text }), "/data/0/embedding"),
+            LlmProvider::Ollama => (format!("{base}/api/embed"), json!({ "model": model, "input": request.inputs })),
+            LlmProvider::OpenAi | LlmProvider::Anthropic => (format!("{base}/v1/embeddings"), json!({ "model": model, "input": request.inputs })),
         };
-        let response = self.post(provider, &url, &body, self.api_key(provider)).await?;
+        let response = self.post(provider, &url, &body, key).await?;
         let json: Json = response.json().await.map_err(|error| NodeError::Llm(format!("invalid embedding body: {error}")))?;
-        json.pointer(pointer)
+        let vectors = embedding_vectors(provider, &json)?;
+        if vectors.len() != request.inputs.len() {
+            return Err(NodeError::Llm(format!("embedding response had {} vectors for {} inputs", vectors.len(), request.inputs.len())));
+        }
+        Ok(vectors)
+    }
+}
+
+fn embedding_provider(request: &EmbeddingRequest) -> LlmProvider {
+    if !request.provider.is_empty() {
+        return LlmProvider::from_name(&request.provider);
+    }
+    if std::env::var("MAGICKLALA_EMBEDDING_PROVIDER").is_ok_and(|name| name == "ollama") {
+        return LlmProvider::Ollama;
+    }
+    if request.model.starts_with("gemini") || request.model.starts_with("text-embedding-004") { LlmProvider::Gemini } else { LlmProvider::OpenAi }
+}
+
+fn float_vector(values: &Json) -> Option<Vec<f32>> {
+    values.as_array().map(|values| values.iter().filter_map(Json::as_f64).map(|value| value as f32).collect())
+}
+
+fn embedding_vectors(provider: LlmProvider, json: &Json) -> Result<Vec<Vec<f32>>, NodeError> {
+    let missing = || NodeError::Llm("embedding response had no vector".to_owned());
+    match provider {
+        LlmProvider::Gemini => json
+            .get("embeddings")
             .and_then(Json::as_array)
-            .map(|values| values.iter().filter_map(Json::as_f64).map(|value| value as f32).collect())
-            .ok_or_else(|| NodeError::Llm("embedding response had no vector".to_owned()))
+            .ok_or_else(missing)?
+            .iter()
+            .map(|embedding| embedding.get("values").and_then(float_vector).ok_or_else(missing))
+            .collect(),
+        LlmProvider::Ollama => {
+            json.get("embeddings").and_then(Json::as_array).ok_or_else(missing)?.iter().map(|vector| float_vector(vector).ok_or_else(missing)).collect()
+        }
+        LlmProvider::OpenAi | LlmProvider::Anthropic => {
+            let mut rows: Vec<(u64, Vec<f32>)> = json
+                .get("data")
+                .and_then(Json::as_array)
+                .ok_or_else(missing)?
+                .iter()
+                .enumerate()
+                .map(|(position, row)| {
+                    let index = row.get("index").and_then(Json::as_u64).unwrap_or(position as u64);
+                    row.get("embedding").and_then(float_vector).map(|vector| (index, vector)).ok_or_else(missing)
+                })
+                .collect::<Result<_, _>>()?;
+            rows.sort_by_key(|(index, _)| *index);
+            Ok(rows.into_iter().map(|(_, vector)| vector).collect())
+        }
     }
 }
