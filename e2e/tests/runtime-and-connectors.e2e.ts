@@ -212,3 +212,102 @@ test('A saturated channel lane rejects overflow with busy completions while a si
     { type: 'run_completed', agent_id: result.agent_id, run_id: expect.any(String), correlation_id: result.sibling_correlation, status: 'succeeded', reply: 'sibling ping', error: null },
   ]);
 });
+
+test('WebhookConnector.verify_timestamped accepts an HMAC over timestamp.body inside the five minute window and rejects stale, future, missing or forged signatures', { timeout: 900_000 }, async () => {
+  const secret = `whsec-${randomUUID()}`;
+  const body = JSON.stringify({ order: 'A-9', amount: 9 });
+  const now = Math.floor(Date.now() / 1000);
+  const signAt = (timestamp: number, key = secret) => `sha256=${createHmac('sha256', key).update(`${timestamp}.${body}`).digest('hex')}`;
+  const verify = (timestamp: number, signature: string) =>
+    probe(['webhook-timestamped', '--secret', secret, '--timestamp', String(timestamp), '--now', String(now), '--signature', signature], body);
+
+  expect(await verify(now - 299, signAt(now - 299))).toEqual({ accepted: true, max_skew_secs: 300 });
+  const stale = await verify(now - 301, signAt(now - 301));
+  expect(stale.accepted).toBe(false);
+  expect(stale.error).toContain('timestamp');
+  const future = await verify(now + 301, signAt(now + 301));
+  expect(future.accepted).toBe(false);
+  expect(future.error).toContain('timestamp');
+  const bodyOnly = await verify(now, `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`);
+  expect(bodyOnly.accepted).toBe(false);
+  expect(bodyOnly.error).toContain('signature');
+  const forged = await verify(now, signAt(now, `${secret}-wrong`));
+  expect(forged.accepted).toBe(false);
+  expect(forged.error).toContain('signature');
+});
+
+test('A channel lane that idles out between bursts still runs every queued event in order instead of cancelling the ones drained after it closes', { timeout: 900_000 }, async () => {
+  const count = 300;
+  const result = await probe(['lane-drain', '--count', String(count)]);
+  expect(result.completed).toHaveLength(count);
+  expect(result.completed.filter((event: any) => event.status !== 'succeeded')).toEqual([]);
+  expect(result.outbound).toEqual(Array.from({ length: count }, (_, index) => `drain:m${index}`));
+  expect(result.runs_rejected).toBe(0);
+});
+
+test('An agent past its live channel lane cap answers new channels with a busy completion while channels it already serves keep replying', { timeout: 900_000 }, async () => {
+  const result = await probe(['lane-cap', '--cap', '2']);
+  const byChannel = (channel: string) => result.completed.filter((event: any) => event.correlation_id === `${channel}-corr`);
+  expect(byChannel('c0')).toEqual([expect.objectContaining({ status: 'succeeded', reply: 'cap:c0' })]);
+  expect(byChannel('c1')).toEqual([expect.objectContaining({ status: 'succeeded', reply: 'cap:c1' })]);
+  expect(byChannel('c2')).toEqual([expect.objectContaining({ status: 'failed', reply: null, error: `agent ${result.agent_id} is busy: 2 channel lanes are already live` })]);
+  expect(result.live_lanes).toBe(2);
+  expect(result.runs_rejected).toBe(1);
+  expect(result.repeat_on_c0).toEqual(expect.objectContaining({ status: 'succeeded', reply: 'cap:c0 again' }));
+});
+
+test('Stopping an agent turns every event still queued in its mailbox and channel lanes into a recorded cancelled run with a completion, dropping none', { timeout: 900_000 }, async () => {
+  const count = 40;
+  const result = await probe(['stop-drain', '--count', String(count)]);
+  expect(result.completed.map((event: any) => event.correlation_id).sort()).toEqual([...result.correlations].sort());
+  expect(result.completed.every((event: any) => event.status === 'cancelled')).toBe(true);
+  expect(result.recorded_runs.map((run: any) => run.trace.correlation_id).sort()).toEqual([...result.correlations].sort());
+  expect(result.recorded_runs.every((run: any) => run.status === 'cancelled')).toBe(true);
+  expect(result.replies.map((reply: any) => reply.status)).toEqual(Array(count).fill('cancelled'));
+});
+
+test('An event whose deadline expired while it waited in its lane is recorded as timed out and answered on its reply channel without ever running', { timeout: 900_000 }, async () => {
+  const result = await probe(['deadline', '--timeout-ms', '400', '--deadline-ms', '100']);
+  const second = result.completed.find((event: any) => event.correlation_id === result.second_correlation);
+  expect(second).toEqual(expect.objectContaining({ status: 'timed_out', reply: null }));
+  expect(second.error).toContain('deadline expired while queued');
+  expect(result.reply).toEqual(expect.objectContaining({ run_id: second.run_id, status: 'timed_out' }));
+  expect(result.second_run_started).toBe(false);
+  expect(result.recorded_second).toEqual(expect.objectContaining({ run_id: second.run_id, status: 'timed_out', nodes_executed: 0 }));
+});
+
+test('A webhook event never fires an on_message trigger: it falls back only to on_start and otherwise fails with no trigger', { timeout: 900_000 }, async () => {
+  const result = await probe(['strict-trigger']);
+  expect(result.message_only.status).toBe('failed');
+  expect(result.message_only.error).toContain('no trigger');
+  expect(result.message_only_outbound).toEqual([]);
+  expect(result.start_only).toEqual(expect.objectContaining({ status: 'succeeded', reply: 'started by webhook' }));
+});
+
+test('An agent whose spell sends a message on every loop iteration delivers every reply in firing order', { timeout: 900_000 }, async () => {
+  const result = await probe(['loop-replies']);
+  expect(result.outbound).toEqual(['x', 'xx', 'xxx']);
+  expect(result.completed).toEqual([expect.objectContaining({ status: 'succeeded', reply: 'x' })]);
+});
+
+test('One run id ties together the live trace events, the run completion, the recorded run and the bounded trace saved with it', { timeout: 900_000 }, async () => {
+  const result = await probe(['trace-run-id']);
+  const [completion] = result.completed;
+  expect(completion.status).toBe('succeeded');
+  expect(new Set(result.live_run_ids)).toEqual(new Set([completion.run_id]));
+  expect(result.recorded.run_id).toBe(completion.run_id);
+  expect(result.recorded.trace.correlation_id).toBe(result.correlation);
+  expect(result.recorded.trace.truncated).toBe(false);
+  expect(result.recorded.trace.events.map((event: any) => event.event)).toEqual(result.live_events);
+  expect(new Set(result.recorded.trace.events.map((event: any) => event.run_id))).toEqual(new Set([completion.run_id]));
+  expect(result.found_by_correlation).toBe(completion.run_id);
+});
+
+test('A run with more trace events than the cap saves a truncated trace that still ends with run_finished', { timeout: 900_000 }, async () => {
+  const result = await probe(['trace-cap']);
+  expect(result.completed[0].status).toBe('succeeded');
+  expect(result.recorded.trace.truncated).toBe(true);
+  expect(result.recorded.trace.events.length).toBeLessThanOrEqual(257);
+  expect(result.recorded.trace.events.at(-1).event).toBe('run_finished');
+  expect(result.recorded.trace.correlation_id).toBe(result.correlation);
+});
