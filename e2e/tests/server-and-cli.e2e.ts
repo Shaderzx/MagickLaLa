@@ -1125,3 +1125,71 @@ test('Publishing a release or running a spell whose flow/subgraph chain nests 17
   expect(published.status).toBe(201);
   expect((await server.api(`/api/v1/agents/${agent.id}`)).body.pinned_release_id).toBe(published.body.id);
 });
+function subgraphCaller(name: string, id: string, calls: { spell: string; version?: number }[]) {
+  const base = echoSpell(name);
+  const callIds = calls.map((_, index) => `call_${index}`);
+  const flow = ['send', ...callIds];
+  return {
+    ...base,
+    id,
+    nodes: [...base.nodes, ...callIds.map((callId, index) => ({ id: callId, kind: 'flow/subgraph', position: [560 + index * 280, 0], config: {} }))],
+    wires: [...base.wires, ...callIds.map((callId, index) => ({ id: `w_${callId}`, from_node: flow[index], from_socket: 'out', to_node: callId, to_socket: 'in' }))],
+    subgraphs: calls.map((call, index) => ({ node_id: callIds[index], spell_id: call.spell, release_version: call.version ?? null })),
+  };
+}
+
+test('Publishing a root that calls B and A@2, where A@2 calls B and B calls A@1, is accepted in either call order because each pinned release is its own snapshot, while a draft that calls back into itself is refused as a cycle in either order', buildBudget, async ({ server }) => {
+  const { project, agent } = await createAgentWithRelease(server, 'snapshots', echoSpell('snapshot seed'));
+  const store = async (name: string, graph: object) => {
+    const spell = await server.api('/api/v1/spells', { body: { project_id: project.id, name, graph } });
+    expect(spell.status).toBe(201);
+    return spell.body as { id: string; graph: { id: string } };
+  };
+  const release = async (spellId: string) => server.api(`/api/v1/agents/${agent.id}/releases`, { body: { spell_id: spellId } });
+  const [aId, bId] = [randomUUID(), randomUUID()];
+  const a = await store('snapshot a', subgraphCaller('snapshot a', aId, []));
+  const firstA = await release(a.id);
+  expect(firstA.status).toBe(201);
+  expect(firstA.body.version).toBe(1);
+  await store('snapshot b', subgraphCaller('snapshot b', bId, [{ spell: aId, version: 1 }]));
+  expect((await server.api(`/api/v1/spells/${a.id}/graph`, { method: 'PUT', body: subgraphCaller('snapshot a', aId, [{ spell: bId }]) })).status).toBe(200);
+  const secondA = await release(a.id);
+  expect(secondA.status).toBe(201);
+  expect(secondA.body.version).toBe(2);
+  for (const [label, calls] of [['b first', [{ spell: bId }, { spell: aId, version: 2 }]], ['a first', [{ spell: aId, version: 2 }, { spell: bId }]]] as const) {
+    const root = await store(`snapshot root ${label}`, subgraphCaller(`snapshot root ${label}`, randomUUID(), [...calls]));
+    const published = await release(root.id);
+    expect(published.text).not.toContain('cycle');
+    expect(published.status).toBe(201);
+  }
+  const [cId, dId] = [randomUUID(), randomUUID()];
+  await store('loop c', subgraphCaller('loop c', cId, [{ spell: dId }]));
+  await store('loop d', subgraphCaller('loop d', dId, [{ spell: cId }]));
+  for (const [label, calls] of [['d first', [{ spell: dId }, { spell: cId }]], ['c first', [{ spell: cId }, { spell: dId }]]] as const) {
+    const root = await store(`loop root ${label}`, subgraphCaller(`loop root ${label}`, randomUUID(), [...calls]));
+    const refused = await release(root.id);
+    expect(refused.status).toBe(400);
+    expect(refused.body.code).toBe('invalid_spell');
+    expect(refused.body.error).toContain('subgraph cycle');
+  }
+});
+
+test('A spell whose flow/subgraph node calls its own database record id is refused as a subgraph cycle on publish and on a direct run, not as a 16 level nesting error', buildBudget, async ({ server }) => {
+  const { project, agent } = await createAgentWithRelease(server, 'record self call', echoSpell('record self seed'));
+  const graphId = randomUUID();
+  const created = await server.api('/api/v1/spells', { body: { project_id: project.id, name: 'record self call', graph: subgraphCaller('record self call', graphId, []) } });
+  expect(created.status).toBe(201);
+  expect(created.body.id).not.toBe(graphId);
+  expect(created.body.graph.id).toBe(graphId);
+  const saved = await server.api(`/api/v1/spells/${created.body.id}/graph`, { method: 'PUT', body: subgraphCaller('record self call', graphId, [{ spell: created.body.id }]) });
+  expect(saved.status).toBe(200);
+  const refused = await server.api(`/api/v1/agents/${agent.id}/releases`, { body: { spell_id: created.body.id } });
+  expect(refused.status).toBe(400);
+  expect(refused.body.code).toBe('invalid_spell');
+  expect(refused.body.error).toContain('subgraph cycle');
+  expect(refused.body.error).not.toContain('levels');
+  const refusedRun = await server.api(`/api/v1/spells/${created.body.id}/run`, { body: { input: 'hello' } });
+  expect(refusedRun.status).toBe(400);
+  expect(refusedRun.body.error).toContain('subgraph cycle');
+  expect(refusedRun.body.error).not.toContain('levels');
+});

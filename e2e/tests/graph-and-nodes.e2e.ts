@@ -16,9 +16,12 @@ type TraceEvent = {
   event: string;
   run_id?: string;
   node_id?: string;
+  wire_id?: string;
+  subgraph_path?: string[];
   delta?: string;
   error?: string;
   name?: string;
+  value?: { type: string; value: unknown } | null;
   summary?: RunSummary;
 };
 type RunSummary = {
@@ -109,8 +112,16 @@ async function startLoopbackLlm(streamDeltas: string[], seenDelta: (delta: strin
   return { baseUrl: `http://127.0.0.1:${port}`, completionPrompts, streamPrompts, close: () => new Promise<void>((done) => server.close(() => done())) };
 }
 
+function pathOf(event: TraceEvent) {
+  return event.subgraph_path ?? [];
+}
+
+function nestedIndex(events: TraceEvent[], kind: string, path: string[], nodeId: string) {
+  return events.findIndex((event) => event.event === kind && event.node_id === nodeId && JSON.stringify(pathOf(event)) === JSON.stringify(path));
+}
+
 function eventIndex(events: TraceEvent[], kind: string, nodeId: string) {
-  return events.findIndex((event) => event.event === kind && event.node_id === nodeId);
+  return nestedIndex(events, kind, [], nodeId);
 }
 
 async function readSpell(name: string) {
@@ -773,14 +784,14 @@ test('a flow/subgraph node runs the child spell with its payload, returns its re
       expect(summary?.replies).toEqual(['child saw rust', 'parent heard child saw rust']);
       expect(summary?.outputs['call.result']).toEqual({ type: 'string', value: 'child saw rust' });
       expect(summary?.outputs['call.outputs']?.value).toMatchObject({ 'child_send.sent': 'child saw rust', 'child_words.text': 'child saw rust' });
-      expect(eventIndex(run.events, 'node_finished', 'call/child_send')).toBeGreaterThan(eventIndex(run.events, 'node_started', 'call'));
-      expect(eventIndex(run.events, 'node_finished', 'call/child_send')).toBeLessThan(eventIndex(run.events, 'node_finished', 'send'));
+      expect(nestedIndex(run.events, 'node_finished', ['call'], 'child_send')).toBeGreaterThan(eventIndex(run.events, 'node_started', 'call'));
+      expect(nestedIndex(run.events, 'node_finished', ['call'], 'child_send')).toBeLessThan(eventIndex(run.events, 'node_finished', 'send'));
       expect(run.events.filter((event) => event.event === 'run_finished')).toHaveLength(1);
 
       const starved = await runSpell([path, '--subgraph', childPath, '--payload', JSON.stringify('rust'), '--step-limit', String(nodes.length)], {});
       expect(starved.code).toBe(1);
       expect(summaryOf(starved)?.error).toBe(`step limit ${nodes.length} exceeded`);
-      expect(eventIndex(starved.events, 'node_finished', 'call/child_send')).toBe(-1);
+      expect(nestedIndex(starved.events, 'node_finished', ['call'], 'child_send')).toBe(-1);
       expect(eventIndex(starved.events, 'node_started', 'send')).toBe(-1);
     }, { subgraphs: [{ node_id: 'call', spell_id: childSpellId }] });
   });
@@ -974,18 +985,193 @@ function relaySpell(id: string, label: string, call?: { node: string; spell: str
   return { schema_version: 1, id, name: label, nodes, wires, subgraphs: call ? [{ node_id: call.node, spell_id: call.spell }] : [] };
 }
 
-test('trace events from a subgraph carry the calling node path, so child nodes named like parent nodes never collide', async () => {
+test('trace events from a subgraph carry the calling node path as a list beside the plain child node id, so child nodes named like parent nodes never collide', async () => {
   const [parentId, childId, grandchildId] = [uuidFor(201), uuidFor(202), uuidFor(203)];
   const spells = [relaySpell(parentId, 'parent', { node: 'outer', spell: childId }), relaySpell(childId, 'child', { node: 'inner', spell: grandchildId }), relaySpell(grandchildId, 'grandchild')];
   await withSpellFiles(spells, async (paths) => {
     const run = await runSpell([paths.get(parentId) ?? '', '--subgraph', paths.get(childId) ?? '', '--subgraph', paths.get(grandchildId) ?? ''], {});
     expect(run.code).toBe(0);
     expect(summaryOf(run)?.replies).toEqual(['from grandchild', 'from child', 'from parent']);
-    const finished = run.events.filter((event) => event.event === 'node_finished').map((event) => event.node_id);
-    expect(finished).toEqual(['start', 'outer/start', 'outer/inner/start', 'outer/inner/send', 'outer/inner', 'outer/send', 'outer', 'send']);
-    const wires = run.events.filter((event) => event.event === 'wire_activated').map((event) => (event as TraceEvent & { wire_id?: string }).wire_id);
-    expect(wires).toEqual(['w_flow', 'outer/w_flow', 'outer/inner/w_flow', 'outer/w_next', 'w_next']);
+    const finished = run.events.filter((event) => event.event === 'node_finished').map((event) => ({ path: pathOf(event), node: event.node_id }));
+    expect(finished).toEqual([
+      { path: [], node: 'start' },
+      { path: ['outer'], node: 'start' },
+      { path: ['outer', 'inner'], node: 'start' },
+      { path: ['outer', 'inner'], node: 'send' },
+      { path: ['outer'], node: 'inner' },
+      { path: ['outer'], node: 'send' },
+      { path: [], node: 'outer' },
+      { path: [], node: 'send' },
+    ]);
+    const wires = run.events.filter((event) => event.event === 'wire_activated').map((event) => ({ path: pathOf(event), wire: event.wire_id }));
+    expect(wires).toEqual([
+      { path: [], wire: 'w_flow' },
+      { path: ['outer'], wire: 'w_flow' },
+      { path: ['outer', 'inner'], wire: 'w_flow' },
+      { path: ['outer'], wire: 'w_next' },
+      { path: [], wire: 'w_next' },
+    ]);
+    expect(run.events.filter((event) => (event.node_id ?? event.wire_id ?? '').includes('/'))).toEqual([]);
     expect(run.events.filter((event) => event.event === 'run_started')).toHaveLength(1);
     expect(run.events.filter((event) => event.event === 'run_finished')).toHaveLength(1);
   });
+});
+
+test('a root node literally named call/send never shares trace events with the child node send run by the subgraph node call, and child variables carry their path', async () => {
+  const [rootId, childId] = [uuidFor(301), uuidFor(302)];
+  const child = {
+    schema_version: 1,
+    id: childId,
+    name: 'collision child',
+    nodes: [spellNode('start', 'event/on_start'), spellNode('remember', 'var/set', { name: 'note', value: 'from child' }), spellNode('send', 'io/send_message', { content: 'child reply' })],
+    wires: [spellWire('w_flow', 'start', 'out', 'remember', 'in'), spellWire('w_send', 'remember', 'out', 'send', 'in')],
+  };
+  const root = {
+    schema_version: 1,
+    id: rootId,
+    name: 'collision root',
+    nodes: [
+      spellNode('start', 'event/on_start'),
+      spellNode('gate', 'flow/branch', { condition: true }),
+      spellNode('call', 'flow/subgraph'),
+      spellNode('call/send', 'io/send_message', { content: 'root node on the branch not taken' }),
+      spellNode('remember', 'var/set', { name: 'note', value: 'from parent' }),
+    ],
+    wires: [
+      spellWire('w_gate', 'start', 'out', 'gate', 'in'),
+      spellWire('w_true', 'gate', 'true', 'call', 'in'),
+      spellWire('w_false', 'gate', 'false', 'call/send', 'in'),
+      spellWire('w_after', 'call', 'out', 'remember', 'in'),
+    ],
+    subgraphs: [{ node_id: 'call', spell_id: childId }],
+  };
+  await withSpellFiles([root, child], async (paths) => {
+    const run = await runSpell([paths.get(rootId) ?? '', '--subgraph', paths.get(childId) ?? ''], {});
+    expect(run.code).toBe(0);
+    expect(summaryOf(run)?.replies).toEqual(['child reply']);
+    expect(nestedIndex(run.events, 'node_finished', ['call'], 'send')).toBeGreaterThan(-1);
+    expect(run.events.filter((event) => event.node_id === 'call/send')).toEqual([]);
+    const variables = run.events.filter((event) => event.event === 'variable_set').map((event) => ({ path: pathOf(event), name: event.name, value: event.value }));
+    expect(variables).toEqual([
+      { path: ['call'], name: 'note', value: { type: 'string', value: 'from child' } },
+      { path: [], name: 'note', value: { type: 'string', value: 'from parent' } },
+    ]);
+  });
+});
+
+test('a data node that sets a variable and emits an event before reading two unfinished upstream inputs runs its body exactly once and joins both values', async () => {
+  const nodes = [
+    spellNode('start', 'event/on_start'),
+    spellNode('left', 'text/template', { template: 'left' }),
+    spellNode('right', 'text/template', { template: 'right' }),
+    spellNode('tally', 'probe/tally'),
+    spellNode('send', 'io/send_message'),
+  ];
+  const wires = [
+    spellWire('w_start', 'start', 'out', 'send', 'in'),
+    spellWire('w_a', 'left', 'text', 'tally', 'a'),
+    spellWire('w_b', 'right', 'text', 'tally', 'b'),
+    spellWire('w_content', 'tally', 'text', 'send', 'content'),
+  ];
+  await withSpellFile(nodes, wires, async (path) => {
+    const run = await runSpell([path, '--probe-nodes'], {});
+    expect(run.code).toBe(0);
+    expect(summaryOf(run)?.replies).toEqual(['left+right']);
+    expect(summaryOf(run)?.nodes_executed).toBe(nodes.length);
+    const hits = run.events.filter((event) => event.event === 'variable_set' && event.name === 'hits').map((event) => event.value);
+    expect(hits).toEqual([{ type: 'int', value: 1 }]);
+    expect(run.events.filter((event) => event.event === 'stream_chunk' && event.node_id === 'tally').map((event) => event.delta)).toEqual(['entered 1']);
+    expect(run.events.filter((event) => event.event === 'node_started' && event.node_id === 'tally')).toHaveLength(1);
+    const order = [
+      eventIndex(run.events, 'node_started', 'tally'),
+      eventIndex(run.events, 'node_started', 'left'),
+      eventIndex(run.events, 'node_finished', 'left'),
+      run.events.findIndex((event) => event.event === 'wire_activated' && event.wire_id === 'w_a'),
+      eventIndex(run.events, 'node_started', 'right'),
+      eventIndex(run.events, 'node_finished', 'right'),
+      run.events.findIndex((event) => event.event === 'wire_activated' && event.wire_id === 'w_b'),
+      eventIndex(run.events, 'node_finished', 'tally'),
+    ];
+    expect(order.every((index) => index > -1)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+});
+
+test('a data node waiting on a data node that fails also fails, so every started node ends with node_finished or node_failed', async () => {
+  const nodes = [
+    spellNode('start', 'event/on_start'),
+    spellNode('broken', 'json/parse', { text: '{not json' }),
+    spellNode('words', 'text/template', { template: 'got {{parsed}}' }),
+    spellNode('send', 'io/send_message'),
+  ];
+  const wires = [
+    spellWire('w_start', 'start', 'out', 'send', 'in'),
+    spellWire('w_parsed', 'broken', 'json', 'words', 'parsed'),
+    spellWire('w_content', 'words', 'text', 'send', 'content'),
+  ];
+  await withSpellFile(nodes, wires, async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(1);
+    expect(finalStatus(run)).toBe('failed');
+    const failed = run.events.filter((event) => event.event === 'node_failed').map((event) => event.node_id);
+    expect(failed).toEqual(['broken', 'words', 'send']);
+    const started = run.events.filter((event) => event.event === 'node_started').map((event) => event.node_id);
+    const ended = run.events.filter((event) => event.event === 'node_finished' || event.event === 'node_failed').map((event) => event.node_id);
+    expect([...ended].sort()).toEqual([...started].sort());
+  });
+});
+
+function versionedSpell(id: string, label: string, calls: { spell: string; version?: number }[]) {
+  const callIds = calls.map((_, index) => `call_${index}`);
+  const flow = ['start', ...callIds, 'send'];
+  const nodes = [spellNode('start', 'event/on_start'), ...callIds.map((callId) => spellNode(callId, 'flow/subgraph')), spellNode('send', 'io/send_message', { content: `from ${label}` })];
+  const wires = flow.slice(1).map((target, index) => spellWire(`w_${target}`, flow[index], 'out', target, 'in'));
+  const subgraphs = calls.map((call, index) => ({ node_id: callIds[index], spell_id: call.spell, ...(call.version === undefined ? {} : { release_version: call.version }) }));
+  return { schema_version: 1, id, name: label, nodes, wires, subgraphs };
+}
+
+async function runVersioned(root: object & { id: string }, drafts: { id: string }[], releases: { version: number; spell: { id: string } }[]) {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-versions-'));
+  try {
+    const write = async (name: string, spell: object) => {
+      const path = join(dir, name);
+      await writeFile(path, JSON.stringify(spell));
+      return path;
+    };
+    const rootPath = await write('root.json', root);
+    const args = [rootPath];
+    for (const [index, draft] of drafts.entries()) args.push('--subgraph', await write(`draft_${index}.json`, draft));
+    for (const [index, release] of releases.entries()) args.push('--subgraph-release', `${release.version}=${await write(`release_${index}.json`, release.spell)}`);
+    return await runSpell(args, {});
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test('distinct pinned releases of one spell are distinct snapshots, so A@2 -> B -> A@1 runs in either root call order while A@1 -> B -> A@1 is a cycle in either order', async () => {
+  const [rootId, aId, bId] = [uuidFor(401), uuidFor(402), uuidFor(403)];
+  const acyclic = {
+    drafts: [versionedSpell(bId, 'B', [{ spell: aId, version: 1 }])],
+    releases: [
+      { version: 1, spell: versionedSpell(aId, 'A1', []) },
+      { version: 2, spell: versionedSpell(aId, 'A2', [{ spell: bId }]) },
+    ],
+  };
+  for (const calls of [[{ spell: bId }, { spell: aId, version: 2 }], [{ spell: aId, version: 2 }, { spell: bId }]]) {
+    const run = await runVersioned(versionedSpell(rootId, 'root', calls), acyclic.drafts, acyclic.releases);
+    expect(run.stderr).not.toContain('cycle');
+    expect(run.code).toBe(0);
+    expect([...(summaryOf(run)?.replies ?? [])].sort()).toEqual(['from A1', 'from A1', 'from A2', 'from B', 'from B', 'from root']);
+  }
+  const cyclic = {
+    drafts: [versionedSpell(bId, 'B', [{ spell: aId, version: 1 }])],
+    releases: [{ version: 1, spell: versionedSpell(aId, 'A1', [{ spell: bId }]) }],
+  };
+  for (const calls of [[{ spell: bId }, { spell: aId, version: 1 }], [{ spell: aId, version: 1 }, { spell: bId }]]) {
+    const run = await runVersioned(versionedSpell(rootId, 'root', calls), cyclic.drafts, cyclic.releases);
+    expect(run.code).toBe(1);
+    expect(run.stderr).toContain('subgraph cycle');
+    expect(run.stderr).not.toContain('levels');
+    expect(run.events).toEqual([]);
+  }
 });
