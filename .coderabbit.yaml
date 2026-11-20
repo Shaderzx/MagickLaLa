@@ -1,0 +1,50 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en-US"
+early_access: false
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+
+  path_filters:
+    - "crates/**"
+    - "docs/**"
+    - "examples/**"
+    - ".github/**"
+    - "Cargo.toml"
+    - "README.md"
+    - "!target/**"
+    - "!vendor/**"
+    - "!third_party/**"
+    - "!**/Cargo.lock"
+
+  path_instructions:
+    - path: "crates/**/*.rs"
+      instructions: |
+        Review Rust code with a strict focus on:
+        - Safety: reject unnecessary `unsafe` blocks and verify safety invariants where unavoidable.
+        - Error handling: flag `.unwrap()`, `.expect()`, and `panic!()` in non-test production code; prefer typed errors and `?` propagation.
+        - Async & concurrency: catch locks held across `.await` points, unbounded channels/tasks, missing cancellation handling, and potential deadlocks.
+        - Graph & runtime correctness: verify cycle/step-limit guardrails, deterministic trace events, and socket type validation.
+        - Rune UI code: watch for layout sizing traps (bounded scroll containers, `.min_h(0.0)`), redundant allocations in `view()`, and headless testability.
+
+    - path: "crates/magicklala-store/**"
+      instructions: |
+        - Verify SQL migrations are idempotent and maintain schema parity between SQLite and PostgreSQL backends.
+        - Verify credentials/secrets are encrypted at rest and never logged or returned in plaintext API responses.
+
+    - path: "docs/**/*.md"
+      instructions: |
+        - Check architectural consistency, clear crate boundaries, and actionable exit criteria.
+
+chat:
+  auto_reply: true
