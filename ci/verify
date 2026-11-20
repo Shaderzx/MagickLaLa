@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+mode="${1:---fast}"
+cargo fmt -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo check --workspace
+if [ "$mode" = "--full" ]; then
+  cargo build -p magicklala-cli
+fi
+echo "ci/verify $mode: ok"
