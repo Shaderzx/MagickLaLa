@@ -1,6 +1,6 @@
 import { test, expect } from 'e2e';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -629,6 +629,114 @@ test('Studio opened on A@1 publishes A@3 after another session published A@2 int
     expect(report.edited.subgraphs).toEqual([{ node_id: report.callNode, spell_id: report.recordId, release_version: 2 }]);
     expect(report.published).toEqual({ version: 3, storeError: null, validation: 'valid', releases: [1, 2, 3] });
     expect(JSON.parse(latest[0].subgraphs)).toEqual([{ node_id: report.callNode, spell_id: report.recordId, release_version: 2 }]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Studio asks SQLite whether a percent-encoded in-memory URI like file:memtest?mode=mem%6fry is on disk, so Save and Publish refuse with the --db hint and no file is created', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-encoded-memory-'));
+  try {
+    const forms = [`file:${join(dir, 'memtest')}?mode=mem%6fry`, `sqlite:file:${join(dir, 'memtest-two')}?mode=mem%6fry`, ':memory:'];
+    const report = await studioProbe(['memory-db', ...forms]);
+
+    expect(report.forms.map((form: { db: string }) => form.db)).toEqual(forms);
+    for (const form of report.forms) {
+      expect(form.persistent).toBe(false);
+      expect(form.status).toBeNull();
+      expect(form.saveError).toBe('pass --db <file.sqlite> to save drafts on disk');
+      expect(form.publishError).toBe('pass --db <file.sqlite> to publish releases on disk');
+      expect(form.releases).toEqual([]);
+    }
+    expect(await readdir(dir)).toEqual([]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Studio saves, publishes and reopens real SQLite files whose paths contain mode=memory, such as mode=memory.sqlite and a mode=memory folder', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-mode-memory-name-'));
+  try {
+    await mkdir(join(dir, 'mode=memory'));
+    const paths = [join(dir, 'mode=memory.sqlite'), join(dir, 'mode=memory', 'studio.sqlite')];
+
+    const first = await studioProbe(['memory-db', ...paths]);
+    const stored = (path: string) => {
+      const db = new DatabaseSync(path, { readOnly: true });
+      const releases = db.prepare('SELECT spell_id AS spellId, version FROM spell_releases ORDER BY version').all() as { spellId: string; version: number }[];
+      const spells = db.prepare('SELECT id FROM spells').all() as { id: string }[];
+      db.close();
+      return { releases, spells };
+    };
+    const afterFirst = paths.map(stored);
+    const second = await studioProbe(['memory-db', ...paths]);
+    const afterSecond = paths.map(stored);
+
+    for (const [index, path] of paths.entries()) {
+      expect((await stat(path)).size).toBeGreaterThan(0);
+      expect(first.forms[index]).toEqual({ db: path, persistent: true, status: 'Draft saved', saveError: null, publishError: null, releases: [1] });
+      expect(afterFirst[index].spells).toHaveLength(1);
+      expect(afterFirst[index].releases).toEqual([{ spellId: afterFirst[index].spells[0].id, version: 1 }]);
+      expect(second.forms[index]).toEqual({ db: path, persistent: true, status: 'Draft saved', saveError: null, publishError: null, releases: [1, 2] });
+      expect(afterSecond[index].spells).toEqual(afterFirst[index].spells);
+      expect(afterSecond[index].releases).toEqual([1, 2].map((version) => ({ spellId: afterFirst[index].spells[0].id, version })));
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Studio opened on an empty database refuses to validate or publish a flow/subgraph call to a child that another client saved in a different project, and publishes nothing into Studio', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-foreign-child-'));
+  const dbPath = join(dir, 'studio.sqlite');
+  try {
+    const report = await studioProbe(['foreign-child', dbPath]);
+
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const projects = db.prepare('SELECT name FROM projects ORDER BY name').all() as { name: string }[];
+    const spells = db.prepare('SELECT s.id AS id, p.name AS project FROM spells s JOIN projects p ON p.id = s.project_id').all() as { id: string; project: string }[];
+    const releases = db.prepare('SELECT version FROM spell_releases').all() as { version: number }[];
+    db.close();
+
+    expect(projects).toEqual([{ name: 'Other' }]);
+    expect(spells).toEqual([{ id: report.childRecordId, project: 'Other' }]);
+    expect(releases).toEqual([]);
+
+    expect(report.openedProject).toBeNull();
+    expect(report.edited.subgraphs).toEqual([{ node_id: report.callNode, spell_id: report.childRecordId, release_version: null }]);
+    expect(report.validation.validation).toBe('invalid');
+    expect(report.validation.errors.join('\n')).toContain(report.childRecordId);
+    expect(report.published.version).toBeNull();
+    expect(report.published.releases).toEqual([]);
+    expect(report.published.storeError).toContain('cannot publish an invalid spell: ');
+    expect(report.published.storeError).toContain(report.childRecordId);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Editing the spell clears a one-off Publish or Save error from the TRACE strip, while a --db open error still comes back on the next Save', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-edit-clears-error-'));
+  const dbPath = join(dir, 'studio.sqlite');
+  const blocker = join(dir, 'blocker');
+  const unopenable = join(blocker, 'studio.sqlite');
+  try {
+    await writeFile(blocker, 'a plain file where a folder should be');
+    const report = await studioProbe(['edit-clears-store-error', dbPath, unopenable]);
+
+    expect(report.refused.storeError).toContain('cannot publish an invalid spell: ');
+    expect(report.refused.shown).toEqual({ text: report.refused.storeError, insideTrace: true, onScreen: true });
+    expect(report.refusedEdited.storeError).toBeNull();
+    expect(report.refusedEdited.shown).toBeNull();
+
+    expect(report.unopenable.storeError).toContain('the database passed with --db could not be opened: ');
+    expect(report.unopenable.shown).toEqual({ text: report.unopenable.storeError, insideTrace: true, onScreen: true });
+    expect(report.unopenableEdited.storeError).toBeNull();
+    expect(report.unopenableEdited.shown).toBeNull();
+    expect(report.unopenableEdited.openError).not.toBeNull();
+    expect(report.unopenableSavedAgain.storeError).toBe(report.unopenable.storeError);
+    expect(report.unopenableSavedAgain.status).toBeNull();
+    expect(report.unopenableSavedAgain.shown).toEqual({ text: report.unopenable.storeError, insideTrace: true, onScreen: true });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

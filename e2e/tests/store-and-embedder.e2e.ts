@@ -426,6 +426,8 @@ test('only real in-memory SQLite URLs count as in-memory and share one database 
       { url: 'sqlite://:memory:?cache=shared', inMemory: true },
       { url: 'sqlite:file:studio?mode=memory&cache=shared', inMemory: true },
       { url: 'file:studio?cache=shared&mode=memory', inMemory: true },
+      { url: 'sqlite:file:memtest?mode=mem%6fry', inMemory: true },
+      { url: 'file:memtest?cache=shared&mode=mem%6Fry', inMemory: true },
       { url: `sqlite://${trickyFile}`, inMemory: false },
       { url: trickyFile, inMemory: false },
       { url: `sqlite://${join(dir, 'my:memory:.db')}`, inMemory: false },
