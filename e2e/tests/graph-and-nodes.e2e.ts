@@ -11,8 +11,17 @@ const repoRoot = resolve(import.meta.dirname, '..', '..');
 const exampleBinary = join(repoRoot, 'target', 'debug', 'examples', 'run_spell');
 const execFileAsync = promisify(execFile);
 
-type TraceEvent = { event: string; node_id?: string; delta?: string; error?: string; name?: string; summary?: { status: string; outputs: Record<string, { type: string; value: unknown }> } };
-type SpellRun = { code: number | null; events: TraceEvent[]; stdout: string };
+type EmittedActivation = { node_id: string; outputs: Record<string, { type: string; value: unknown }> };
+type TraceEvent = {
+  event: string;
+  run_id?: string;
+  node_id?: string;
+  delta?: string;
+  error?: string;
+  name?: string;
+  summary?: { run_id: string; status: string; error?: string | null; outputs: Record<string, { type: string; value: unknown }>; activations?: EmittedActivation[] };
+};
+type SpellRun = { code: number | null; signal: NodeJS.Signals | null; events: TraceEvent[]; stdout: string; stderr: string };
 
 async function buildRunSpell() {
   await execFileAsync('cargo', ['build', '-q', '-p', 'magicklala-nodes', '--example', 'run_spell'], { cwd: repoRoot, timeout: 900_000, maxBuffer: 64 * 1024 * 1024 });
@@ -23,6 +32,7 @@ function runSpell(args: string[], env: Record<string, string>, onEvent: (event: 
     const child = spawn(exampleBinary, args, { cwd: repoRoot, env: { ...process.env, ...env } });
     const events: TraceEvent[] = [];
     let stdout = '';
+    let stderr = '';
     let pending = '';
     child.stdout.on('data', (chunk: Buffer) => {
       stdout += chunk.toString();
@@ -35,9 +45,12 @@ function runSpell(args: string[], env: Record<string, string>, onEvent: (event: 
         onEvent(event);
       }
     });
-    child.stderr.on('data', (chunk: Buffer) => process.stderr.write(chunk));
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+      process.stderr.write(chunk);
+    });
     child.on('error', rejectRun);
-    child.on('close', (code) => resolveRun({ code, events, stdout }));
+    child.on('close', (code, signal) => resolveRun({ code, signal, events, stdout, stderr }));
   });
 }
 
@@ -209,11 +222,11 @@ type SpellWire = { id: string; from_node: string; from_socket: string; to_node: 
 const spellNode = (id: string, kind: string, config: Record<string, unknown> = {}): SpellNode => ({ id, kind, position: [0, 0], config });
 const spellWire = (id: string, from_node: string, from_socket: string, to_node: string, to_socket: string): SpellWire => ({ id, from_node, from_socket, to_node, to_socket });
 
-async function withSpellFile<T>(nodes: SpellNode[], wires: SpellWire[], use: (path: string) => Promise<T>) {
+async function withSpellFile<T>(nodes: SpellNode[], wires: SpellWire[], use: (path: string) => Promise<T>, extra: Record<string, unknown> = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-hardening-'));
   try {
     const path = join(dir, 'spell.json');
-    await writeFile(path, JSON.stringify({ schema_version: 1, id: '0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c', name: 'hardening', nodes, wires }));
+    await writeFile(path, JSON.stringify({ schema_version: 1, id: '0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c', name: 'hardening', nodes, wires, ...extra }));
     return await use(path);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -361,4 +374,291 @@ test('an LLM call that names a vault credential fails as invalid config when no 
   } finally {
     await provider.close();
   }
+});
+
+type RecordedRequest = { method: string; url: string; headers: Record<string, string | string[] | undefined>; body: string };
+
+async function startScriptedServer(respond: (request: RecordedRequest, response: ServerResponse) => void) {
+  const requests: RecordedRequest[] = [];
+  const server = createServer(async (request, response) => {
+    let body = '';
+    for await (const chunk of request) body += chunk;
+    const recorded = { method: request.method ?? '', url: request.url ?? '', headers: request.headers, body };
+    requests.push(recorded);
+    respond(recorded, response);
+  });
+  await new Promise<void>((ready) => server.listen(0, '127.0.0.1', ready));
+  const { port } = server.address() as AddressInfo;
+  return { baseUrl: `http://127.0.0.1:${port}`, port, requests, close: () => new Promise<void>((done) => server.close(() => done())) };
+}
+
+function summaryOf(run: SpellRun) {
+  return run.events.find((event) => event.event === 'run_finished')?.summary;
+}
+
+test('a flow cycle between two branches runs until the step limit and fails cleanly instead of overflowing the stack', async () => {
+  const nodes = [spellNode('start', 'event/on_start'), spellNode('a', 'flow/branch', { condition: true }), spellNode('b', 'flow/branch', { condition: true })];
+  const wires = [spellWire('w_start', 'start', 'out', 'a', 'in'), spellWire('w_ab', 'a', 'true', 'b', 'in'), spellWire('w_ba', 'b', 'true', 'a', 'in')];
+  await withSpellFile(nodes, wires, async (path) => {
+    const validation = await runSpell([path, '--validate'], {});
+    expect(JSON.parse(validation.stdout)).toEqual({ valid: true, errors: [] });
+    const run = await runSpell([path], {});
+    expect(run.signal).toBeNull();
+    expect(run.code).toBe(1);
+    expect(run.stderr).toContain('step limit 10000 exceeded');
+    expect(finalStatus(run)).toBe('failed');
+    expect(summaryOf(run)?.error).toBe('step limit 10000 exceeded');
+    expect(run.events.filter((event) => event.event === 'node_finished').length).toBe(10_000);
+  });
+});
+
+test('a parallel branch cannot read a sibling branch output until both meet at wait_for_all', async () => {
+  let releaseHold: () => void = () => {};
+  const siblingFinished = new Promise<void>((done) => {
+    releaseHold = done;
+  });
+  const held = await startScriptedServer((_request, response) => {
+    siblingFinished.then(() => response.writeHead(200, { 'content-type': 'text/plain' }).end('held'));
+  });
+  try {
+    const nodes = [
+      spellNode('start', 'event/on_start'),
+      spellNode('fork', 'flow/split'),
+      spellNode('setA', 'var/set', { name: 'a', value: 'from-a' }),
+      spellNode('hold', 'net/http_fetch', { url: `${held.baseUrl}/hold`, timeout_ms: 20_000 }),
+      spellNode('peek', 'json/stringify'),
+      spellNode('sendB', 'io/send_message'),
+      spellNode('join', 'flow/wait_for_all'),
+      spellNode('both', 'text/template', { template: '{{a}}|{{b}}' }),
+      spellNode('after', 'io/send_message'),
+    ];
+    const wires = [
+      spellWire('w_start', 'start', 'out', 'fork', 'in'),
+      spellWire('w_a', 'fork', 'out_0', 'setA', 'in'),
+      spellWire('w_b', 'fork', 'out_1', 'hold', 'in'),
+      spellWire('w_hold', 'hold', 'out', 'sendB', 'in'),
+      spellWire('w_peek', 'setA', 'value', 'peek', 'value'),
+      spellWire('w_peek_text', 'peek', 'text', 'sendB', 'content'),
+      spellWire('w_join_a', 'setA', 'out', 'join', 'in'),
+      spellWire('w_join_b', 'sendB', 'out', 'join', 'in'),
+      spellWire('w_after', 'join', 'out', 'after', 'in'),
+      spellWire('w_both_a', 'setA', 'value', 'both', 'a'),
+      spellWire('w_both_b', 'hold', 'status', 'both', 'b'),
+      spellWire('w_both_text', 'both', 'text', 'after', 'content'),
+    ];
+    await withSpellFile(nodes, wires, async (path) => {
+      const run = await runSpell([path], { MAGICKLALA_ALLOW_PRIVATE_HTTP: '1' }, (event) => {
+        if (event.event === 'node_finished' && event.node_id === 'setA') releaseHold();
+      });
+      expect(run.code).toBe(0);
+      expect(held.requests.map((request) => `${request.method} ${request.url}`)).toEqual(['GET /hold']);
+      expect(eventIndex(run.events, 'node_finished', 'setA')).toBeLessThan(eventIndex(run.events, 'node_finished', 'hold'));
+      const outputs = summaryOf(run)?.outputs ?? {};
+      expect(outputs['sendB.sent']).toEqual({ type: 'string', value: 'null' });
+      expect(outputs['after.sent']).toEqual({ type: 'string', value: 'from-a|200' });
+    });
+  } finally {
+    await held.close();
+  }
+});
+
+test('a loop that sends a message three times keeps all three replies in order on the run summary', async () => {
+  const nodes = [
+    spellNode('start', 'event/on_start'),
+    spellNode('count', 'var/get', { name: 'count' }),
+    spellNode('under', 'logic/regex_match', { pattern: '^x{0,2}$' }),
+    spellNode('loop', 'flow/while_loop', { max_iterations: 10 }),
+    spellNode('grow', 'text/template', { template: '{{count}}x' }),
+    spellNode('bump', 'var/set', { name: 'count' }),
+    spellNode('send', 'io/send_message'),
+  ];
+  const wires = [
+    spellWire('w_start', 'start', 'out', 'loop', 'in'),
+    spellWire('w_count', 'count', 'value', 'under', 'text'),
+    spellWire('w_condition', 'under', 'matched', 'loop', 'condition'),
+    spellWire('w_body', 'loop', 'body', 'bump', 'in'),
+    spellWire('w_grow', 'grow', 'text', 'bump', 'value'),
+    spellWire('w_send', 'bump', 'out', 'send', 'in'),
+    spellWire('w_content', 'bump', 'value', 'send', 'content'),
+  ];
+  await withSpellFile(nodes, wires, async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(0);
+    const replies = (summaryOf(run)?.activations ?? []).filter((activation) => activation.node_id === 'send').map((activation) => activation.outputs.sent);
+    expect(replies).toEqual([
+      { type: 'string', value: 'x' },
+      { type: 'string', value: 'xx' },
+      { type: 'string', value: 'xxx' },
+    ]);
+    expect(summaryOf(run)?.outputs['send.sent']).toEqual({ type: 'string', value: 'xxx' });
+  }, { variables: [{ name: 'count', ty: 'string', default: { type: 'string', value: '' } }] });
+});
+
+test('a single streamed event larger than 1 MiB fails the run before it is decoded', async () => {
+  const oversized = 'y'.repeat(1_048_576 + 64);
+  const provider = await startScriptedServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.end(`data: ${JSON.stringify({ choices: [{ delta: { content: oversized } }] })}\n\ndata: [DONE]\n\n`);
+  });
+  try {
+    const nodes = [spellNode('start', 'event/on_start'), spellNode('writer', 'ai/stream_text', { prompt: 'write a lot' })];
+    await withSpellFile(nodes, [spellWire('w_start', 'start', 'out', 'writer', 'in')], async (path) => {
+      const run = await runSpell([path], { MAGICKLALA_LLM_BASE_URL: provider.baseUrl });
+      expect(provider.requests.map((request) => request.url)).toEqual(['/v1/chat/completions']);
+      expect(run.code).toBe(1);
+      expect(failureOf(run, 'writer')).toContain('stream frame exceeds 1 MiB');
+      expect(run.events.some((event) => event.event === 'stream_chunk')).toBe(false);
+      expect(finalStatus(run)).toBe('failed');
+    });
+  } finally {
+    await provider.close();
+  }
+});
+
+test('a Gemini stream that ends without a finishReason fails, while one that carries it succeeds', async () => {
+  let finishReason: string | undefined;
+  const provider = await startScriptedServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    const candidate = { content: { parts: [{ text: 'half of it' }] }, ...(finishReason ? { finishReason } : {}) };
+    response.end(`data: ${JSON.stringify({ candidates: [candidate] })}\n\n`);
+  });
+  try {
+    const nodes = [spellNode('start', 'event/on_start'), spellNode('writer', 'ai/stream_text', { provider: 'gemini', model: 'gemini-2.0-flash', prompt: 'write' })];
+    await withSpellFile(nodes, [spellWire('w_start', 'start', 'out', 'writer', 'in')], async (path) => {
+      const truncated = await runSpell([path], { MAGICKLALA_LLM_BASE_URL: provider.baseUrl });
+      expect(provider.requests.map((request) => request.url)).toEqual(['/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse']);
+      expect(truncated.code).toBe(1);
+      expect(failureOf(truncated, 'writer')).toContain('gemini stream ended without a finishReason');
+      expect(summaryOf(truncated)?.outputs['writer.text']).toBeUndefined();
+      finishReason = 'STOP';
+      const complete = await runSpell([path], { MAGICKLALA_LLM_BASE_URL: provider.baseUrl });
+      expect(complete.code).toBe(0);
+      expect(summaryOf(complete)?.outputs['writer.text']).toEqual({ type: 'string', value: 'half of it' });
+    });
+  } finally {
+    await provider.close();
+  }
+});
+
+test('net/http_fetch connects directly and never through an HTTP_PROXY from the environment', async () => {
+  const proxy = await startScriptedServer((_request, response) => response.writeHead(200, { 'content-type': 'text/plain' }).end('answered by proxy'));
+  try {
+    const nodes = [spellNode('start', 'event/on_start'), spellNode('fetch', 'net/http_fetch', { url: 'http://1.1.1.1:9/proxy-probe', timeout_ms: 2000 })];
+    await withSpellFile(nodes, [spellWire('w_start', 'start', 'out', 'fetch', 'in')], async (path) => {
+      const run = await runSpell([path], { HTTP_PROXY: proxy.baseUrl, http_proxy: proxy.baseUrl, HTTPS_PROXY: proxy.baseUrl, ALL_PROXY: proxy.baseUrl, NO_PROXY: '', no_proxy: '', MAGICKLALA_ALLOW_PRIVATE_HTTP: '0' });
+      expect(proxy.requests).toEqual([]);
+      expect(summaryOf(run)?.outputs['fetch.body']).toBeUndefined();
+    });
+  } finally {
+    await proxy.close();
+  }
+});
+
+test('net/http_fetch drops credentials on a cross-origin redirect and keeps the other headers', async () => {
+  const landing = await startScriptedServer((_request, response) => response.writeHead(200, { 'content-type': 'text/plain' }).end('landed'));
+  const origin = await startScriptedServer((_request, response) => response.writeHead(302, { location: `${landing.baseUrl}/landing` }).end());
+  try {
+    const headers = { Authorization: 'Bearer top-secret', Cookie: 'session=abc', 'X-Api-Key': 'key-123', 'Proxy-Authorization': 'Basic cHJveHk=', 'X-Trace': 'keep-me' };
+    const nodes = [spellNode('start', 'event/on_start'), spellNode('fetch', 'net/http_fetch', { url: `${origin.baseUrl}/start`, headers, timeout_ms: 5000 })];
+    await withSpellFile(nodes, [spellWire('w_start', 'start', 'out', 'fetch', 'in')], async (path) => {
+      const run = await runSpell([path], { MAGICKLALA_ALLOW_PRIVATE_HTTP: '1' });
+      expect(run.code).toBe(0);
+      expect(origin.requests.map((request) => request.headers.authorization)).toEqual(['Bearer top-secret']);
+      expect(landing.requests.map((request) => request.url)).toEqual(['/landing']);
+      const forwarded = landing.requests[0]?.headers ?? {};
+      expect([forwarded.authorization, forwarded.cookie, forwarded['x-api-key'], forwarded['proxy-authorization']]).toEqual([undefined, undefined, undefined, undefined]);
+      expect(forwarded['x-trace']).toBe('keep-me');
+      expect(summaryOf(run)?.outputs['fetch.body']).toEqual({ type: 'string', value: 'landed' });
+    });
+  } finally {
+    await origin.close();
+    await landing.close();
+  }
+});
+
+test('net/http_fetch refuses to replay a request body across origins on a 307 but follows it on the same origin', async () => {
+  const landing = await startScriptedServer((_request, response) => response.writeHead(200, { 'content-type': 'text/plain' }).end('landed elsewhere'));
+  const origin = await startScriptedServer((request, response) => {
+    if (request.url === '/cross') response.writeHead(307, { location: `${landing.baseUrl}/landing` }).end();
+    else if (request.url === '/same') response.writeHead(307, { location: '/received' }).end();
+    else response.writeHead(200, { 'content-type': 'text/plain' }).end(`received ${request.body}`);
+  });
+  try {
+    const fetchNode = (path: string) => [spellNode('start', 'event/on_start'), spellNode('fetch', 'net/http_fetch', { url: `${origin.baseUrl}${path}`, method: 'POST', body: 'order=42', timeout_ms: 5000 })];
+    await withSpellFile(fetchNode('/cross'), [spellWire('w_start', 'start', 'out', 'fetch', 'in')], async (path) => {
+      const run = await runSpell([path], { MAGICKLALA_ALLOW_PRIVATE_HTTP: '1' });
+      expect(run.code).toBe(1);
+      expect(failureOf(run, 'fetch')).toContain('refused cross-origin redirect with request body');
+      expect(landing.requests).toEqual([]);
+    });
+    await withSpellFile(fetchNode('/same'), [spellWire('w_start', 'start', 'out', 'fetch', 'in')], async (path) => {
+      const run = await runSpell([path], { MAGICKLALA_ALLOW_PRIVATE_HTTP: '1' });
+      expect(run.code).toBe(0);
+      expect(summaryOf(run)?.outputs['fetch.body']).toEqual({ type: 'string', value: 'received order=42' });
+    });
+    expect(origin.requests.map((request) => `${request.method} ${request.url} ${request.body}`)).toEqual(['POST /cross order=42', 'POST /same order=42', 'POST /received order=42']);
+  } finally {
+    await origin.close();
+    await landing.close();
+  }
+});
+
+test('net/http_fetch refuses NAT64, site-local and IPv4-compatible IPv6 addresses', async () => {
+  for (const url of ['http://[64:ff9b::7f00:1]/nat64', 'http://[64:ff9b:1::a00:1]/local-nat64', 'http://[fec0::1]/site-local', 'http://[::7f00:1]/compatible']) {
+    const nodes = [spellNode('start', 'event/on_start'), spellNode('fetch', 'net/http_fetch', { url, timeout_ms: 2000 })];
+    await withSpellFile(nodes, [spellWire('w_start', 'start', 'out', 'fetch', 'in')], async (path) => {
+      const run = await runSpell([path], { MAGICKLALA_ALLOW_PRIVATE_HTTP: '0' });
+      expect(run.code).toBe(1);
+      expect(failureOf(run, 'fetch')).toContain('refuses to connect to private address');
+    });
+  }
+});
+
+test('a spell that calls a subgraph fails before any node runs when no subgraph resolver is configured', async () => {
+  const nodes = [spellNode('start', 'event/on_start'), spellNode('after', 'io/send_message', { content: 'should not run' })];
+  const subgraphs = [{ node_id: 'after', spell_id: '0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a99' }];
+  await withSpellFile(nodes, [spellWire('w_start', 'start', 'out', 'after', 'in')], async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(1);
+    expect(run.stderr).toContain('SubgraphResolverUnavailable');
+    expect(run.stderr).toContain('0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a99');
+    expect(run.events).toEqual([]);
+  }, { subgraphs });
+});
+
+test('ai/embedding sends the vault credential it names and never the environment key', async () => {
+  const provider = await startScriptedServer((_request, response) => response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ data: [{ embedding: [0.25, 0.5] }] })));
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-credentials-'));
+  try {
+    const credentials = join(dir, 'credentials.json');
+    await writeFile(credentials, JSON.stringify({ 'vault-embed-1': 'resolved-embedding-secret' }));
+    const nodes = [spellNode('start', 'event/on_start'), spellNode('embed', 'ai/embedding', { text: 'hello', model: 'text-embedding-3-small', credential_id: 'vault-embed-1' })];
+    await withSpellFile(nodes, [spellWire('w_start', 'start', 'out', 'embed', 'in')], async (path) => {
+      const env = { MAGICKLALA_LLM_BASE_URL: provider.baseUrl, MAGICKLALA_LLM_API_KEY: 'env-key-that-must-not-be-used' };
+      const unresolved = await runSpell([path], env);
+      expect(unresolved.code).toBe(1);
+      expect(failureOf(unresolved, 'embed')).toBe('invalid config: credential vault-embed-1 cannot be resolved: no credential resolver is configured');
+      expect(provider.requests).toEqual([]);
+      const resolved = await runSpell([path], { ...env, MAGICKLALA_CREDENTIALS_FILE: credentials });
+      expect(resolved.code).toBe(0);
+      expect(provider.requests.map((request) => [request.url, request.headers.authorization])).toEqual([['/v1/embeddings', 'Bearer resolved-embedding-secret']]);
+      expect(JSON.parse(provider.requests[0]?.body ?? '{}')).toEqual({ model: 'text-embedding-3-small', input: ['hello'] });
+      expect(summaryOf(resolved)?.outputs['embed.embedding']).toEqual({ type: 'embedding', value: [0.25, 0.5] });
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+    await provider.close();
+  }
+});
+
+test('a caller-supplied run id is used by the run summary and every trace event', async () => {
+  const runId = '0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4b01';
+  const nodes = [spellNode('start', 'event/on_start'), spellNode('send', 'io/send_message', { content: 'hi' })];
+  await withSpellFile(nodes, [spellWire('w_start', 'start', 'out', 'send', 'in')], async (path) => {
+    const run = await runSpell([path, '--run-id', runId], {});
+    expect(run.code).toBe(0);
+    expect(run.events.length).toBeGreaterThan(4);
+    expect([...new Set(run.events.map((event) => event.run_id))]).toEqual([runId]);
+    expect(summaryOf(run)?.run_id).toBe(runId);
+  });
 });
