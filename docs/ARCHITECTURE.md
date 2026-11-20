@@ -120,4 +120,4 @@ pub trait NodeExecutor: Send + Sync {
    - Headless Rune smoke test renders a sample canvas PNG (`--snap`) without a display server.
 2. **Phase 1**:
    - Deterministic graph tests covering branching, `split` + `wait_for_all`, `while_loop` step-limit guardrails, value memoization, cycle rejection, and Rhai script sandboxing.
-   - CLI end-to-end run: `magicklala spell run examples/parallel_research.json` completes with live structured trace output.
+   - CLI end-to-end run: `magicklala spell run examples/parallel_research.json --stream --trace` visibly proves all three outcomes: (1) overlapping parallel branch execution (`flow/split` joined by `flow/wait_for_all`), (2) incrementally streamed AI token output printed as chunks arrive, and (3) live structured `TraceEvent` records emitted for each activated node and wire.
