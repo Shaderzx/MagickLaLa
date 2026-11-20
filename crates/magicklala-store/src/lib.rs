@@ -32,6 +32,20 @@ pub enum StoreError {
 
 pub type StoreResult<T> = Result<T, StoreError>;
 
+pub fn normalize_webhook_path(raw: &str) -> StoreResult<String> {
+    let segments: Vec<&str> = raw.trim().split('/').map(str::trim).filter(|segment| !segment.is_empty()).collect();
+    if segments.is_empty() {
+        return Err(StoreError::Invalid("webhook path cannot be empty".to_owned()));
+    }
+    if segments.iter().any(|segment| *segment == ".." || *segment == ".") {
+        return Err(StoreError::Invalid("webhook path cannot contain \"..\" segments".to_owned()));
+    }
+    if segments.iter().any(|segment| segment.chars().any(|c| c.is_control() || c == '\\' || c == '?' || c == '#')) {
+        return Err(StoreError::Invalid("webhook path cannot contain control characters, backslashes, query or fragment markers".to_owned()));
+    }
+    Ok(segments.join("/"))
+}
+
 #[async_trait::async_trait]
 pub trait Repository: Send + Sync {
     async fn create_project(&self, input: NewProject) -> StoreResult<Project>;

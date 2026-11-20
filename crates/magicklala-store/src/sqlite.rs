@@ -3,21 +3,24 @@ use std::collections::HashMap;
 use chrono::{DateTime, SecondsFormat, Utc};
 use magicklala_graph::{RunStatus, SpellGraph};
 use sha2::{Digest, Sha256};
-use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
+use sqlx::{QueryBuilder, Row, Sqlite};
 use uuid::Uuid;
 
 use crate::{
     Agent, AgentId, ChatMessage, ChatMessageId, ChatRole, CredentialId, CredentialMeta, CryptoVault, ExecutionRun, KnowledgeChunk, KnowledgeDoc,
     KnowledgeDocId, LlmRequestLog, MemoryId, MemoryRecord, NewAgent, NewChatMessage, NewCredential, NewKnowledgeDoc, NewMemory, NewProject, NewSpell,
     NewSpellRelease, NewWebhook, PluginStateId, PluginStateRecord, Project, ProjectId, ReleaseId, Repository, SearchHit, SpellRecord, SpellRecordId,
-    SpellRelease, SqliteStore, StoreError, StoreResult, UpdateAgent, WebhookId, WebhookRecord,
+    SpellRelease, SqliteStore, StoreError, StoreResult, UpdateAgent, WebhookId, WebhookRecord, normalize_webhook_path,
 };
 
 const SQLITE_MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../migrations/0001_initial.sql"))];
 pub const POSTGRES_SCHEMA: &str = include_str!("../migrations_pg/0001_initial.sql");
 const KEYWORD_WEIGHT: f32 = 0.5;
 const VECTOR_WEIGHT: f32 = 0.5;
+const KEYWORD_CANDIDATES_PER_RESULT: i64 = 10;
+const MAX_KEYWORD_CANDIDATES: i64 = 200;
+const VECTOR_CANDIDATE_LIMIT: i64 = 2000;
 
 const AGENT_COLUMNS: &str = "id, project_id, name, description, default_spell_id, pinned_release_id, enabled, settings, created_at, updated_at";
 const SPELL_COLUMNS: &str = "id, project_id, name, graph, content_hash, created_at, updated_at";
@@ -31,15 +34,56 @@ impl SqliteStore {
             .execute(&self.pool)
             .await?;
         for (version, script) in SQLITE_MIGRATIONS {
-            let applied: Option<i64> =
-                sqlx::query_scalar("SELECT version FROM schema_migrations WHERE version = ?").bind(version).fetch_optional(&self.pool).await?;
-            if applied.is_some() {
+            let mut transaction = self.pool.begin().await?;
+            let claimed = sqlx::query("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?) ON CONFLICT (version) DO NOTHING")
+                .bind(version)
+                .bind(stamp(Utc::now()))
+                .execute(&mut *transaction)
+                .await?;
+            if claimed.rows_affected() == 0 {
+                transaction.rollback().await?;
                 continue;
             }
-            sqlx::raw_sql(script).execute(&self.pool).await?;
-            sqlx::query("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").bind(version).bind(stamp(Utc::now())).execute(&self.pool).await?;
+            sqlx::raw_sql(script).execute(&mut *transaction).await?;
+            transaction.commit().await?;
         }
         Ok(())
+    }
+
+    pub async fn create_release_with_graph(&self, input: NewSpellRelease, graph: Option<SpellGraph>) -> StoreResult<SpellRelease> {
+        let snapshot = graph.as_ref().map(graph_fingerprint).transpose()?;
+        let expected_graph_id = graph.as_ref().map(|graph| graph.id.0.to_string());
+        let (snapshot_json, snapshot_hash) = snapshot.unzip();
+        let spell_id = input.spell_id.0.to_string();
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(&format!(
+            "INSERT INTO spell_releases ({RELEASE_COLUMNS}) \
+             SELECT ?, s.id, COALESCE((SELECT MAX(version) FROM spell_releases WHERE spell_id = s.id), 0) + 1, ?, COALESCE(?, s.graph), COALESCE(?, s.content_hash), ? \
+             FROM spells s WHERE s.id = ? AND (? IS NULL OR json_extract(s.graph, '$.id') = ?) \
+             RETURNING {RELEASE_COLUMNS}"
+        ))
+        .bind(ReleaseId::new().0.to_string())
+        .bind(&input.notes)
+        .bind(snapshot_json)
+        .bind(snapshot_hash)
+        .bind(stamp(Utc::now()))
+        .bind(&spell_id)
+        .bind(&expected_graph_id)
+        .bind(&expected_graph_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| classify(error, &format!("release of spell {spell_id}")))?;
+        let Some(row) = row else {
+            let exists: Option<String> = sqlx::query_scalar("SELECT id FROM spells WHERE id = ?").bind(&spell_id).fetch_optional(&mut *transaction).await?;
+            transaction.rollback().await?;
+            return Err(match exists {
+                Some(_) => StoreError::Invalid("release graph belongs to a different spell".to_owned()),
+                None => StoreError::NotFound(format!("spell {spell_id}")),
+            });
+        };
+        let release = release_from(&row)?;
+        transaction.commit().await?;
+        Ok(release)
     }
 
     pub async fn journal_mode(&self) -> StoreResult<String> {
@@ -63,17 +107,18 @@ impl SqliteStore {
         ensure_found(result.rows_affected(), format!("document {}", id.0))
     }
 
+    async fn agent_project(&self, id: AgentId) -> StoreResult<ProjectId> {
+        let project: Option<String> =
+            sqlx::query_scalar("SELECT project_id FROM agents WHERE id = ?").bind(id.0.to_string()).fetch_optional(&self.pool).await?;
+        project.map(|raw| parse_uuid(&raw).map(ProjectId)).ok_or_else(|| StoreError::NotFound(format!("agent {}", id.0)))?
+    }
+
     async fn project_of_release(&self, release: ReleaseId) -> StoreResult<ProjectId> {
         let project: Option<String> = sqlx::query_scalar("SELECT s.project_id FROM spell_releases r JOIN spells s ON s.id = r.spell_id WHERE r.id = ?")
             .bind(release.0.to_string())
             .fetch_optional(&self.pool)
             .await?;
         project.map(|raw| parse_uuid(&raw).map(ProjectId)).ok_or_else(|| StoreError::NotFound(format!("release {}", release.0)))?
-    }
-
-    async fn release_by_id(&self, id: ReleaseId) -> StoreResult<SpellRelease> {
-        let row = sqlx::query(&format!("SELECT {RELEASE_COLUMNS} FROM spell_releases WHERE id = ?")).bind(id.0.to_string()).fetch_optional(&self.pool).await?;
-        row.map(|row| release_from(&row)).ok_or_else(|| StoreError::NotFound(format!("release {}", id.0)))?
     }
 }
 
@@ -232,6 +277,10 @@ fn fts_query(query: &str) -> Option<String> {
 
 fn sql_limit(limit: u32) -> i64 {
     i64::from(limit.max(1))
+}
+
+fn keyword_candidate_limit(limit: u32) -> i64 {
+    sql_limit(limit).saturating_mul(KEYWORD_CANDIDATES_PER_RESULT).min(MAX_KEYWORD_CANDIDATES)
 }
 
 fn project_from(row: &SqliteRow) -> StoreResult<Project> {
@@ -425,54 +474,45 @@ impl Repository for SqliteStore {
     }
 
     async fn update_agent(&self, id: AgentId, input: UpdateAgent) -> StoreResult<Agent> {
-        let mut agent = self.get_agent(id).await?;
+        if let Some(name) = &input.name {
+            require_text(name, "agent name")?;
+        }
+        let project = self.agent_project(id).await?;
+        if let Some(Some(spell)) = input.default_spell_id
+            && self.get_spell(spell).await?.project_id != project
+        {
+            return Err(StoreError::Invalid("default spell belongs to another project".to_owned()));
+        }
+        if let Some(Some(release)) = input.pinned_release_id
+            && self.project_of_release(release).await? != project
+        {
+            return Err(StoreError::Invalid("pinned release belongs to another project".to_owned()));
+        }
+        let subject = format!("agent {}", input.name.as_deref().unwrap_or(&id.0.to_string()));
+        let mut update = QueryBuilder::<Sqlite>::new("UPDATE agents SET updated_at = ");
+        update.push_bind(stamp(Utc::now()));
         if let Some(name) = input.name {
-            require_text(&name, "agent name")?;
-            agent.name = name;
+            update.push(", name = ").push_bind(name);
         }
         if let Some(description) = input.description {
-            agent.description = description;
+            update.push(", description = ").push_bind(description);
         }
         if let Some(default_spell) = input.default_spell_id {
-            if let Some(spell) = default_spell {
-                let owner = self.get_spell(spell).await?.project_id;
-                if owner != agent.project_id {
-                    return Err(StoreError::Invalid("default spell belongs to another project".to_owned()));
-                }
-            }
-            agent.default_spell_id = default_spell;
+            update.push(", default_spell_id = ").push_bind(default_spell.map(|spell| spell.0.to_string()));
         }
         if let Some(pinned) = input.pinned_release_id {
-            if let Some(release) = pinned
-                && self.project_of_release(release).await? != agent.project_id
-            {
-                return Err(StoreError::Invalid("pinned release belongs to another project".to_owned()));
-            }
-            agent.pinned_release_id = pinned;
+            update.push(", pinned_release_id = ").push_bind(pinned.map(|release| release.0.to_string()));
         }
         if let Some(enabled) = input.enabled {
-            agent.enabled = enabled;
+            update.push(", enabled = ").push_bind(i64::from(enabled));
         }
         if let Some(settings) = input.settings {
-            agent.settings = settings;
+            update.push(", settings = ").push_bind(serde_json::to_string(&settings)?);
         }
-        agent.updated_at = Utc::now();
-        let result = sqlx::query(
-            "UPDATE agents SET name = ?, description = ?, default_spell_id = ?, pinned_release_id = ?, enabled = ?, settings = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(&agent.name)
-        .bind(&agent.description)
-        .bind(agent.default_spell_id.map(|spell| spell.0.to_string()))
-        .bind(agent.pinned_release_id.map(|release| release.0.to_string()))
-        .bind(i64::from(agent.enabled))
-        .bind(serde_json::to_string(&agent.settings)?)
-        .bind(stamp(agent.updated_at))
-        .bind(id.0.to_string())
-        .execute(&self.pool)
-        .await
-        .map_err(|error| classify(error, &format!("agent {}", agent.name)))?;
-        ensure_found(result.rows_affected(), format!("agent {}", id.0))?;
-        Ok(agent)
+        update.push(" WHERE id = ").push_bind(id.0.to_string());
+        update.push(format!(" RETURNING {AGENT_COLUMNS}"));
+        let row = update.build().fetch_optional(&self.pool).await.map_err(|error| classify(error, &subject))?;
+        row.map(|row| agent_from(&row)).ok_or_else(|| StoreError::NotFound(format!("agent {}", id.0)))?
     }
 
     async fn get_agent(&self, id: AgentId) -> StoreResult<Agent> {
@@ -547,20 +587,7 @@ impl Repository for SqliteStore {
     }
 
     async fn create_release(&self, input: NewSpellRelease) -> StoreResult<SpellRelease> {
-        let id = ReleaseId::new();
-        let inserted = sqlx::query(
-            "INSERT INTO spell_releases (id, spell_id, version, notes, graph, content_hash, created_at) \
-             SELECT ?, s.id, COALESCE((SELECT MAX(version) FROM spell_releases WHERE spell_id = s.id), 0) + 1, ?, s.graph, s.content_hash, ? FROM spells s WHERE s.id = ?",
-        )
-        .bind(id.0.to_string())
-        .bind(&input.notes)
-        .bind(stamp(Utc::now()))
-        .bind(input.spell_id.0.to_string())
-        .execute(&self.pool)
-        .await
-        .map_err(|error| classify(error, &format!("release of spell {}", input.spell_id.0)))?;
-        ensure_found(inserted.rows_affected(), format!("spell {}", input.spell_id.0))?;
-        self.release_by_id(id).await
+        self.create_release_with_graph(input, None).await
     }
 
     async fn list_releases(&self, spell: SpellRecordId) -> StoreResult<Vec<SpellRelease>> {
@@ -743,14 +770,16 @@ impl Repository for SqliteStore {
     }
 
     async fn search_knowledge(&self, agent: AgentId, query: &str, embedding: &[f32], limit: u32) -> StoreResult<Vec<SearchHit<KnowledgeChunk>>> {
+        let agent_key = agent.0.to_string();
         let mut keyword_strength: HashMap<i64, f32> = HashMap::new();
         if let Some(match_expression) = fts_query(query) {
             let ranked = sqlx::query(
                 "SELECT c.id AS id, bm25(knowledge_chunks_fts) AS rank FROM knowledge_chunks_fts JOIN knowledge_chunks c ON c.id = knowledge_chunks_fts.rowid \
-                 WHERE knowledge_chunks_fts MATCH ? AND c.agent_id = ?",
+                 WHERE knowledge_chunks_fts MATCH ? AND c.agent_id = ? ORDER BY rank LIMIT ?",
             )
             .bind(match_expression)
-            .bind(agent.0.to_string())
+            .bind(&agent_key)
+            .bind(keyword_candidate_limit(limit))
             .fetch_all(&self.pool)
             .await?;
             for row in &ranked {
@@ -759,11 +788,30 @@ impl Repository for SqliteStore {
             }
         }
         let strongest = keyword_strength.values().copied().fold(0.0f32, f32::max);
-        let rows = sqlx::query("SELECT id, doc_id, chunk_index, text, embedding FROM knowledge_chunks WHERE agent_id = ?")
-            .bind(agent.0.to_string())
-            .fetch_all(&self.pool)
-            .await?;
         let use_vectors = !embedding.is_empty();
+        if keyword_strength.is_empty() && !use_vectors {
+            return Ok(Vec::new());
+        }
+        let mut candidates = QueryBuilder::<Sqlite>::new("SELECT id, doc_id, chunk_index, text, embedding FROM knowledge_chunks WHERE agent_id = ");
+        candidates.push_bind(&agent_key);
+        candidates.push(" AND (0");
+        if use_vectors {
+            candidates.push(" OR id IN (SELECT id FROM knowledge_chunks WHERE agent_id = ");
+            candidates.push_bind(&agent_key);
+            candidates.push(" ORDER BY id DESC LIMIT ");
+            candidates.push_bind(VECTOR_CANDIDATE_LIMIT);
+            candidates.push(")");
+        }
+        if !keyword_strength.is_empty() {
+            candidates.push(" OR id IN (");
+            let mut ids = candidates.separated(", ");
+            for id in keyword_strength.keys() {
+                ids.push_bind(*id);
+            }
+            candidates.push(")");
+        }
+        candidates.push(")");
+        let rows = candidates.build().fetch_all(&self.pool).await?;
         let use_keywords = strongest > 0.0;
         let mut hits = Vec::new();
         for row in &rows {
@@ -795,11 +843,10 @@ impl Repository for SqliteStore {
     }
 
     async fn create_webhook(&self, input: NewWebhook) -> StoreResult<WebhookRecord> {
-        require_text(&input.path, "webhook path")?;
         let webhook = WebhookRecord {
             id: WebhookId::new(),
             agent_id: input.agent_id,
-            path: input.path,
+            path: normalize_webhook_path(&input.path)?,
             secret_credential_id: input.secret_credential_id,
             enabled: true,
             created_at: Utc::now(),
@@ -817,8 +864,9 @@ impl Repository for SqliteStore {
     }
 
     async fn find_webhook(&self, path: &str) -> StoreResult<WebhookRecord> {
+        let path = normalize_webhook_path(path)?;
         let row = sqlx::query("SELECT id, agent_id, path, secret_credential_id, enabled, created_at FROM webhooks WHERE path = ?")
-            .bind(path)
+            .bind(&path)
             .fetch_optional(&self.pool)
             .await?;
         row.map(|row| webhook_from(&row)).ok_or_else(|| StoreError::NotFound(format!("webhook {path}")))?

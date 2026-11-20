@@ -1,4 +1,9 @@
+use std::io::Read;
+
 use crate::{DocumentKind, EmbedderError};
+
+const MAX_STREAM_BYTES: usize = 4 * 1024 * 1024;
+const MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 
 const SKIPPED_ELEMENTS: [&str; 7] = ["script", "style", "noscript", "template", "svg", "nav", "iframe"];
 const BLOCK_ELEMENTS: [&str; 33] = [
@@ -272,6 +277,7 @@ fn pdf_to_text(bytes: &[u8]) -> Result<String, EmbedderError> {
     }
     let mut pieces = Vec::new();
     let mut cursor = 0;
+    let mut inflated_so_far = 0;
     while let Some(found) = find_bytes(bytes, b"stream", cursor) {
         if found >= 3 && &bytes[found - 3..found] == b"end" {
             cursor = found + 6;
@@ -289,7 +295,7 @@ fn pdf_to_text(bytes: &[u8]) -> Result<String, EmbedderError> {
         };
         let dictionary = &bytes[found.saturating_sub(1024)..found];
         let dictionary = rfind_bytes(dictionary, b"<<").map_or(dictionary, |start| &dictionary[start..]);
-        if let Some(content) = stream_content(dictionary, &bytes[body_start..body_end]) {
+        if let Some(content) = stream_content(dictionary, &bytes[body_start..body_end], &mut inflated_so_far)? {
             let text = text_from_content_stream(&content);
             if !text.trim().is_empty() {
                 pieces.push(text);
@@ -304,19 +310,29 @@ fn pdf_to_text(bytes: &[u8]) -> Result<String, EmbedderError> {
     Ok(text)
 }
 
-fn stream_content(dictionary: &[u8], raw: &[u8]) -> Option<Vec<u8>> {
+fn stream_content(dictionary: &[u8], raw: &[u8], inflated_so_far: &mut usize) -> Result<Option<Vec<u8>>, EmbedderError> {
     if [b"/Image".as_slice(), b"/Length1", b"/FontFile", b"/XRef"].iter().any(|marker| find_bytes(dictionary, marker, 0).is_some()) {
-        return None;
+        return Ok(None);
     }
     if find_bytes(dictionary, b"/FlateDecode", 0).is_some() {
-        let mut inflated = Vec::new();
-        let mut decoder = flate2::read::ZlibDecoder::new(raw);
-        return std::io::Read::read_to_end(&mut decoder, &mut inflated).ok().map(|_| inflated);
+        return inflate_within_limits(raw, inflated_so_far);
     }
     if find_bytes(dictionary, b"/Filter", 0).is_some() {
-        return None;
+        return Ok(None);
     }
-    Some(raw.to_vec())
+    Ok(Some(raw.to_vec()))
+}
+
+fn inflate_within_limits(raw: &[u8], inflated_so_far: &mut usize) -> Result<Option<Vec<u8>>, EmbedderError> {
+    let allowed = MAX_STREAM_BYTES.min(MAX_DOCUMENT_BYTES.saturating_sub(*inflated_so_far));
+    let mut inflated = Vec::new();
+    let mut capped = Read::take(flate2::read::ZlibDecoder::new(raw), u64::try_from(allowed + 1).unwrap_or(u64::MAX));
+    let finished = capped.read_to_end(&mut inflated).is_ok();
+    *inflated_so_far = inflated_so_far.saturating_add(inflated.len());
+    if inflated.len() > allowed {
+        return Err(EmbedderError::Extraction("pdf stream exceeds decompression limit".into()));
+    }
+    Ok(finished.then_some(inflated))
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
