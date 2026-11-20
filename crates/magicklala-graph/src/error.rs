@@ -41,6 +41,14 @@ pub enum ValidationError {
     SubgraphCycle { node: NodeId, spell: SpellId },
     #[error("subgraph node {node:?} calls spell {spell:?} but no subgraph resolver is configured")]
     SubgraphResolverUnavailable { node: NodeId, spell: SpellId },
+    #[error("subgraphs entry for {spell:?} names node {node:?}, which is not a flow/subgraph node, so the child spell would never run")]
+    OrphanSubgraph { node: NodeId, spell: SpellId },
+    #[error("flow/subgraph node {node:?} has no subgraphs entry naming the spell it calls")]
+    SubgraphTargetMissing { node: NodeId },
+    #[error("flow/subgraph node {node:?} is configured for spell {configured} but its subgraphs entry names {declared:?}")]
+    SubgraphTargetConflict { node: NodeId, configured: String, declared: SpellId },
+    #[error("flow/subgraph node {0:?} has more than one subgraphs entry")]
+    DuplicateSubgraphTarget(NodeId),
 }
 
 #[derive(Debug, Clone, PartialEq, Error)]

@@ -398,8 +398,7 @@ impl StreamDecoder {
             return Ok(());
         }
         if payload == "[DONE]" {
-            self.finish();
-            return Ok(());
+            return self.accept_done_marker();
         }
         let json: Json = serde_json::from_str(payload).map_err(|error| NodeError::Llm(format!("malformed stream event: {error}")))?;
         if let Some(message) = json.pointer("/error/message").and_then(Json::as_str) {
@@ -419,6 +418,20 @@ impl StreamDecoder {
             }
         }
         Ok(())
+    }
+
+    fn accept_done_marker(&mut self) -> Result<(), NodeError> {
+        match self.provider {
+            LlmProvider::OpenAi => {
+                self.finish();
+                Ok(())
+            }
+            LlmProvider::Gemini if self.finish_reason_seen => Ok(()),
+            LlmProvider::Gemini => Err(NodeError::Llm("gemini stream ended without a finishReason: [DONE] is not a gemini end marker".to_owned())),
+            LlmProvider::Anthropic | LlmProvider::Ollama if self.completed => Ok(()),
+            LlmProvider::Anthropic => Err(NodeError::Llm("anthropic stream sent [DONE] instead of message_stop".to_owned())),
+            LlmProvider::Ollama => Err(NodeError::Llm("ollama stream sent [DONE] instead of a done: true message".to_owned())),
+        }
     }
 
     fn finish(&mut self) {

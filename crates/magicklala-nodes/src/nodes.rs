@@ -14,7 +14,7 @@ use crate::script::run_rhai;
 
 pub(crate) const MAX_HTTP_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 const MAX_HTTP_REDIRECTS: usize = 5;
-const CREDENTIAL_HEADERS: [&str; 4] = ["authorization", "proxy-authorization", "cookie", "x-api-key"];
+const CROSS_ORIGIN_SAFE_HEADERS: [&str; 4] = ["accept", "accept-language", "content-type", "user-agent"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Op {
@@ -30,6 +30,7 @@ pub(crate) enum Op {
     WaitForAll,
     WhileLoop,
     DoOnce,
+    Subgraph,
     Delay,
     VarGet,
     VarSet,
@@ -77,6 +78,7 @@ impl NodeExecutor for StdNode {
                 Ok(NodeOutcome { fire: config_list(ctx, "outputs").unwrap_or_else(|| vec!["out_0".to_owned(), "out_1".to_owned()]), ..NodeOutcome::default() })
             }
             Op::WaitForAll | Op::DoOnce => Ok(NodeOutcome::fire("out")),
+            Op::Subgraph => Err(NodeError::Other("flow/subgraph runs only inside SpellEngine, which executes the child spell".to_owned())),
             Op::WhileLoop => Ok(NodeOutcome::fire(if value(ctx, "condition").await?.is_truthy() { "body" } else { "completed" })),
             Op::Delay => delay(ctx).await,
             Op::VarGet => {
@@ -397,8 +399,8 @@ fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
     left.scheme() == right.scheme() && left.host_str() == right.host_str() && left.port_or_known_default() == right.port_or_known_default()
 }
 
-fn is_credential_header(name: &str) -> bool {
-    CREDENTIAL_HEADERS.iter().any(|credential| name.eq_ignore_ascii_case(credential))
+fn is_cross_origin_safe_header(name: &str) -> bool {
+    CROSS_ORIGIN_SAFE_HEADERS.iter().any(|safe| name.eq_ignore_ascii_case(safe))
 }
 
 impl FetchPlan {
@@ -452,7 +454,7 @@ impl FetchPlan {
                 if with_body && self.has_body() {
                     return Err(NodeError::Service(format!("refused cross-origin redirect with request body from {url} to {next}")));
                 }
-                headers.retain(|(name, _)| !is_credential_header(name));
+                headers.retain(|(name, _)| is_cross_origin_safe_header(name));
             }
             url = next;
         }

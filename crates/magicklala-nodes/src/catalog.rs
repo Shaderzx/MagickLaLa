@@ -176,6 +176,14 @@ fn flow() -> Vec<Arc<dyn NodeExecutor>> {
             .output("completed", SocketType::Flow)
             .field("max_iterations", FieldKind::Number { min: Some(1.0), max: None }, Some(json!(1000)), false)
             .build(Op::WhileLoop),
+        Def::new("flow/subgraph", "Subgraph", "flow", "Runs another spell with the payload and returns its result, outputs and replies")
+            .flow_in()
+            .input("payload", SocketType::Any)
+            .flow_out()
+            .output("result", SocketType::Any)
+            .output("outputs", SocketType::Json)
+            .field("spell_id", FieldKind::Text, None, false)
+            .build(Op::Subgraph),
         Def::new("flow/do_once", "Do Once", "flow", "Lets flow through only the first time until reset")
             .flow_in()
             .input("reset", SocketType::Flow)
