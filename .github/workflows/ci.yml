@@ -38,7 +38,8 @@ jobs:
       - run: npm ci
         working-directory: e2e
       - run: npx e2e run
-        working-directory: e2e  landmines:
+        working-directory: e2e
+  landmines:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
