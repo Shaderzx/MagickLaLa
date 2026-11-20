@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use magicklala_graph::{EngineServices, NodeCatalog, NodeId, RunTrigger, SpellEngine, SpellGraph, SpellValidator, TraceEvent, Value};
-use magicklala_nodes::{HttpLlmGateway, InMemoryKnowledge, InMemoryMemory, LlmGatewayConfig, default_registry};
-use magicklala_server::{ALLOWED_HOSTS_ENV, API_TOKEN_ENV, AppState, ServerConfig, Wiring};
-use magicklala_store::{AesGcmVault, CryptoVault, MASTER_KEY_ENV, Repository, SqliteStore, is_in_memory_database_url};
+use magicklala_nodes::{HttpLlmGateway, InMemoryKnowledge, InMemoryMemory, LlmGatewayConfig, NodeRegistry, default_registry};
+use magicklala_server::{ALLOWED_HOSTS_ENV, API_TOKEN_ENV, AppState, ProjectSubgraphResolver, ServerConfig, Wiring};
+use magicklala_store::{AesGcmVault, CryptoVault, MASTER_KEY_ENV, ProjectId, Repository, SqliteStore, StoreResult, is_in_memory_database_url};
 
 const VAULT_KEY_ENV: &str = "MAGICKLALA_VAULT_KEY";
 const EMBEDDER_URL_ENV: &str = "MAGICKLALA_EMBEDDER_URL";
@@ -70,6 +70,8 @@ enum SpellCommand {
         llm_base_url: Option<String>,
         #[arg(long, env = "MAGICKLALA_MODEL")]
         model: Option<String>,
+        #[arg(long, value_name = "PATH_OR_URL", env = "MAGICKLALA_DB")]
+        db: Option<String>,
     },
     Validate {
         file: PathBuf,
@@ -230,6 +232,11 @@ async fn serve(config: ServerConfig) -> CliResult {
     for (agent, reason) in &booted.failed {
         eprintln!("warning: enabled agent {agent} did not boot: {reason}");
     }
+    for (webhook, path) in &booted.refused_unsigned_webhooks {
+        eprintln!(
+            "warning: unsigned webhook {webhook} ({path}) is refused while {API_TOKEN_ENV} is set; delete it and create a signed webhook with secret_credential_id"
+        );
+    }
     eprintln!("magicklala server listening on http://{address} (store: sqlite {}, booted {} agent(s))", config.database_url, booted.started.len());
     Ok(magicklala_server::serve_on(listener, state).await?)
 }
@@ -237,6 +244,30 @@ async fn serve(config: ServerConfig) -> CliResult {
 fn load(file: &Path) -> Result<SpellGraph, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(file).map_err(|error| format!("cannot read {}: {error}", file.display()))?;
     Ok(serde_json::from_str(&text).map_err(|error| format!("{} is not a spell: {error}", file.display()))?)
+}
+
+async fn spell_project(store: &SqliteStore, graph: &SpellGraph) -> StoreResult<Option<ProjectId>> {
+    for project in store.list_projects().await? {
+        if store.list_spells(project.id).await?.iter().any(|spell| spell.graph.id == graph.id) {
+            return Ok(Some(project.id));
+        }
+    }
+    Ok(None)
+}
+
+async fn stored_subgraphs(db: &str, graph: &SpellGraph, registry: &NodeRegistry) -> Result<ProjectSubgraphResolver, Box<dyn std::error::Error>> {
+    let url = database_url_or_default(Some(db.to_owned()));
+    if !is_in_memory_database_url(&url) && !studio_db_path(Path::new(db)).exists() {
+        return Err(format!("database {db} does not exist; pass the SQLite file magicklala serve uses").into());
+    }
+    let store = SqliteStore::connect(&url).await?;
+    store.migrate().await?;
+    let project = spell_project(&store, graph)
+        .await?
+        .ok_or_else(|| format!("spell {} is not stored in {db}; save it there through the server or Studio, or run without --db", graph.id.0))?;
+    let resolver = ProjectSubgraphResolver::load(&store, project, graph).await?;
+    resolver.verify(graph, &SpellValidator::new(registry.specs()))?;
+    Ok(resolver)
 }
 
 fn override_model(graph: &mut SpellGraph, model: &str) {
@@ -275,8 +306,13 @@ fn spell(command: SpellCommand) -> CliResult {
                 Err(errors) => Err(errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n").into()),
             }
         }
-        SpellCommand::Run { file, stream, trace, input, llm_base_url, model } => {
+        SpellCommand::Run { file, stream, trace, input, llm_base_url, model, db } => {
             let mut graph = load(&file)?;
+            let runtime = tokio::runtime::Runtime::new()?;
+            let resolver = match db.as_deref().map(str::trim).filter(|db| !db.is_empty()) {
+                Some(db) => Some(runtime.block_on(stored_subgraphs(db, &graph, &registry))?),
+                None => None,
+            };
             if let Some(model) = model.as_deref().filter(|model| !model.is_empty()) {
                 override_model(&mut graph, model);
             }
@@ -293,10 +329,13 @@ fn spell(command: SpellCommand) -> CliResult {
                 memory: Some(Arc::new(InMemoryMemory::new())),
                 knowledge: Some(Arc::new(InMemoryKnowledge::new())),
             };
-            let engine = SpellEngine::new(registry, services);
+            let engine = match resolver {
+                Some(resolver) => SpellEngine::new(registry, services).with_subgraph_resolver(Arc::new(resolver)),
+                None => SpellEngine::new(registry, services),
+            };
             let trigger = RunTrigger { node: trigger_node, socket: "out".to_owned(), payload: cli_payload(&input) };
             let emitter = Arc::new(TerminalTrace { stream, trace });
-            let summary = tokio::runtime::Runtime::new()?.block_on(engine.run(&graph, trigger, emitter))?;
+            let summary = runtime.block_on(engine.run(&graph, trigger, emitter))?;
             let rendered = serde_json::to_string_pretty(&summary)?;
             if stream {
                 println!();

@@ -3,13 +3,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use magicklala_connectors::{
-    Connector, ConnectorConfig, ConnectorKind, DiscordConnector, InboundEvent, OutboundAction, SlackConnector, TickConnector, WEBHOOK_MAX_SKEW_SECS,
-    WEBHOOK_SIGNATURE_HEADER, WebhookConnector,
+    Connector, ConnectorConfig, ConnectorKind, DiscordConnector, InboundEvent, MAX_WEBHOOK_DELIVERY_ID_LEN, OutboundAction, SlackConnector, TickConnector,
+    WEBHOOK_MAX_SKEW_SECS, WEBHOOK_SIGNATURE_HEADER, WebhookConnector, parse_webhook_delivery,
 };
 use magicklala_graph::{EngineServices, NodeCatalog, NodeInstance, NodeSpec, SocketSpec, SocketType, SpellGraph, SpellValidator, TraceEvent};
 use magicklala_runtime::{
     AgentStatus, AgentSupervisor, CHANNEL_LANE_CAPACITY, CopilotEngine, DispatchOptions, EngineReleaseRunner, EventBus, GraphPatchOp, InMemoryEventBus,
-    ReleaseOrigin, RuntimeEvent, StoreScope,
+    REJECTED_RUN_QUEUE_CAPACITY, ReleaseOrigin, RuntimeEvent, StoreScope, TRACE_BYTE_CAP, TRACE_EVENT_CAP,
 };
 use magicklala_store::{AgentId, NewAgent, NewProject, NewSpell, Repository, SqliteStore};
 use serde_json::{Value, json};
@@ -386,6 +386,7 @@ async fn forget(args: &[String]) -> ProbeResult {
         .map_err(text_error)?;
     let (completed, _) = completions(&mut events, |completed| !completed.is_empty()).await?;
     let stats = rig.supervisor.run_stats(rig.agent_id);
+    let recorded = rig.store.list_runs(AgentId(rig.agent_id), 1).await.map_err(text_error)?.into_iter().next();
     rig.supervisor.forget(rig.agent_id).await;
     let dispatch_after_forget = match rig.supervisor.dispatch_inbound(rig.inbound(ConnectorKind::Studio, "stuck", "after", json!({}))).await {
         Ok(()) => Value::Null,
@@ -395,6 +396,7 @@ async fn forget(args: &[String]) -> ProbeResult {
         "agent_id": rig.agent_id,
         "correlation": correlation,
         "completed": completed,
+        "recorded": recorded,
         "active_runs_after_timeout": stats.active_runs,
         "runs_failed": stats.runs_failed,
         "status_after_forget": rig.supervisor.status(rig.agent_id).await,
@@ -449,8 +451,15 @@ fn webhook_timestamped(args: &[String]) -> ProbeResult {
     let timestamp: i64 = flag(args, "--timestamp")?.parse().map_err(|_| "bad --timestamp".to_owned())?;
     let now: i64 = flag(args, "--now")?.parse().map_err(|_| "bad --now".to_owned())?;
     let body = stdin_text()?;
-    Ok(match WebhookConnector::verify_timestamped(&secret, timestamp, body.as_bytes(), &signature, now, WEBHOOK_MAX_SKEW_SECS) {
-        Ok(()) => json!({ "accepted": true, "max_skew_secs": WEBHOOK_MAX_SKEW_SECS }),
+    let delivery_flag = flag(args, "--delivery").ok();
+    let verified = parse_webhook_delivery(delivery_flag.as_deref()).and_then(|delivery| {
+        WebhookConnector::verify_timestamped(&secret, timestamp, delivery, body.as_bytes(), &signature, now, WEBHOOK_MAX_SKEW_SECS)
+            .map(|()| delivery.to_owned())
+    });
+    Ok(match verified {
+        Ok(delivery) => {
+            json!({ "accepted": true, "max_skew_secs": WEBHOOK_MAX_SKEW_SECS, "delivery_id": delivery, "max_delivery_id_len": MAX_WEBHOOK_DELIVERY_ID_LEN })
+        }
         Err(error) => json!({ "accepted": false, "error": error }),
     })
 }
@@ -722,7 +731,41 @@ async fn trace_run_id() -> ProbeResult {
 }
 
 async fn trace_cap() -> ProbeResult {
-    traced_run(loop_graph("^x{0,99}$", 200)?, "go").await
+    let mut output = traced_run(loop_graph("^x{0,99}$", 200)?, "go").await?;
+    output["trace_event_cap"] = json!(TRACE_EVENT_CAP);
+    output["trace_byte_cap"] = json!(TRACE_BYTE_CAP);
+    Ok(output)
+}
+
+async fn busy_persist() -> ProbeResult {
+    let rig = EngineRig::start(stall_graph()?, None).await?;
+    let mut events = rig.bus.subscribe();
+    let dispatched = CHANNEL_LANE_CAPACITY + 8;
+    for index in 0..dispatched {
+        let correlation = format!("persist-{index}");
+        rig.supervisor
+            .dispatch_inbound(rig.inbound(ConnectorKind::Studio, "stalled-lane", "stall", json!({ "correlation_id": correlation })))
+            .await
+            .map_err(text_error)?;
+        if index == 0 {
+            run_started(&mut events).await?;
+        }
+    }
+    let expected_busy = dispatched - CHANNEL_LANE_CAPACITY - 1;
+    let (completed, _) = completions(&mut events, |done| done.iter().filter(|event| event["status"] == "failed").count() >= expected_busy).await?;
+    rig.supervisor.stop(rig.agent_id).await.map_err(text_error)?;
+    let recorded_after_stop = rig.store.list_runs(AgentId(rig.agent_id), 1_000).await.map_err(text_error)?;
+    let stats = rig.supervisor.run_stats(rig.agent_id);
+    let output = json!({
+        "agent_id": rig.agent_id,
+        "dispatched": dispatched,
+        "rejected_run_queue_capacity": REJECTED_RUN_QUEUE_CAPACITY,
+        "completed": completed,
+        "recorded_after_stop": recorded_after_stop,
+        "runs_unrecorded": stats.runs_unrecorded,
+    });
+    rig.finish().await?;
+    Ok(output)
 }
 
 async fn dispatch(args: Vec<String>) -> ProbeResult {
@@ -746,7 +789,8 @@ async fn dispatch(args: Vec<String>) -> ProbeResult {
         Some("loop-replies") => loop_replies().await,
         Some("trace-run-id") => trace_run_id().await,
         Some("trace-cap") => trace_cap().await,
-        _ => Err("usage: runtime_probe <tick|webhook|webhook-timestamped|discord|slack|supervisor|copilot|correlated-runs|webhook-run|forget|busy|lane-drain|lane-cap|stop-drain|deadline|strict-trigger|loop-replies|trace-run-id|trace-cap> [flags]".to_owned()),
+        Some("busy-persist") => busy_persist().await,
+        _ => Err("usage: runtime_probe <tick|webhook|webhook-timestamped|discord|slack|supervisor|copilot|correlated-runs|webhook-run|forget|busy|lane-drain|lane-cap|stop-drain|deadline|strict-trigger|loop-replies|trace-run-id|trace-cap|busy-persist> [flags]".to_owned()),
     }
 }
 

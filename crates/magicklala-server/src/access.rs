@@ -25,6 +25,8 @@ pub const WS_TICKET_TTL: Duration = Duration::from_secs(30);
 pub const MAX_LIVE_WS_TICKETS: usize = 1_024;
 const CORS_MAX_AGE_SECONDS: u64 = 600;
 const WEBSOCKET_PATH: &str = "/ws";
+const WEBHOOK_DELIVERY_PREFIX: &str = "/api/v1/webhooks/";
+const SHOWN_ORIGIN_CAP: usize = 200;
 
 pub fn axum_route(openapi_path: &str) -> String {
     openapi_path.replace("{path}", "{*path}")
@@ -132,7 +134,13 @@ pub fn cors_layer(policy: &AccessPolicy) -> CorsLayer {
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(origins))
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE, Method::OPTIONS])
-        .allow_headers([CONTENT_TYPE, AUTHORIZATION, HeaderName::from_static("x-magicklala-signature"), HeaderName::from_static("x-magicklala-timestamp")])
+        .allow_headers([
+            CONTENT_TYPE,
+            AUTHORIZATION,
+            HeaderName::from_static("x-magicklala-signature"),
+            HeaderName::from_static("x-magicklala-timestamp"),
+            HeaderName::from_static("x-magicklala-delivery"),
+        ])
         .max_age(std::time::Duration::from_secs(CORS_MAX_AGE_SECONDS))
 }
 
@@ -144,6 +152,27 @@ pub fn origin_rejected(policy: &AccessPolicy, headers: &HeaderMap, uri: &Uri) ->
     let Some(origin) = headers.get(ORIGIN) else { return false };
     let host = request_host(headers, uri);
     origin.to_str().map_or(true, |origin| !policy.origin_allowed(origin, host.as_deref()))
+}
+
+pub fn foreign_origin(headers: &HeaderMap) -> ApiError {
+    let origin = headers.get(ORIGIN).and_then(|value| value.to_str().ok()).unwrap_or("<unreadable>");
+    let shown: String = origin.chars().take(SHOWN_ORIGIN_CAP).collect();
+    ApiError::new(StatusCode::FORBIDDEN, "foreign_origin", format!("origin {shown} is not in {CORS_ORIGINS_ENV}"))
+}
+
+fn reads_only(method: &Method) -> bool {
+    matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
+fn webhook_delivery(request: &Request) -> bool {
+    request.method() == Method::POST && request.uri().path().strip_prefix(WEBHOOK_DELIVERY_PREFIX).is_some_and(|rest| !rest.trim_matches('/').is_empty())
+}
+
+pub async fn reject_foreign_origin(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    if reads_only(request.method()) || webhook_delivery(&request) || !origin_rejected(&state.access, request.headers(), request.uri()) {
+        return next.run(request).await;
+    }
+    foreign_origin(request.headers()).into_response()
 }
 
 pub async fn require_known_host(State(state): State<AppState>, request: Request, next: Next) -> Response {
@@ -185,8 +214,11 @@ impl WsTickets {
     }
 
     pub fn redeem(&self, ticket: &str) -> bool {
+        let now = Instant::now();
         let mut live = self.live.lock().unwrap_or_else(PoisonError::into_inner);
-        live.remove(&Self::digest(ticket)).is_some_and(|expires| expires > Instant::now())
+        let redeemed = live.remove(&Self::digest(ticket)).is_some_and(|expires| expires > now);
+        live.retain(|_, expires| *expires > now);
+        redeemed
     }
 }
 

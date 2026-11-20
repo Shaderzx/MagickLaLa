@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use futures::FutureExt;
 use magicklala_connectors::{ConnectorRegistry, InboundEvent, OutboundAction};
-use magicklala_graph::{EventEmitter, RunId, RunStatus, SpellGraph, TraceEvent};
+use magicklala_graph::{EventEmitter, RunId, RunStatus, RunSummary, SpellGraph, TraceEvent};
 use magicklala_store::{AgentId, ExecutionRun, Repository};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::runner::{AgentRelease, ReleaseOrigin, ReleaseRunner, RunScope, correlation_id};
-use crate::trace::BoundedTrace;
+use crate::trace::{BoundedTrace, TRACE_REPLY_KEY};
 use crate::{EventBus, RuntimeError, RuntimeEvent};
 
 pub const MAILBOX_CAPACITY: usize = 1_024;
@@ -24,10 +24,12 @@ pub const CHANNEL_LANE_CAPACITY: usize = 256;
 pub const CHANNEL_LANE_IDLE: Duration = Duration::from_secs(300);
 pub const DEFAULT_RUN_TIMEOUT: Duration = Duration::from_secs(120);
 pub const MAX_LANES_PER_AGENT: usize = 64;
+pub const REJECTED_RUN_QUEUE_CAPACITY: usize = 256;
 
 const AGENT_STOPPED: &str = "run cancelled because the agent stopped";
 const STOPPED_BEFORE_START: &str = "run cancelled because the agent stopped before it started";
 const DEADLINE_EXPIRED: &str = "run deadline expired while queued; it was never started";
+const REJECTED_QUEUE_FULL: &str = "the rejected-run persistence queue is full; this busy rejection was not recorded";
 
 #[derive(Debug, PartialEq, Eq, Error)]
 pub enum DispatchError {
@@ -96,6 +98,7 @@ pub(crate) struct ActorHandle {
     mailbox: mpsc::Sender<QueuedEvent>,
     cancel: CancellationToken,
     task: JoinHandle<()>,
+    persistence: Option<JoinHandle<()>>,
 }
 
 pub(crate) struct QueuedEvent {
@@ -108,6 +111,22 @@ pub(crate) struct QueuedEvent {
 impl QueuedEvent {
     pub(crate) fn new(event: InboundEvent, release: Arc<AgentRelease>, options: DispatchOptions, reply: Option<oneshot::Sender<RunCompletion>>) -> Self {
         Self { event, release, deadline: options.deadline, reply }
+    }
+
+    fn closing_summary(&self, run_id: RunId, started_at: DateTime<Utc>, nodes_executed: u64, outcome: &RunOutcome) -> RunSummary {
+        RunSummary {
+            run_id,
+            spell_id: self.release.graph.id,
+            started_at,
+            finished_at: Utc::now(),
+            status: outcome.status,
+            nodes_executed,
+            outputs: std::collections::BTreeMap::new(),
+            activations: Vec::new(),
+            activations_truncated: false,
+            replies: Vec::new(),
+            error: outcome.error.clone(),
+        }
     }
 
     fn expired(&self) -> bool {
@@ -135,12 +154,12 @@ struct BusEmitter {
     agent_id: Uuid,
     bus: Arc<dyn EventBus>,
     nodes_executed: Mutex<u64>,
-    trace: BoundedTrace,
+    trace: Arc<BoundedTrace>,
 }
 
 impl BusEmitter {
     fn new(agent_id: Uuid, bus: Arc<dyn EventBus>) -> Self {
-        Self { agent_id, bus, nodes_executed: Mutex::new(0), trace: BoundedTrace::new() }
+        Self { agent_id, bus, nodes_executed: Mutex::new(0), trace: Arc::new(BoundedTrace::new()) }
     }
 
     fn nodes_executed(&self) -> u64 {
@@ -197,13 +216,19 @@ struct Finished {
     started_at: DateTime<Utc>,
     nodes_executed: u64,
     outcome: RunOutcome,
-    trace: Vec<serde_json::Value>,
-    trace_truncated: bool,
+    trace: Arc<BoundedTrace>,
 }
 
 impl Finished {
-    fn unstarted(outcome: RunOutcome) -> Self {
-        Self { run_id: RunId::new(), started_at: Utc::now(), nodes_executed: 0, outcome, trace: Vec::new(), trace_truncated: false }
+    fn unstarted(queued: &QueuedEvent, outcome: RunOutcome) -> Self {
+        let (run_id, started_at) = (RunId::new(), Utc::now());
+        let trace = Arc::new(BoundedTrace::new());
+        trace.close(&queued.closing_summary(run_id, started_at, 0, &outcome));
+        Self { run_id, started_at, nodes_executed: 0, outcome, trace }
+    }
+
+    fn first_reply(&self) -> Option<&str> {
+        self.outcome.actions.first().map(|action| action.content.as_str())
     }
 }
 
@@ -271,14 +296,13 @@ impl ActorContext {
             finished_at: Some(Utc::now()),
             nodes_executed: finished.nodes_executed,
             error: finished.outcome.error.clone(),
-            trace: serde_json::json!({
-                "correlation_id": correlation_id(&event.payload),
-                "channel": event.channel,
-                "connector_id": event.connector_id,
-                "release_version": release.version,
-                "events": finished.trace,
-                "truncated": finished.trace_truncated,
-            }),
+            trace: finished.trace.seal(serde_json::Map::from_iter([
+                ("correlation_id".to_owned(), serde_json::json!(correlation_id(&event.payload))),
+                ("channel".to_owned(), serde_json::json!(event.channel)),
+                ("connector_id".to_owned(), serde_json::json!(event.connector_id)),
+                ("release_version".to_owned(), serde_json::json!(release.version)),
+                (TRACE_REPLY_KEY.to_owned(), serde_json::json!(finished.first_reply())),
+            ])),
         }
     }
 
@@ -339,8 +363,10 @@ impl ActorContext {
             }),
         }
         self.deliver(&outcome.actions).await;
-        let (trace, trace_truncated) = emitter.trace.snapshot();
-        self.finish(queued, Finished { run_id, started_at, nodes_executed: emitter.nodes_executed(), outcome, trace, trace_truncated }).await;
+        let nodes_executed = emitter.nodes_executed();
+        emitter.trace.close(&queued.closing_summary(run_id, started_at, nodes_executed, &outcome));
+        let trace = Arc::clone(&emitter.trace);
+        self.finish(queued, Finished { run_id, started_at, nodes_executed, outcome, trace }).await;
     }
 
     async fn settle_unstarted(&self, queued: QueuedEvent, status: RunStatus, error: &str) {
@@ -351,7 +377,8 @@ impl ActorContext {
             }
             stats.last_error = Some(error.to_owned());
         });
-        self.finish(queued, Finished::unstarted(RunOutcome::failed(status, error.to_owned()))).await;
+        let finished = Finished::unstarted(&queued, RunOutcome::failed(status, error.to_owned()));
+        self.finish(queued, finished).await;
     }
 
     async fn process(&self, queued: QueuedEvent, cancel: &CancellationToken) {
@@ -364,18 +391,27 @@ impl ActorContext {
         }
     }
 
-    fn reject(self: &Arc<Self>, queued: QueuedEvent, error: String) {
+    fn reject(&self, queued: QueuedEvent, error: String, rejected_runs: Option<&mpsc::Sender<ExecutionRun>>) {
         self.update(|stats| {
             stats.runs_rejected += 1;
             stats.last_error = Some(error.clone());
         });
-        let finished = Finished::unstarted(RunOutcome::failed(RunStatus::Failed, error));
-        let run = self.execution_run(&queued, &finished);
-        self.announce(queued, &finished);
-        if self.repository.is_some() {
-            let context = Arc::clone(self);
-            tokio::spawn(async move { context.record(run).await });
+        let finished = Finished::unstarted(&queued, RunOutcome::failed(RunStatus::Failed, error));
+        if let Some(queue) = rejected_runs
+            && queue.try_send(self.execution_run(&queued, &finished)).is_err()
+        {
+            self.update(|stats| {
+                stats.runs_unrecorded += 1;
+                stats.last_record_error = Some(REJECTED_QUEUE_FULL.to_owned());
+            });
         }
+        self.announce(queued, &finished);
+    }
+}
+
+async fn persist_rejected_runs(context: Arc<ActorContext>, mut runs: mpsc::Receiver<ExecutionRun>) {
+    while let Some(run) = runs.recv().await {
+        context.record(run).await;
     }
 }
 
@@ -419,11 +455,16 @@ struct LaneRouter {
     lanes: HashMap<String, Lane>,
     draining: HashMap<String, oneshot::Receiver<()>>,
     tasks: JoinSet<()>,
+    rejected_runs: Option<mpsc::Sender<ExecutionRun>>,
 }
 
 impl LaneRouter {
-    fn new(context: Arc<ActorContext>, cancel: CancellationToken) -> Self {
-        Self { context, cancel, lanes: HashMap::new(), draining: HashMap::new(), tasks: JoinSet::new() }
+    fn new(context: Arc<ActorContext>, cancel: CancellationToken, rejected_runs: Option<mpsc::Sender<ExecutionRun>>) -> Self {
+        Self { context, cancel, lanes: HashMap::new(), draining: HashMap::new(), tasks: JoinSet::new(), rejected_runs }
+    }
+
+    fn reject(&self, queued: QueuedEvent, error: String) {
+        self.context.reject(queued, error, self.rejected_runs.as_ref());
     }
 
     fn retire(&mut self, channel: &str) {
@@ -461,7 +502,7 @@ impl LaneRouter {
             if !self.lanes.contains_key(&channel) {
                 if self.lanes.len() >= self.context.max_lanes {
                     let error = format!("agent {} is busy: {} channel lanes are already live", self.context.agent_id, self.context.max_lanes);
-                    return self.context.reject(pending, error);
+                    return self.reject(pending, error);
                 }
                 self.open(&channel);
             }
@@ -470,7 +511,7 @@ impl LaneRouter {
                 Ok(()) => return,
                 Err(mpsc::error::TrySendError::Full(rejected)) => {
                     let error = format!("channel {} of agent {} is busy", rejected.event.channel, self.context.agent_id);
-                    return self.context.reject(rejected, error);
+                    return self.reject(rejected, error);
                 }
                 Err(mpsc::error::TrySendError::Closed(returned)) => {
                     self.retire(&channel);
@@ -488,8 +529,13 @@ impl LaneRouter {
     }
 }
 
-async fn agent_actor(context: Arc<ActorContext>, mut mailbox: mpsc::Receiver<QueuedEvent>, cancel: CancellationToken) {
-    let mut router = LaneRouter::new(Arc::clone(&context), cancel.clone());
+async fn agent_actor(
+    context: Arc<ActorContext>,
+    mut mailbox: mpsc::Receiver<QueuedEvent>,
+    cancel: CancellationToken,
+    rejected_runs: Option<mpsc::Sender<ExecutionRun>>,
+) {
+    let mut router = LaneRouter::new(Arc::clone(&context), cancel.clone(), rejected_runs);
     loop {
         let queued = tokio::select! {
             biased;
@@ -514,8 +560,15 @@ async fn agent_actor(context: Arc<ActorContext>, mut mailbox: mpsc::Receiver<Que
 pub(crate) fn spawn_actor(context: Arc<ActorContext>) -> ActorHandle {
     let (mailbox, receiver) = mpsc::channel(MAILBOX_CAPACITY);
     let cancel = CancellationToken::new();
-    let task = tokio::spawn(agent_actor(context, receiver, cancel.clone()));
-    ActorHandle { mailbox, cancel, task }
+    let (rejected_runs, persistence) = match context.repository {
+        Some(_) => {
+            let (sender, runs) = mpsc::channel(REJECTED_RUN_QUEUE_CAPACITY);
+            (Some(sender), Some(tokio::spawn(persist_rejected_runs(Arc::clone(&context), runs))))
+        }
+        None => (None, None),
+    };
+    let task = tokio::spawn(agent_actor(context, receiver, cancel.clone(), rejected_runs));
+    ActorHandle { mailbox, cancel, task, persistence }
 }
 
 impl ActorHandle {
@@ -523,6 +576,9 @@ impl ActorHandle {
         self.cancel.cancel();
         drop(self.mailbox);
         let _finished = self.task.await;
+        if let Some(persistence) = self.persistence {
+            let _drained = persistence.await;
+        }
     }
 
     pub(crate) fn mailbox(&self) -> mpsc::Sender<QueuedEvent> {

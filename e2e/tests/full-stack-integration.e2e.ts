@@ -216,6 +216,50 @@ function storedRun(dbPath: string, runId: string) {
     db.close();
   }
 }
+function storedTrace(dbPath: string, runId: string) {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    const row = db.prepare('SELECT length(CAST(trace AS BLOB)) AS bytes, trace FROM execution_runs WHERE run_id = ?').get(runId) as { bytes: number; trace: string };
+    return { bytes: row.bytes, trace: JSON.parse(row.trace) };
+  } finally {
+    db.close();
+  }
+}
+
+function loopWire(id: string, fromNode: string, fromSocket: string, toNode: string, toSocket: string) {
+  return { id, from_node: fromNode, from_socket: fromSocket, to_node: toNode, to_socket: toSocket };
+}
+
+function growingLoopGraph(chunk: number, rounds: number) {
+  return {
+    schema_version: 1,
+    id: randomUUID(),
+    name: 'growing loop',
+    description: 'grows one variable past one mebibyte, then replies',
+    variables: [{ name: 'grown', ty: 'string', default: { type: 'string', value: '' } }],
+    nodes: [
+      { id: 'on', kind: 'event/on_message', position: [0, 0], config: {} },
+      { id: 'grown', kind: 'var/get', position: [0, 160], config: { name: 'grown' } },
+      { id: 'under', kind: 'logic/regex_match', position: [200, 160], config: { pattern: `^([^|]*\\|){0,${rounds - 1}}$` } },
+      { id: 'loop', kind: 'flow/while_loop', position: [400, 0], config: { max_iterations: rounds + 5 } },
+      { id: 'grow', kind: 'text/template', position: [400, 160], config: { template: `{{grown}}${'y'.repeat(chunk)}|` } },
+      { id: 'bump', kind: 'var/set', position: [600, 0], config: { name: 'grown' } },
+      { id: 'done', kind: 'text/template', position: [600, 160], config: { template: 'grew past one mebibyte' } },
+      { id: 'send', kind: 'io/send_message', position: [800, 0], config: {} },
+    ],
+    wires: [
+      loopWire('w_start', 'on', 'out', 'loop', 'in'),
+      loopWire('w_grown', 'grown', 'value', 'under', 'text'),
+      loopWire('w_condition', 'under', 'matched', 'loop', 'condition'),
+      loopWire('w_body', 'loop', 'body', 'bump', 'in'),
+      loopWire('w_grow', 'grow', 'text', 'bump', 'value'),
+      loopWire('w_done', 'loop', 'completed', 'send', 'in'),
+      loopWire('w_reply', 'done', 'text', 'send', 'content'),
+    ],
+    subgraphs: [],
+  };
+}
+
 test.beforeAll(async () => {
   await run('cargo', ['build', '-q', '-p', 'magicklala-cli'], { cwd: repoRoot, timeout: 900_000, maxBuffer: 64 * 1024 * 1024 });
 });
@@ -457,7 +501,7 @@ test('A failing POST /api/v1/spells/{id}/run answers 422 with the failed summary
   }
 });
 
-test('A spell run that outlives MAGICKLALA_SPELL_RUN_TIMEOUT_MS answers 504 and records a timed_out run in SQLite', async () => {
+test('A spell run that outlives MAGICKLALA_SPELL_RUN_TIMEOUT_MS answers 504 and records a timed_out run in SQLite whose trace closes with a timed_out run_finished', async () => {
   const released = Promise.withResolvers<void>();
   const llm = await startScriptedLlm(async (call) => {
     await released.promise;
@@ -471,6 +515,9 @@ test('A spell run that outlives MAGICKLALA_SPELL_RUN_TIMEOUT_MS answers 504 and 
     expect(timedOut.status).toBe(504);
     expect(timedOut.body.code).toBe('run_timeout');
     expect(storedRun(stack.dbPath, timedOut.body.run_id)).toMatchObject({ status: 'timed_out', spell_id: spell.body.id, agent_id: null });
+    const closing = { event: 'run_finished', run_id: timedOut.body.run_id, summary: { run_id: timedOut.body.run_id, status: 'timed_out', error: timedOut.body.error, outputs: {} } };
+    expect(storedTrace(stack.dbPath, timedOut.body.run_id).trace.events.at(-1)).toMatchObject(closing);
+    expect(timedOut.body.trace.at(-1)).toMatchObject(closing);
   } finally {
     released.resolve();
     await stack.stop();
@@ -662,6 +709,7 @@ test('MAGICKLALA_SPELL_RUN_TIMEOUT_MS also bounds agent chats: a stuck LLM answe
     expect(body.error).toContain('1500 ms');
     const runs = (await stack.api(`/api/v1/agents/${agent.id}/runs`)).body;
     expect(runs.map((item: { status: string }) => item.status)).toEqual(['timed_out']);
+    expect(runs[0].trace.events.at(-1)).toMatchObject({ event: 'run_finished', run_id: runs[0].run_id, summary: { run_id: runs[0].run_id, status: 'timed_out', error: runs[0].error } });
   } finally {
     released.resolve();
     await stack.stop();
@@ -743,3 +791,71 @@ test('One run id links the live WebSocket trace, GET /api/v1/agents/{id}/runs, t
     }
   });
 }
+
+test('A run whose node outputs pass 1 MiB saves a trace of at most 65536 bytes and 256 events ending with a slim run_finished, for a direct run and an agent chat alike', async () => {
+  const llm = await startScriptedLlm(async (call) => completion(call.response, 'unused'));
+  const stack = await launchStack(llm.baseUrl);
+  try {
+    const project = await stack.api('/api/v1/projects', { name: 'Huge outputs' });
+    const { spell, agent } = await runningLlmAgent(stack.api, project.body.id, 'growing', growingLoopGraph(20_000, 55));
+    const direct = await stack.api(`/api/v1/spells/${spell.id}/run`, { input: 'grow', agent_id: agent.id });
+    expect(direct.status).toBe(200);
+    expect(Buffer.byteLength(JSON.stringify(direct.body.summary.outputs))).toBeGreaterThan(1024 * 1024);
+    expect(direct.body.trace_truncated).toBe(true);
+    expect(direct.body.trace.at(-1)).toMatchObject({ event: 'run_finished', run_id: direct.body.run_id, summary: { status: 'succeeded', outputs: {}, activations: [], replies: [] } });
+    const chat = await stack.api(`/api/v1/agents/${agent.id}/chat`, { content: 'grow' });
+    expect(chat.status).toBe(200);
+    expect(chat.body.reply.content).toBe('grew past one mebibyte');
+    const runs = (await stack.api(`/api/v1/agents/${agent.id}/runs`)).body as { run_id: string; trace: { correlation_id?: string; reply?: string } }[];
+    const chatRun = runs.find((item) => item.trace.correlation_id === chat.body.reply.metadata.correlation_id)!;
+    expect(chatRun.trace.reply).toBe('grew past one mebibyte');
+    for (const runId of [direct.body.run_id, chatRun.run_id]) {
+      const saved = storedTrace(stack.dbPath, runId);
+      expect(saved.bytes).toBeLessThanOrEqual(65_536);
+      expect(saved.trace.events.length).toBeLessThanOrEqual(256);
+      expect(saved.trace.truncated).toBe(true);
+      expect(saved.trace.events.at(-1)).toMatchObject({ event: 'run_finished', run_id: runId, summary: { run_id: runId, status: 'succeeded', outputs: {}, activations: [], replies: [] } });
+    }
+  } finally {
+    await stack.stop();
+    await llm.close();
+  }
+});
+
+test('An agent stopped through the API stays stopped across a restart while a started one boots again, and starting or stopping either flips what the next restart does', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-autostart-'));
+  const databaseUrl = `sqlite://${join(dir, 'autostart.db')}`;
+  const llm = await startScriptedLlm(async (call) => completion(call.response, `loopback answer about ${call.prompt}`));
+  const port = await freePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const api = client(baseUrl);
+  let serve = startServe(port, databaseUrl, llm.baseUrl, dir);
+  const restart = async () => {
+    await stopProcess(serve.child);
+    serve = startServe(port, databaseUrl, llm.baseUrl, dir);
+    await waitHealthy(baseUrl);
+  };
+  const state = async (id: string) => (await api(`/api/v1/agents/${id}`)).body.status.state;
+  try {
+    await waitHealthy(baseUrl);
+    const project = await api('/api/v1/projects', { name: 'Autostart' });
+    const { agent: kept } = await runningLlmAgent(api, project.body.id, 'kept running', await helloLlmGraph());
+    const { agent: parked } = await runningLlmAgent(api, project.body.id, 'parked', await helloLlmGraph());
+    expect((await api(`/api/v1/agents/${parked.id}/stop`, {})).body.status.state).toBe('stopped');
+    expect((await api(`/api/v1/agents/${kept.id}`)).body.autostart).toBe(true);
+    expect((await api(`/api/v1/agents/${parked.id}`)).body.autostart).toBe(false);
+    await restart();
+    expect(await state(kept.id)).toBe('running');
+    expect(await state(parked.id)).toBe('stopped');
+    expect((await api(`/api/v1/agents/${kept.id}/chat`, { content: 'still here' })).body.reply.content).toBe('loopback answer about still here');
+    expect((await api(`/api/v1/agents/${kept.id}/stop`, {})).status).toBe(200);
+    expect((await api(`/api/v1/agents/${parked.id}/start`, {})).status).toBe(200);
+    await restart();
+    expect(await state(kept.id)).toBe('stopped');
+    expect(await state(parked.id)).toBe('running');
+  } finally {
+    await stopProcess(serve.child);
+    await llm.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

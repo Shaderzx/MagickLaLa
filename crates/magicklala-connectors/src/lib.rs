@@ -27,8 +27,8 @@ pub use slack::{SLACK_DEFAULT_BASE_URL, SLACK_MAX_CLOCK_SKEW_SECONDS, SlackConne
 pub use studio::{StudioChatConnector, StudioReply};
 pub use tick::{MIN_TICK_INTERVAL_MS, TickConnector};
 pub use webhook::{
-    MAX_WEBHOOK_BODY_BYTES, WEBHOOK_MAX_SKEW_SECS, WEBHOOK_SIGNATURE_HEADER, WEBHOOK_TIMESTAMP_HEADER, WebhookConnector, parse_webhook_timestamp,
-    signed_webhook_message,
+    MAX_WEBHOOK_BODY_BYTES, MAX_WEBHOOK_DELIVERY_ID_LEN, WEBHOOK_DELIVERY_HEADER, WEBHOOK_MAX_SKEW_SECS, WEBHOOK_SIGNATURE_HEADER, WEBHOOK_TIMESTAMP_HEADER,
+    WebhookConnector, parse_webhook_delivery, parse_webhook_timestamp, signed_webhook_message,
 };
 
 #[derive(Debug, Error)]

@@ -9,13 +9,23 @@ use crate::{Connector, ConnectorConfig, ConnectorError, ConnectorStatus, Inbound
 
 pub const WEBHOOK_SIGNATURE_HEADER: &str = "X-MagickLaLa-Signature";
 pub const WEBHOOK_TIMESTAMP_HEADER: &str = "X-MagickLaLa-Timestamp";
+pub const WEBHOOK_DELIVERY_HEADER: &str = "X-MagickLaLa-Delivery";
 pub const WEBHOOK_MAX_SKEW_SECS: i64 = 300;
 pub const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
+pub const MAX_WEBHOOK_DELIVERY_ID_LEN: usize = 128;
 
-pub fn signed_webhook_message(timestamp: i64, body: &[u8]) -> Vec<u8> {
-    let mut message = format!("{timestamp}.").into_bytes();
+pub fn signed_webhook_message(timestamp: i64, delivery: &str, body: &[u8]) -> Vec<u8> {
+    let mut message = format!("{timestamp}.{delivery}.").into_bytes();
     message.extend_from_slice(body);
     message
+}
+
+pub fn parse_webhook_delivery(raw: Option<&str>) -> Result<&str, String> {
+    let delivery = raw.filter(|value| !value.is_empty()).ok_or_else(|| format!("missing {WEBHOOK_DELIVERY_HEADER} header"))?;
+    if delivery.len() > MAX_WEBHOOK_DELIVERY_ID_LEN || !delivery.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(format!("{WEBHOOK_DELIVERY_HEADER} must be 1 to {MAX_WEBHOOK_DELIVERY_ID_LEN} printable ASCII characters without spaces"));
+    }
+    Ok(delivery)
 }
 
 pub fn parse_webhook_timestamp(raw: Option<&str>) -> Result<i64, String> {
@@ -55,17 +65,25 @@ impl WebhookConnector {
         }
     }
 
-    pub fn verify_timestamped(secret: &str, timestamp: i64, body: &[u8], signature: &str, now_unix: i64, max_skew_secs: i64) -> Result<(), String> {
+    pub fn verify_timestamped(
+        secret: &str,
+        timestamp: i64,
+        delivery: &str,
+        body: &[u8],
+        signature: &str,
+        now_unix: i64,
+        max_skew_secs: i64,
+    ) -> Result<(), String> {
         let skew = now_unix.abs_diff(timestamp);
         if skew > max_skew_secs.unsigned_abs() {
             return Err(format!("{WEBHOOK_TIMESTAMP_HEADER} timestamp is {skew} s away from server time; the limit is {max_skew_secs} s"));
         }
         let provided = signature.trim();
         let digest = provided.strip_prefix("sha256=").unwrap_or(provided);
-        if verify_hmac_sha256(secret.as_bytes(), &signed_webhook_message(timestamp, body), digest) {
+        if verify_hmac_sha256(secret.as_bytes(), &signed_webhook_message(timestamp, delivery, body), digest) {
             Ok(())
         } else {
-            Err(format!("{WEBHOOK_SIGNATURE_HEADER} signature does not match timestamp.body"))
+            Err(format!("{WEBHOOK_SIGNATURE_HEADER} signature does not match timestamp.delivery.body"))
         }
     }
 

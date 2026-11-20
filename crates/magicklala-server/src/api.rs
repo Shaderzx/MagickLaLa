@@ -7,12 +7,13 @@ use axum::Json;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::extract::rejection::BytesRejection;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::header::CONTENT_TYPE;
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use magicklala_connectors::{
-    ConnectorKind, InboundEvent, MAX_WEBHOOK_BODY_BYTES, WEBHOOK_MAX_SKEW_SECS, WEBHOOK_SIGNATURE_HEADER, WEBHOOK_TIMESTAMP_HEADER, WebhookConnector,
-    parse_webhook_timestamp,
+    ConnectorKind, InboundEvent, MAX_WEBHOOK_BODY_BYTES, WEBHOOK_DELIVERY_HEADER, WEBHOOK_MAX_SKEW_SECS, WEBHOOK_SIGNATURE_HEADER, WEBHOOK_TIMESTAMP_HEADER,
+    WebhookConnector, parse_webhook_delivery, parse_webhook_timestamp,
 };
 use magicklala_embedder::{ChunkConfig, DocumentInput, DocumentKind, KnowledgePipeline};
 use magicklala_graph::{
@@ -21,18 +22,18 @@ use magicklala_graph::{
 };
 use magicklala_runtime::{
     AgentStatus, BoundedTrace, CopilotError, CopilotRequest, CopilotSuggestion, DispatchError, DispatchOptions, GraphPatchOp, LlmCallScope, MeteredLlmGateway,
-    ReleaseOrigin, RunCompletion, RuntimeEvent, SharedEmbedder, StoreKnowledgeBridge, StoreMemoryBridge, UnboundAgentStore,
+    ReleaseOrigin, RunCompletion, RuntimeEvent, SharedEmbedder, StoreKnowledgeBridge, StoreMemoryBridge, TRACE_REPLY_KEY, UnboundAgentStore,
 };
 use magicklala_store::*;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityRequirement, SecurityScheme};
-use utoipa::openapi::{PathItem, RefOr, ResponseBuilder};
+use utoipa::openapi::{PathItem, Ref, RefOr, ResponseBuilder};
 use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::access::{PUBLIC_PATHS, WS_TICKET_TTL};
+use crate::access::{PUBLIC_PATHS, WS_TICKET_TTL, foreign_origin, origin_rejected};
 use crate::error::{ApiError, ApiJson, ApiPath, ApiQuery, ApiResult};
 use crate::memory::content_hash;
 use crate::secrets::project_secret;
@@ -44,6 +45,10 @@ const CHAT_REPLY_GRACE: Duration = Duration::from_secs(5);
 const BEARER_SCHEME: &str = "bearer_token";
 const SPELL_RUN_TRIGGER_KINDS: [&str; 3] = ["event/on_start", "event/on_message", "core/on_message"];
 const HIDDEN_WEBHOOK_HEADERS: [&str; 4] = ["authorization", "cookie", "proxy-authorization", "x-magicklala-signature"];
+const MISDIRECTED_RESPONSE: &str = "MisdirectedRequest";
+const UNAUTHORIZED_RESPONSE: &str = "Unauthorized";
+const FOREIGN_ORIGIN_RESPONSE: &str = "ForeignOrigin";
+const JSON_MEDIA_TYPE: &str = "application/json";
 
 #[derive(Deserialize, ToSchema)]
 pub struct CreateProject {
@@ -151,6 +156,11 @@ pub struct ProjectFilter {
 }
 
 #[derive(Deserialize, IntoParams)]
+pub struct WebhookFilter {
+    pub agent_id: Option<Uuid>,
+}
+
+#[derive(Deserialize, IntoParams)]
 pub struct SearchQuery {
     pub q: String,
     pub limit: Option<u32>,
@@ -230,6 +240,7 @@ async fn agent_view(state: &AppState, agent: Agent) -> AgentView {
         search_memories,
         list_runs,
         create_webhook,
+        list_webhooks,
         delete_webhook,
         receive_webhook,
         create_ws_ticket,
@@ -257,31 +268,53 @@ pub struct ApiDoc;
 
 struct SecurityDocs;
 
-fn operations_mut(item: &mut PathItem) -> impl Iterator<Item = &mut utoipa::openapi::path::Operation> {
-    [&mut item.get, &mut item.put, &mut item.post, &mut item.delete, &mut item.patch, &mut item.options, &mut item.head, &mut item.trace]
-        .into_iter()
-        .filter_map(Option::as_mut)
+fn operations_mut(item: &mut PathItem) -> impl Iterator<Item = (bool, &mut utoipa::openapi::path::Operation)> {
+    [
+        (false, &mut item.get),
+        (true, &mut item.put),
+        (true, &mut item.post),
+        (true, &mut item.delete),
+        (true, &mut item.patch),
+        (false, &mut item.options),
+        (false, &mut item.head),
+        (false, &mut item.trace),
+    ]
+    .into_iter()
+    .filter_map(|(writes, operation)| operation.as_mut().map(|operation| (writes, operation)))
+}
+
+fn shared_response(name: &str) -> RefOr<utoipa::openapi::Response> {
+    RefOr::Ref(Ref::from_response_name(name))
 }
 
 impl Modify for SecurityDocs {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         let components = openapi.components.get_or_insert_with(Default::default);
         components.add_security_scheme(BEARER_SCHEME, SecurityScheme::Http(HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build()));
+        let shared = [
+            (MISDIRECTED_RESPONSE, "Host header is not loopback, the bound address or in MAGICKLALA_ALLOWED_HOSTS"),
+            (UNAUTHORIZED_RESPONSE, "Missing or invalid bearer token"),
+            (
+                FOREIGN_ORIGIN_RESPONSE,
+                "A browser Origin header that is neither this server nor in MAGICKLALA_CORS_ORIGINS; requests without Origin are unaffected",
+            ),
+        ];
+        for (name, description) in shared {
+            components.responses.insert(name.to_owned(), RefOr::T(ResponseBuilder::new().description(description).build()));
+        }
         openapi.security = Some(vec![SecurityRequirement::new(BEARER_SCHEME, Vec::<String>::new())]);
         for (path, item) in &mut openapi.paths.paths {
             let public = PUBLIC_PATHS.contains(&path.as_str());
-            for operation in operations_mut(item) {
-                operation.responses.responses.entry("421".to_owned()).or_insert_with(|| {
-                    RefOr::T(ResponseBuilder::new().description("Host header is not loopback, the bound address or in MAGICKLALA_ALLOWED_HOSTS").build())
-                });
+            for (writes, operation) in operations_mut(item) {
+                let responses = &mut operation.responses.responses;
+                responses.entry("421".to_owned()).or_insert_with(|| shared_response(MISDIRECTED_RESPONSE));
+                if writes {
+                    responses.entry("403".to_owned()).or_insert_with(|| shared_response(FOREIGN_ORIGIN_RESPONSE));
+                }
                 if public {
                     operation.security = Some(Vec::new());
                 } else {
-                    operation
-                        .responses
-                        .responses
-                        .entry("401".to_owned())
-                        .or_insert_with(|| RefOr::T(ResponseBuilder::new().description("Missing or invalid bearer token").build()));
+                    responses.entry("401".to_owned()).or_insert_with(|| shared_response(UNAUTHORIZED_RESPONSE));
                 }
             }
         }
@@ -484,8 +517,24 @@ impl SpellRunLog<'_> {
         summary
     }
 
+    fn close(&self, status: RunStatus, error: Option<String>, nodes_executed: u64) {
+        self.trace.kept.close(&RunSummary {
+            run_id: self.run_id,
+            spell_id: self.spell.graph.id,
+            started_at: self.started_at,
+            finished_at: Utc::now(),
+            status,
+            nodes_executed,
+            outputs: std::collections::BTreeMap::new(),
+            activations: Vec::new(),
+            activations_truncated: false,
+            replies: Vec::new(),
+            error,
+        });
+    }
+
     fn execution_run(&self, status: RunStatus, error: Option<String>, nodes_executed: u64) -> ExecutionRun {
-        let (events, truncated) = self.trace.kept.snapshot();
+        self.close(status, error.clone(), nodes_executed);
         ExecutionRun {
             run_id: self.run_id.0,
             agent_id: self.agent,
@@ -497,7 +546,7 @@ impl SpellRunLog<'_> {
             finished_at: Some(Utc::now()),
             nodes_executed,
             error,
-            trace: serde_json::json!({ "events": events, "truncated": truncated }),
+            trace: self.trace.kept.seal(serde_json::Map::new()),
         }
     }
 
@@ -512,6 +561,26 @@ impl SpellRunLog<'_> {
     }
 }
 
+fn json_body(headers: &HeaderMap) -> bool {
+    header_text(headers, CONTENT_TYPE.as_str())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|media| media.trim().eq_ignore_ascii_case(JSON_MEDIA_TYPE))
+}
+
+fn run_request(headers: &HeaderMap, raw: &[u8]) -> ApiResult<RunSpell> {
+    if raw.is_empty() {
+        return Ok(RunSpell::default());
+    }
+    if !json_body(headers) {
+        return Err(ApiError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+            "a spell run body must be sent as Content-Type: application/json",
+        ));
+    }
+    serde_json::from_slice(raw).map_err(|error| ApiError::bad_request("invalid_body", error.to_string()))
+}
+
 #[utoipa::path(
     post,
     path = "/api/v1/spells/{id}/run",
@@ -519,20 +588,17 @@ impl SpellRunLog<'_> {
     params(("id" = Uuid, Path, description = "Spell id")),
     request_body = RunSpell,
     responses(
-        (status = 200, description = "Run succeeded: summary and a trace capped at 256 events or 64 KiB that always ends with run_finished"),
+        (status = 200, description = "Run succeeded: the full summary plus a trace of at most 256 events and 64 KiB that always ends with a slim run_finished (no outputs, activations or replies, so the summary is never duplicated)"),
         (status = 400, description = "Spell is invalid, has no trigger, references an unresolvable subgraph or the body is malformed"),
-        (status = 403, description = "agent_id belongs to another project than the spell"),
+        (status = 403, description = "agent_id belongs to another project than the spell, or a browser Origin is not allowlisted"),
         (status = 404, description = "Unknown spell or agent"),
+        (status = 415, description = "A non-empty body was not sent as Content-Type: application/json"),
         (status = 422, description = "Run failed: error, run_id, summary and trace; the failed run is recorded. Memory and knowledge nodes fail unless agent_id names an agent of the spell's project"),
         (status = 504, description = "Run exceeded MAGICKLALA_SPELL_RUN_TIMEOUT_MS and was cancelled; the timed out run is recorded")
     )
 )]
-pub async fn run_spell(State(state): State<AppState>, ApiPath(id): ApiPath<Uuid>, raw: Bytes) -> ApiResult<Response> {
-    let body: RunSpell = if raw.is_empty() {
-        RunSpell::default()
-    } else {
-        serde_json::from_slice(&raw).map_err(|error| ApiError::bad_request("invalid_body", error.to_string()))?
-    };
+pub async fn run_spell(State(state): State<AppState>, ApiPath(id): ApiPath<Uuid>, headers: HeaderMap, raw: Bytes) -> ApiResult<Response> {
+    let body = run_request(&headers, &raw)?;
     let spell = state.store.get_spell(SpellRecordId(id)).await?;
     let report = validation_report(&state, &spell.graph);
     if !report.valid {
@@ -542,7 +608,7 @@ pub async fn run_spell(State(state): State<AppState>, ApiPath(id): ApiPath<Uuid>
         Some(agent_id) => Some(spell_agent(&state, &spell, AgentId(agent_id)).await?),
         None => None,
     };
-    let resolver = subgraph_resolver(&state, spell.project_id, &spell.graph).await?;
+    let resolver = verify_subgraphs(&state, spell.project_id, &spell.graph).await?;
     let trigger = spell_trigger(&state, &spell.graph, body.trigger_node.as_deref(), Value::from(body.input))?;
     let run_id = RunId::new();
     let trace = Arc::new(BusTrace::new(state.clone(), agent.map(|agent| agent.0)));
@@ -646,6 +712,7 @@ pub async fn patch_agent(State(state): State<AppState>, ApiPath(id): ApiPath<Uui
         settings: body.settings,
         default_spell_id: pinned.as_ref().map(|release| release.spell_id).or(requested_spell).map(Some),
         pinned_release_id,
+        autostart: (body.enabled == Some(false) || pin_cleared).then_some(false),
     };
     let agent = state.store.update_agent(AgentId(id), update).await?;
     if !agent.enabled || pin_cleared {
@@ -767,18 +834,20 @@ pub(crate) async fn boot_agent(state: &AppState, agent: Agent) -> ApiResult<()> 
     launch(state, &agent).await
 }
 
-#[utoipa::path(post, path = "/api/v1/agents/{id}/start", tag = "agents", params(("id" = Uuid, Path, description = "Agent id")), responses((status = 200, description = "Agent running"), (status = 400, description = "Pinned release is invalid"), (status = 404, description = "Unknown agent"), (status = 409, description = "Already running, disabled or unreleased")))]
+#[utoipa::path(post, path = "/api/v1/agents/{id}/start", tag = "agents", params(("id" = Uuid, Path, description = "Agent id")), responses((status = 200, description = "Agent running; autostart is saved so it boots again after a server restart"), (status = 400, description = "Pinned release is invalid"), (status = 404, description = "Unknown agent"), (status = 409, description = "Already running, disabled or unreleased")))]
 pub async fn start_agent(State(state): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> ApiResult<Json<AgentView>> {
     let _serialized = state.agent_locks.lock(id).await;
     let agent = state.store.get_agent(AgentId(id)).await?;
     launch(&state, &agent).await?;
+    let agent = state.store.update_agent(agent.id, UpdateAgent { autostart: Some(true), ..UpdateAgent::default() }).await?;
     Ok(Json(agent_view(&state, agent).await))
 }
 
-#[utoipa::path(post, path = "/api/v1/agents/{id}/stop", tag = "agents", params(("id" = Uuid, Path, description = "Agent id")), responses((status = 200, description = "Agent stopped; every queued event is recorded as a cancelled run"), (status = 404, description = "Unknown agent")))]
+#[utoipa::path(post, path = "/api/v1/agents/{id}/stop", tag = "agents", params(("id" = Uuid, Path, description = "Agent id")), responses((status = 200, description = "Agent stopped; every queued event is recorded as a cancelled run and autostart is cleared so it stays stopped after a server restart"), (status = 404, description = "Unknown agent")))]
 pub async fn stop_agent(State(state): State<AppState>, ApiPath(id): ApiPath<Uuid>) -> ApiResult<Json<AgentView>> {
     let _serialized = state.agent_locks.lock(id).await;
-    let agent = state.store.get_agent(AgentId(id)).await?;
+    state.store.get_agent(AgentId(id)).await?;
+    let agent = state.store.update_agent(AgentId(id), UpdateAgent { autostart: Some(false), ..UpdateAgent::default() }).await?;
     state.supervisor.register(id).await;
     state.supervisor.stop(id).await?;
     Ok(Json(agent_view(&state, agent).await))
@@ -824,9 +893,11 @@ impl From<RunCompletion> for Completion {
 
 async fn recorded_completion(state: &AppState, agent_id: Uuid, correlation: &str) -> Option<Completion> {
     let run = state.store.find_run_by_correlation(AgentId(agent_id), correlation).await.ok()??;
-    Some(match run.status {
-        RunStatus::Succeeded => Completion::ReplyLost,
-        status => Completion::Finished { status, reply: None, error: run.error },
+    let recorded_reply = run.trace.get(TRACE_REPLY_KEY).and_then(serde_json::Value::as_str).map(str::to_owned);
+    Some(match (run.status, recorded_reply) {
+        (RunStatus::Succeeded, Some(reply)) => Completion::Finished { status: RunStatus::Succeeded, reply: Some(reply), error: None },
+        (RunStatus::Succeeded, None) => Completion::ReplyLost,
+        (status, _) => Completion::Finished { status, reply: None, error: run.error },
     })
 }
 
@@ -1038,6 +1109,17 @@ pub async fn create_webhook(State(state): State<AppState>, ApiJson(body): ApiJso
     Ok(created(state.store.create_webhook(input).await?))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/webhooks",
+    tag = "runs",
+    params(WebhookFilter),
+    responses((status = 200, description = "Registered webhooks, oldest first, optionally only those of one agent; signing secrets are never included"))
+)]
+pub async fn list_webhooks(State(state): State<AppState>, ApiQuery(filter): ApiQuery<WebhookFilter>) -> ApiResult<Json<Vec<WebhookRecord>>> {
+    Ok(Json(state.store.list_webhooks(filter.agent_id.map(AgentId)).await?))
+}
+
 #[utoipa::path(delete, path = "/api/v1/webhooks/{id}", tag = "runs", params(("id" = Uuid, Path, description = "Webhook id")), responses((status = 204, description = "Webhook deleted; its signing credential may now be deleted"), (status = 404, description = "Unknown webhook")))]
 pub async fn delete_webhook(State(state): State<AppState>, ApiPath(id): ApiPath<String>) -> ApiResult<StatusCode> {
     let id = Uuid::parse_str(id.trim_matches('/')).map_err(|_| ApiError::not_found(format!("webhook {id} is not a webhook id")))?;
@@ -1068,13 +1150,36 @@ fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|value| value.to_str().ok())
 }
 
-async fn verify_webhook_signature(state: &AppState, webhook: &WebhookRecord, project: ProjectId, headers: &HeaderMap, raw: &[u8]) -> ApiResult<()> {
-    let Some(credential) = webhook.secret_credential_id else { return Ok(()) };
+fn refuse_unsigned_delivery(state: &AppState, headers: &HeaderMap, uri: &Uri) -> ApiResult<()> {
+    if state.access.requires_token() {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "unsigned_webhook_refused",
+            "this webhook has no secret_credential_id and unsigned deliveries are refused while MAGICKLALA_API_TOKEN is set; delete it and create a signed webhook",
+        ));
+    }
+    if origin_rejected(&state.access, headers, uri) {
+        return Err(foreign_origin(headers));
+    }
+    Ok(())
+}
+
+async fn verify_signed_delivery(state: &AppState, credential: CredentialId, project: ProjectId, headers: &HeaderMap, raw: &[u8]) -> ApiResult<String> {
     let rejected = |detail: String| ApiError::new(StatusCode::UNAUTHORIZED, "invalid_signature", detail);
     let secret = project_secret(state.store.as_ref(), state.vault.as_ref(), project, credential).await.map_err(rejected)?;
     let timestamp = parse_webhook_timestamp(header_text(headers, WEBHOOK_TIMESTAMP_HEADER)).map_err(rejected)?;
+    let delivery = parse_webhook_delivery(header_text(headers, WEBHOOK_DELIVERY_HEADER)).map_err(rejected)?;
     let signature = header_text(headers, WEBHOOK_SIGNATURE_HEADER).ok_or_else(|| rejected(format!("missing {WEBHOOK_SIGNATURE_HEADER} header")))?;
-    WebhookConnector::verify_timestamped(&secret, timestamp, raw, signature, Utc::now().timestamp(), WEBHOOK_MAX_SKEW_SECS).map_err(rejected)
+    WebhookConnector::verify_timestamped(&secret, timestamp, delivery, raw, signature, Utc::now().timestamp(), WEBHOOK_MAX_SKEW_SECS).map_err(rejected)?;
+    Ok(delivery.to_owned())
+}
+
+async fn claim_delivery(state: &AppState, webhook: WebhookId, delivery: &str) -> ApiResult<()> {
+    let now = Utc::now().timestamp();
+    if state.store.record_webhook_delivery(webhook, delivery, now, now - 2 * WEBHOOK_MAX_SKEW_SECS).await? {
+        return Ok(());
+    }
+    Err(ApiError::conflict("duplicate_webhook_delivery", format!("delivery {delivery} was already received by this webhook")))
 }
 
 fn webhook_body(raw: &[u8]) -> ApiResult<serde_json::Value> {
@@ -1108,14 +1213,16 @@ fn webhook_content(body: &serde_json::Value) -> String {
     params(
         ("path" = String, Path, description = "Registered webhook path"),
         ("X-MagickLaLa-Timestamp" = Option<String>, Header, description = "Unix seconds when the payload was signed; must be within 300 seconds of server time when the webhook has a secret credential"),
-        ("X-MagickLaLa-Signature" = Option<String>, Header, description = "sha256=<hex HMAC-SHA256 of \"<timestamp>.<raw body>\">, required when the webhook has a secret credential")
+        ("X-MagickLaLa-Delivery" = Option<String>, Header, description = "Unique delivery id of 1 to 128 printable ASCII characters, required when the webhook has a secret credential; each id is accepted once within the 600 second replay window and becomes the run's correlation_id"),
+        ("X-MagickLaLa-Signature" = Option<String>, Header, description = "sha256=<hex HMAC-SHA256 of \"<timestamp>.<delivery>.<raw body>\">, required when the webhook has a secret credential")
     ),
     responses(
-        (status = 202, description = "Signature verified and event dispatched to the agent"),
+        (status = 202, description = "Signature verified, delivery claimed and event dispatched to the agent; delivery_id echoes X-MagickLaLa-Delivery or is null for unsigned webhooks"),
         (status = 400, description = "Invalid path or malformed JSON body"),
-        (status = 401, description = "Missing, stale or malformed X-MagickLaLa-Timestamp, missing or invalid X-MagickLaLa-Signature, or the secret is unavailable"),
+        (status = 401, description = "Missing, stale or malformed X-MagickLaLa-Timestamp or X-MagickLaLa-Delivery, missing or invalid X-MagickLaLa-Signature, the secret is unavailable, or an unsigned webhook while MAGICKLALA_API_TOKEN is set"),
+        (status = 403, description = "An unsigned webhook was delivered with a browser Origin that is not allowlisted"),
         (status = 404, description = "Unknown webhook"),
-        (status = 409, description = "Webhook disabled or agent not running"),
+        (status = 409, description = "duplicate_webhook_delivery: this X-MagickLaLa-Delivery was already received, so the agent is not run again; or the webhook is disabled or its agent is not running"),
         (status = 413, description = "Body larger than 1 MiB"),
         (status = 503, description = "Agent mailbox is full")
     )
@@ -1124,6 +1231,7 @@ pub async fn receive_webhook(
     State(state): State<AppState>,
     ApiPath(path): ApiPath<String>,
     ApiQuery(query): ApiQuery<HashMap<String, String>>,
+    uri: Uri,
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> ApiResult<impl IntoResponse> {
@@ -1133,10 +1241,20 @@ pub async fn receive_webhook(
         return Err(ApiError::conflict("webhook_disabled", "webhook is disabled"));
     }
     let agent = state.store.get_agent(webhook.agent_id).await?;
-    verify_webhook_signature(&state, &webhook, agent.project_id, &headers, &raw).await?;
+    let delivery = match webhook.secret_credential_id {
+        Some(credential) => Some(verify_signed_delivery(&state, credential, agent.project_id, &headers, &raw).await?),
+        None => {
+            refuse_unsigned_delivery(&state, &headers, &uri)?;
+            None
+        }
+    };
     let body = webhook_body(&raw)?;
     let content = webhook_content(&body);
-    let payload = serde_json::json!({ "method": "POST", "path": webhook.path, "headers": forwarded_headers(&headers), "query": query, "body": body });
+    let mut payload = serde_json::json!({ "method": "POST", "path": webhook.path, "headers": forwarded_headers(&headers), "query": query, "body": body });
+    if let Some(delivery) = &delivery {
+        claim_delivery(&state, webhook.id, delivery).await?;
+        payload[magicklala_runtime::CORRELATION_ID_KEY] = serde_json::Value::String(delivery.clone());
+    }
     let event = InboundEvent {
         connector_id: webhook.id.0,
         agent_id: webhook.agent_id.0,
@@ -1148,8 +1266,14 @@ pub async fn receive_webhook(
         received_at: Utc::now(),
     };
     state.supervisor.register(webhook.agent_id.0).await;
-    state.supervisor.dispatch_inbound(event).await.map_err(dispatch_error)?;
-    Ok((StatusCode::ACCEPTED, Json(serde_json::json!({ "accepted": true, "webhook_id": webhook.id, "agent_id": webhook.agent_id }))))
+    if let Err(error) = state.supervisor.dispatch_inbound(event).await {
+        if let Some(delivery) = &delivery {
+            state.store.forget_webhook_delivery(webhook.id, delivery).await?;
+        }
+        return Err(dispatch_error(error));
+    }
+    let accepted = serde_json::json!({ "accepted": true, "webhook_id": webhook.id, "agent_id": webhook.agent_id, "delivery_id": delivery });
+    Ok((StatusCode::ACCEPTED, Json(accepted)))
 }
 fn repair_ops(errors: &[ValidationError]) -> Vec<GraphPatchOp> {
     let mut wires: Vec<WireId> = errors

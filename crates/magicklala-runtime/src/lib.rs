@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 pub use actor::{
     AgentRunStats, CHANNEL_LANE_CAPACITY, CHANNEL_LANE_IDLE, DEFAULT_RUN_TIMEOUT, DispatchError, DispatchOptions, MAILBOX_CAPACITY, MAX_LANES_PER_AGENT,
-    RunCompletion,
+    REJECTED_RUN_QUEUE_CAPACITY, RunCompletion,
 };
 pub use bridges::{SharedEmbedder, StoreKnowledgeBridge, StoreMemoryBridge, UNBOUND_STORE_ACCESS, UnboundAgentStore};
 pub use copilot::{CopilotEngine, CopilotError, CopilotRequest, CopilotSuggestion, GraphPatchOp, PatchRejection};
@@ -28,7 +28,7 @@ pub use runner::{
     AgentRelease, CORRELATION_ID_KEY, EngineReleaseRunner, ProjectLlmFactory, ReleaseOrigin, ReleaseRunner, RunScope, StoreScope, SubgraphLoader,
     TemplateReplyRunner, correlation_id, inbound_payload, ordered_replies, structural_errors, trigger_kinds, trigger_payload,
 };
-pub use trace::{BoundedTrace, TRACE_BYTE_CAP, TRACE_EVENT_CAP};
+pub use trace::{BoundedTrace, TRACE_BYTE_CAP, TRACE_ERROR_CAP, TRACE_EVENT_CAP, TRACE_FIELD_CAP, TRACE_REPLY_CAP, TRACE_REPLY_KEY, clamp_text, trace_summary};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RuntimeError {

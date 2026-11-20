@@ -238,7 +238,7 @@ pub type ProjectLlmFactory = Arc<dyn Fn(ProjectId) -> Arc<dyn LlmGateway> + Send
 
 #[async_trait]
 pub trait SubgraphLoader: Send + Sync {
-    async fn load(&self, project: ProjectId, graph: &SpellGraph) -> Arc<dyn SubgraphResolver>;
+    async fn load(&self, project: ProjectId, graph: &SpellGraph) -> Result<Arc<dyn SubgraphResolver>, String>;
 }
 
 #[derive(Clone)]
@@ -288,23 +288,23 @@ impl ScopedEngine {
         EngineServices { llm, memory, knowledge }
     }
 
-    async fn resolver(&self, project: Option<ProjectId>, graph: &SpellGraph) -> Option<Arc<dyn SubgraphResolver>> {
+    async fn resolver(&self, project: Option<ProjectId>, graph: &SpellGraph) -> Result<Option<Arc<dyn SubgraphResolver>>, SpellError> {
         if let Some((loader, project)) = self.subgraph_loader.as_ref().zip(project) {
-            return Some(loader.load(project, graph).await);
+            return loader.load(project, graph).await.map(Some).map_err(|error| SpellError::Internal(format!("loading subgraphs failed: {error}")));
         }
-        self.subgraphs.clone()
+        Ok(self.subgraphs.clone())
     }
 
-    async fn engine(&self, agent_id: Uuid, run_id: RunId, step_limit: u64, graph: &SpellGraph) -> SpellEngine {
+    async fn engine(&self, agent_id: Uuid, run_id: RunId, step_limit: u64, graph: &SpellGraph) -> Result<SpellEngine, SpellError> {
         let project = self.agent_project(AgentId(agent_id)).await;
         let engine = SpellEngine::new(Arc::clone(&self.catalog), self.services(agent_id, run_id, project).await)
             .with_step_limit(step_limit)
             .with_agent_id(agent_id.to_string())
             .with_run_id(run_id);
-        match self.resolver(project, graph).await {
+        Ok(match self.resolver(project, graph).await? {
             Some(resolver) => engine.with_subgraph_resolver(resolver),
             None => engine,
-        }
+        })
     }
 }
 
@@ -445,7 +445,7 @@ impl ReleaseRunner for EngineReleaseRunner {
         let binding = RunBinding { agent_id: Some(release.agent_id.to_string()), allow_private_http: self.allow_private_http, run_id: Some(scope.run_id) };
         let summary = match &self.scoped {
             Some(scoped) => {
-                let engine = scoped.engine(release.agent_id, scope.run_id, self.engine.step_limit(), &release.graph).await;
+                let engine = scoped.engine(release.agent_id, scope.run_id, self.engine.step_limit(), &release.graph).await?;
                 engine.run_bound(&release.graph, trigger, emitter, scope.cancellation, binding).await?
             }
             None => self.engine.run_bound(&release.graph, trigger, emitter, scope.cancellation, binding).await?,

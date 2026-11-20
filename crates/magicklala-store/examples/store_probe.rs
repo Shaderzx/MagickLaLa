@@ -47,6 +47,7 @@ async fn probe() -> ProbeResult<()> {
         "run-correlation" => run_correlation(&spec).await?,
         "vault-keys" => vault_keys(&spec)?,
         "memory-urls" => memory_urls(&spec).await?,
+        "webhook-deliveries" => webhook_deliveries(&spec).await?,
         other => return Err(format!("unknown command {other}").into()),
     };
     println!("{}", serde_json::to_string(&output)?);
@@ -368,6 +369,58 @@ async fn credential_guard(spec: &Value) -> ProbeResult<Value> {
     let blocked = store.delete_credential(credential.id).await.err().map(|error| error.to_string());
     let signed = store.find_webhook(text(spec, "path")?).await?.secret_credential_id;
     Ok(json!({ "webhookId": webhook.id, "credentialId": credential.id, "blockedError": blocked, "signedWebhookSecret": signed }))
+}
+
+fn whole(spec: &Value, key: &str) -> ProbeResult<i64> {
+    spec.get(key).and_then(Value::as_i64).ok_or_else(|| format!("spec is missing integer field {key}").into())
+}
+
+async fn webhook_deliveries(spec: &Value) -> ProbeResult<Value> {
+    let store = open(spec).await?;
+    let now = whole(spec, "now")?;
+    let window = whole(spec, "window")?;
+    let concurrent = whole(spec, "concurrent")?;
+    let (_, agents) = project_with_agents(&store, "deliveries").await?;
+    let hook = |owner: &str, path: &str| NewWebhook { agent_id: agents[owner], path: path.to_owned(), secret_credential_id: None };
+    let primary = store.create_webhook(hook("primary", "deliveries/primary")).await?;
+    let secondary = store.create_webhook(hook("other", "deliveries/secondary")).await?;
+    let mut racers = tokio::task::JoinSet::new();
+    for _ in 0..concurrent {
+        let racer = store.clone();
+        racers.spawn(async move { racer.record_webhook_delivery(primary.id, "delivery-fresh", now, now - window).await });
+    }
+    let mut fresh = 0_u32;
+    let mut duplicates = 0_u32;
+    while let Some(joined) = racers.join_next().await {
+        if joined?? {
+            fresh += 1;
+        } else {
+            duplicates += 1;
+        }
+    }
+    let replayed = store.record_webhook_delivery(primary.id, "delivery-fresh", now, now - window).await?;
+    let same_key_other_webhook = store.record_webhook_delivery(secondary.id, "delivery-fresh", now, now - window).await?;
+    store.record_webhook_delivery(primary.id, "delivery-stale", now - window - 1, 0).await?;
+    let stale_before_prune = store.record_webhook_delivery(primary.id, "delivery-stale", now, 0).await?;
+    let stale_after_prune = store.record_webhook_delivery(primary.id, "delivery-stale", now + 1000, now - window).await?;
+    let ids = |webhooks: Vec<magicklala_store::WebhookRecord>| webhooks.into_iter().map(|webhook| webhook.id.0.to_string()).collect::<Vec<_>>();
+    let listed_for_primary = ids(store.list_webhooks(Some(agents["primary"])).await?);
+    let listed_for_secondary = ids(store.list_webhooks(Some(agents["other"])).await?);
+    let listed_all = ids(store.list_webhooks(None).await?);
+    store.delete_webhook(secondary.id).await?;
+    Ok(json!({
+        "primaryWebhookId": primary.id,
+        "secondaryWebhookId": secondary.id,
+        "concurrentFresh": fresh,
+        "concurrentDuplicates": duplicates,
+        "replayed": replayed,
+        "sameKeyOtherWebhook": same_key_other_webhook,
+        "staleBeforePrune": stale_before_prune,
+        "staleAfterPrune": stale_after_prune,
+        "listedForPrimary": listed_for_primary,
+        "listedForSecondary": listed_for_secondary,
+        "listedAll": listed_all,
+    }))
 }
 
 async fn credential_release(spec: &Value) -> ProbeResult<Value> {
