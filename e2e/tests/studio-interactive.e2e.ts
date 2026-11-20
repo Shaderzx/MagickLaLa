@@ -304,6 +304,7 @@ test('Publishing keeps one stable spell record through a rename, so v1 and v2 bo
     expect(releases).toEqual([
       { spellId: report.first.spellId, version: 1, name: report.first.name },
       { spellId: report.first.spellId, version: 2, name: renamed },
+      { spellId: report.first.spellId, version: 3, name: renamed },
     ]);
     expect(spells).toEqual([{ id: report.first.spellId }]);
     expect(report.reopened).toEqual({ versions: [1, 2], spellName: renamed, spellRecordId: report.first.spellId });

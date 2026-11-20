@@ -14,7 +14,9 @@ use crate::{
     SpellRelease, SqliteStore, StoreError, StoreResult, UpdateAgent, WebhookId, WebhookRecord, normalize_webhook_path,
 };
 
-const SQLITE_MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../migrations/0001_initial.sql"))];
+const SQLITE_MIGRATIONS: &[(i64, &str)] =
+    &[(1, include_str!("../migrations/0001_initial.sql")), (2, include_str!("../migrations/0002_protect_webhook_secrets.sql"))];
+const CREDENTIAL_SIGNS_WEBHOOK: &str = "credential is referenced by a webhook";
 pub const POSTGRES_SCHEMA: &str = include_str!("../migrations_pg/0001_initial.sql");
 const KEYWORD_WEIGHT: f32 = 0.5;
 const VECTOR_WEIGHT: f32 = 0.5;
@@ -206,6 +208,13 @@ fn classify(error: sqlx::Error, subject: &str) -> StoreError {
         }
     }
     StoreError::Database(error)
+}
+
+fn protected_credential(error: sqlx::Error) -> StoreError {
+    match &error {
+        sqlx::Error::Database(database) if database.message().contains(CREDENTIAL_SIGNS_WEBHOOK) => StoreError::Conflict(CREDENTIAL_SIGNS_WEBHOOK.to_owned()),
+        _ => StoreError::Database(error),
+    }
 }
 
 fn require_text(value: &str, field: &str) -> StoreResult<()> {
@@ -640,8 +649,18 @@ impl Repository for SqliteStore {
     }
 
     async fn delete_credential(&self, id: CredentialId) -> StoreResult<()> {
-        let result = sqlx::query("DELETE FROM credentials WHERE id = ?").bind(id.0.to_string()).execute(&self.pool).await?;
+        let result = sqlx::query("DELETE FROM credentials WHERE id = ?").bind(id.0.to_string()).execute(&self.pool).await.map_err(protected_credential)?;
         ensure_found(result.rows_affected(), format!("credential {}", id.0))
+    }
+
+    async fn delete_webhook(&self, id: WebhookId) -> StoreResult<()> {
+        let result = sqlx::query("DELETE FROM webhooks WHERE id = ?").bind(id.0.to_string()).execute(&self.pool).await?;
+        ensure_found(result.rows_affected(), format!("webhook {}", id.0))
+    }
+
+    async fn clear_memories(&self, agent: AgentId) -> StoreResult<u64> {
+        let result = sqlx::query("DELETE FROM memories WHERE agent_id = ?").bind(agent.0.to_string()).execute(&self.pool).await?;
+        Ok(result.rows_affected())
     }
 
     async fn append_chat(&self, input: NewChatMessage) -> StoreResult<ChatMessage> {
@@ -905,6 +924,17 @@ impl Repository for SqliteStore {
             .fetch_all(&self.pool)
             .await?;
         rows.iter().map(run_from).collect()
+    }
+
+    async fn find_run_by_correlation(&self, agent: AgentId, correlation_id: &str) -> StoreResult<Option<ExecutionRun>> {
+        let row = sqlx::query(&format!(
+            "SELECT {RUN_COLUMNS} FROM execution_runs WHERE agent_id = ? AND json_extract(trace, '$.correlation_id') = ? ORDER BY started_at DESC, rowid DESC LIMIT 1"
+        ))
+        .bind(agent.0.to_string())
+        .bind(correlation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(run_from).transpose()
     }
 
     async fn log_llm_request(&self, log: LlmRequestLog) -> StoreResult<()> {

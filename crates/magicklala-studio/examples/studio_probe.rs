@@ -1,10 +1,12 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 use magicklala_canvas::{ExecutionStatus, category_accent};
 use magicklala_graph::{NodeCatalog, NodeId, NodeInstance, SpellGraph, SpellValidator, Wire, WireId};
 use magicklala_studio::{
-    PALETTE_CATEGORY_ORDER, StudioApp, StudioConfig, Theme, ValidationState, palette_categories, registry_specs, render_headless_snapshot_themed, studio_view,
+    PALETTE_CATEGORY_ORDER, PROMPT_EDITOR_PADDING, StudioApp, StudioConfig, Theme, ValidationState, palette_categories, prompt_font, registry_specs,
+    render_headless_snapshot_themed, studio_view,
 };
 use rune::{Env, Runtime};
 use serde_json::json;
@@ -13,14 +15,37 @@ const TOOLBAR_KEYS: [&str; 10] =
     ["toolbar-left", "validation-pill", "validate", "run-spell", "publish", "theme-toggle", "zoom-out", "zoom-readout", "zoom-in", "zoom-fit"];
 const CONTEXT_MENU_ITEMS: [&str; 4] = ["context-add-ai-generate_text", "context-delete-node", "context-fit-view", "context-dismiss"];
 
-fn click(rt: &mut Runtime<StudioApp>, key: &str) -> Result<(), String> {
+const SETTLE: Duration = Duration::from_secs(120);
+
+fn settle(rt: &mut Runtime<StudioApp>) -> Result<(), String> {
+    rt.update(|app, _| {
+        app.wait_background(SETTLE);
+    });
     rt.frame(0.0);
+    if !rt.state.is_running() { Ok(()) } else { Err("background run did not finish".to_owned()) }
+}
+
+fn click(rt: &mut Runtime<StudioApp>, key: &str) -> Result<(), String> {
+    click_at(rt, key, 0.0)
+}
+
+fn click_at(rt: &mut Runtime<StudioApp>, key: &str, seconds: f64) -> Result<(), String> {
+    rt.frame(seconds);
     let (x, y) = rt.find(key).ok_or_else(|| format!("no element keyed {key}"))?;
     rt.pointer_move(x, y);
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
-    rt.frame(0.0);
+    rt.frame(seconds);
     Ok(())
+}
+
+struct Clock(f64);
+
+impl Clock {
+    fn tick(&mut self) -> f64 {
+        self.0 += 0.5;
+        self.0
+    }
 }
 
 fn right_click(rt: &mut Runtime<StudioApp>, point: (f32, f32)) {
@@ -233,7 +258,7 @@ fn type_chat(rt: &mut Runtime<StudioApp>, message: &str) -> Result<String, Strin
         app.chat_input = rune::TextEdit::new(&text);
         app.send_chat();
     });
-    rt.frame(0.0);
+    settle(rt)?;
     rt.state.chat.last().filter(|reply| !reply.from_user).map(|reply| reply.text.clone()).ok_or_else(|| "no chat reply".to_owned())
 }
 
@@ -241,6 +266,7 @@ fn execution() -> Result<serde_json::Value, String> {
     let mut webhook = runtime_for(example("webhook_router.json")?);
     webhook.update(|app, _| app.run_payload = json!({ "method": "POST", "path": "/hooks/router", "body": { "type": "order", "id": "42" } }));
     click(&mut webhook, "run-spell")?;
+    settle(&mut webhook)?;
     let mut broken = StudioApp::with_spell(example("webhook_router.json")?, registry_specs());
     broken.spell.nodes.push(NodeInstance {
         id: NodeId::from("mystery"),
@@ -251,6 +277,7 @@ fn execution() -> Result<serde_json::Value, String> {
     broken.canvas = magicklala_canvas::CanvasState::from_graph(&broken.spell, &broken.specs);
     let mut invalid = Runtime::new(broken, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
     click(&mut invalid, "run-spell")?;
+    settle(&mut invalid)?;
     Ok(json!({ "webhook": run_report(&webhook.state), "invalid": run_report(&invalid.state) }))
 }
 
@@ -284,6 +311,161 @@ fn publish(db_path: &std::path::Path) -> Result<serde_json::Value, String> {
     }))
 }
 
+fn delay_spell(ms: u64) -> SpellGraph {
+    let mut spell = SpellGraph::new("Slow Agent");
+    let place =
+        |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position: [x, 0.0], config };
+    spell.nodes = vec![
+        place("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        place("wait", "time/delay", 280.0, json!({ "ms": ms })),
+        place("reply", "io/send_message", 560.0, serde_json::Value::Null),
+    ];
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    spell.wires = vec![
+        wire("w1", ("trigger", "out"), ("wait", "in")),
+        wire("w2", ("wait", "out"), ("reply", "in")),
+        wire("w3", ("trigger", "content"), ("reply", "content")),
+    ];
+    spell
+}
+
+fn toolbar_run_buttons(rt: &mut Runtime<StudioApp>, seconds: f64) -> serde_json::Value {
+    rt.frame(seconds);
+    json!({ "cancel": rt.find("cancel-run").is_some(), "run": rt.find("run-spell").is_some() })
+}
+
+fn elapsed_ms(since: Instant) -> u64 {
+    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn delay_started(app: &StudioApp) -> bool {
+    app.trace_events.iter().any(|event| matches!(event, magicklala_graph::TraceEvent::NodeStarted { node_id, .. } if node_id.0 == "wait"))
+}
+
+fn delay_status(app: &StudioApp) -> &'static str {
+    app.canvas.card(&NodeId::from("wait")).map_or("missing", |card| card.status.label())
+}
+
+fn slow_runtime(ms: u64, run_timeout: Duration) -> Runtime<StudioApp> {
+    let mut app = StudioApp::with_spell(delay_spell(ms), registry_specs());
+    app.run_timeout = run_timeout;
+    let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt
+}
+
+fn cancel_run(delay_ms: u64, deadline_ms: u64) -> Result<serde_json::Value, String> {
+    let mut clock = Clock(0.0);
+    let mut rt = slow_runtime(delay_ms, Duration::from_secs(600));
+    let begun = Instant::now();
+    click_at(&mut rt, "run-spell", clock.tick())?;
+    let start_ms = elapsed_ms(begun);
+    let running_after_start = rt.state.is_running();
+    let toolbar_while_running = toolbar_run_buttons(&mut rt, clock.tick());
+    rt.update(|app, _| {
+        app.wait_until(SETTLE, delay_started);
+    });
+    let live_events: Vec<&str> = rt.state.trace.iter().map(|line| line.kind).collect();
+    let delay_status_while_running = delay_status(&rt.state);
+    let cancel_begun = Instant::now();
+    click_at(&mut rt, "cancel-run", clock.tick())?;
+    let cancel_ms = elapsed_ms(cancel_begun);
+    let running_after_cancel = rt.state.is_running();
+    let background_stopped = rt.update_if(|app, _| app.wait_stopped(SETTLE)) || rt.state.background_tasks() == 0;
+    let run = json!({
+        "runningAfterStart": running_after_start,
+        "startMs": start_ms,
+        "toolbarWhileRunning": toolbar_while_running,
+        "liveEvents": live_events,
+        "delayStatusWhileRunning": delay_status_while_running,
+        "cancelMs": cancel_ms,
+        "runningAfterCancel": running_after_cancel,
+        "outcome": rt.state.last_run.as_ref().map(|report| report.outcome.label()),
+        "lastTrace": rt.state.trace.last().map(|line| line.kind),
+        "backgroundStopped": background_stopped && rt.state.background_tasks() == 0,
+        "totalMs": elapsed_ms(begun),
+        "toolbarAfterCancel": toolbar_run_buttons(&mut rt, clock.tick()),
+    });
+
+    let message = "are you still there";
+    let mut chat_clock = Clock(0.0);
+    let mut chat = slow_runtime(delay_ms, Duration::from_secs(600));
+    click_at(&mut chat, "tab-playground", chat_clock.tick())?;
+    let text = message.to_owned();
+    let send_begun = Instant::now();
+    chat.update(move |app, _| {
+        app.chat_input = rune::TextEdit::new(&text);
+        app.send_chat();
+    });
+    let send_ms = elapsed_ms(send_begun);
+    let running_after_send = chat.state.is_running();
+    let last_bubble = chat.state.chat.last().map(|bubble| json!({ "fromUser": bubble.from_user, "text": bubble.text }));
+    let input_cleared = chat.state.chat_input.text.is_empty();
+    chat.update(|app, _| {
+        app.wait_until(SETTLE, delay_started);
+    });
+    click_at(&mut chat, "cancel-run", chat_clock.tick())?;
+    let chat_report = json!({
+        "message": message,
+        "runningAfterSend": running_after_send,
+        "sendMs": send_ms,
+        "lastBubble": last_bubble,
+        "inputCleared": input_cleared,
+        "runNumber": chat.state.runs,
+        "replyAfterCancel": chat.state.chat.last().map(|bubble| json!({ "fromUser": bubble.from_user, "text": bubble.text })),
+    });
+
+    let mut timed = slow_runtime(delay_ms, Duration::from_millis(deadline_ms));
+    let timed_begun = Instant::now();
+    click(&mut timed, "run-spell")?;
+    settle(&mut timed)?;
+    let deadline = json!({
+        "timeoutMs": u64::try_from(timed.state.run_timeout.as_millis()).unwrap_or(u64::MAX),
+        "outcome": timed.state.last_run.as_ref().map(|report| report.outcome.label()),
+        "lastTrace": timed.state.trace.last().map(|line| line.kind),
+        "error": timed.state.last_run.as_ref().and_then(|report| report.error.clone()),
+        "running": timed.state.is_running(),
+        "totalMs": elapsed_ms(timed_begun),
+    });
+
+    let delay = rt.state.spell.nodes.iter().find(|node| node.kind == "time/delay").map(|node| json!({ "kind": node.kind, "ms": node.config["ms"] }));
+    Ok(json!({ "delayNode": delay, "run": run, "chat": chat_report, "deadline": deadline }))
+}
+
+fn publish_renamed(db_path: &Path, renamed: &str) -> Result<serde_json::Value, String> {
+    let config = StudioConfig { db_path: Some(db_path.to_path_buf()), ..StudioConfig::default() };
+    let mut rt = Runtime::new(StudioApp::open(&config).map_err(|error| error.to_string())?, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    let released = |rt: &Runtime<StudioApp>| -> Result<serde_json::Value, String> {
+        if let Some(error) = &rt.state.store_error {
+            return Err(format!("publish failed: {error}"));
+        }
+        let release = rt.state.last_published.as_ref().ok_or("publish created no release")?;
+        Ok(json!({ "version": release.version, "spellId": release.spell_id, "name": release.graph.name }))
+    };
+    click(&mut rt, "publish")?;
+    let first = released(&rt)?;
+    let name = renamed.to_owned();
+    rt.update(move |app, _| app.spell.name = name);
+    click(&mut rt, "publish")?;
+    let second = released(&rt)?;
+    drop(rt);
+    let mut reopened = Runtime::new(StudioApp::open(&config).map_err(|error| error.to_string())?, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    let reopened_report = json!({
+        "versions": reopened.state.releases.iter().map(|release| release.version).collect::<Vec<_>>(),
+        "spellName": reopened.state.spell.name,
+        "spellRecordId": reopened.state.spell_record_id(),
+    });
+    click(&mut reopened, "publish")?;
+    let third = released(&reopened)?;
+    Ok(json!({ "first": first, "second": second, "reopened": reopened_report, "third": third }))
+}
+
 fn palette() -> serde_json::Value {
     let specs = registry_specs();
     let accents: serde_json::Map<String, serde_json::Value> = PALETTE_CATEGORY_ORDER
@@ -296,11 +478,25 @@ fn palette() -> serde_json::Value {
     json!({ "categories": palette_categories(&specs), "order": PALETTE_CATEGORY_ORDER, "accents": accents })
 }
 
-fn inspector() -> serde_json::Value {
-    let rt = sized_runtime((960.0, 640.0), Theme::Dark);
-    let editor = rect(&rt, "prompt-editor").map(|[_, y, _, h]| y + h);
+fn inspector(size: (f32, f32)) -> Result<serde_json::Value, String> {
+    let rt = sized_runtime(size, Theme::Dark);
+    let [card_x, card_y, card_w, card_h] = rect(&rt, "prompt-editor").ok_or("prompt editor missing")?;
+    let [field_x, field_y, field_w, _] = rect(&rt, "prompt-field").ok_or("prompt field missing")?;
     let panel = rect(&rt, "inspector").map(|[_, y, _, h]| y + h);
-    json!({ "width": 960, "height": 640, "editorBottom": editor, "panelBottom": panel })
+    let selected = rt.state.canvas.selection.clone().ok_or("no node selected")?;
+    let prompt = rt.state.prompts.get(&selected).map(|edit| edit.text.clone()).ok_or("selected node has no prompt")?;
+    Ok(json!({
+        "width": size.0,
+        "height": size.1,
+        "editorBottom": card_y + card_h,
+        "panelBottom": panel,
+        "editorHeight": card_h,
+        "card": { "left": card_x, "right": card_x + card_w, "top": card_y, "bottom": card_y + card_h },
+        "field": { "left": field_x, "right": field_x + field_w, "top": field_y },
+        "promptLines": prompt.lines().count(),
+        "lineHeight": prompt_font().line_px(),
+        "padding": PROMPT_EDITOR_PADDING,
+    }))
 }
 
 fn probe(desktop: PathBuf, compact: PathBuf, db_path: PathBuf) -> Result<serde_json::Value, String> {
@@ -348,6 +544,7 @@ fn probe(desktop: PathBuf, compact: PathBuf, db_path: PathBuf) -> Result<serde_j
     }
 
     click(&mut rt, "run-spell")?;
+    settle(&mut rt)?;
     let run = run_report(&rt.state);
     let succeeded = rt.state.canvas.nodes.iter().filter(|card| card.status == ExecutionStatus::Succeeded).count();
     let active_wires = rt.state.canvas.wires.iter().filter(|wire| wire.active).count();
@@ -397,7 +594,8 @@ fn probe(desktop: PathBuf, compact: PathBuf, db_path: PathBuf) -> Result<serde_j
         "chat": chat,
         "publish": published,
         "palette": palette(),
-        "inspector": inspector(),
+        "inspector": inspector((960.0, 640.0))?,
+        "inspectorDesktop": inspector((1280.0, 800.0))?,
         "theme": { "before": theme_before, "after": theme_after },
         "toolbar": toolbar,
         "contextMenu": menu,
@@ -405,13 +603,27 @@ fn probe(desktop: PathBuf, compact: PathBuf, db_path: PathBuf) -> Result<serde_j
     }))
 }
 
+fn number(raw: Option<&String>, name: &str) -> Result<u64, String> {
+    raw.ok_or_else(|| format!("missing {name}"))?.parse().map_err(|error| format!("{name}: {error}"))
+}
+
+fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
+    match args.first().map(String::as_str) {
+        Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
+        Some("publish-renamed") => {
+            let db = args.get(1).ok_or("missing database path")?;
+            publish_renamed(Path::new(db), args.get(2).ok_or("missing new spell name")?)
+        }
+        _ => match args {
+            [desktop, compact, db_path] => probe(PathBuf::from(desktop), PathBuf::from(compact), PathBuf::from(db_path)),
+            _ => Err("usage: studio_probe <desktop.png> <compact.png> <studio.sqlite> | cancel-run <delay-ms> <deadline-ms> | publish-renamed <studio.sqlite> <name>".to_owned()),
+        },
+    }
+}
+
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1).map(PathBuf::from);
-    let (Some(desktop), Some(compact), Some(db_path)) = (args.next(), args.next(), args.next()) else {
-        eprintln!("usage: studio_probe <desktop.png> <compact.png> <studio.sqlite>");
-        return ExitCode::from(2);
-    };
-    match probe(desktop, compact, db_path) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match dispatch(&args) {
         Ok(report) => {
             println!("{report}");
             ExitCode::SUCCESS

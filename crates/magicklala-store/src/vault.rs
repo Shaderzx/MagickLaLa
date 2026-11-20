@@ -1,13 +1,13 @@
 use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use sha2::{Digest, Sha256};
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 
 use crate::StoreError;
 
 const NONCE_LEN: usize = 12;
 pub const MASTER_KEY_ENV: &str = "MAGICKLALA_MASTER_KEY";
+const WEAK_KEY: &str = "vault master key must be 32 bytes encoded as 64 hex characters or base64";
 
 pub trait CryptoVault: Send + Sync {
     fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, StoreError>;
@@ -30,11 +30,7 @@ impl AesGcmVault {
     }
 
     pub fn from_key_material(material: &str) -> Result<Self, StoreError> {
-        let material = material.trim();
-        if material.is_empty() {
-            return Err(StoreError::Invalid("master key is empty".to_owned()));
-        }
-        Ok(Self::new(&derive_key(material)))
+        decode_key(material.trim()).map(|key| Self::new(&key)).ok_or_else(|| StoreError::Invalid(WEAK_KEY.to_owned()))
     }
 
     pub fn from_env_or_key(fallback: Option<&str>) -> Result<Self, StoreError> {
@@ -48,9 +44,15 @@ impl AesGcmVault {
     }
 }
 
-fn derive_key(material: &str) -> [u8; 32] {
-    let decoded = [hex::decode(material).ok(), STANDARD.decode(material).ok(), URL_SAFE_NO_PAD.decode(material).ok()];
-    decoded.into_iter().flatten().find_map(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok()).unwrap_or_else(|| Sha256::digest(material.as_bytes()).into())
+fn decode_key(material: &str) -> Option<[u8; 32]> {
+    let decoded = [
+        hex::decode(material).ok(),
+        STANDARD.decode(material).ok(),
+        STANDARD_NO_PAD.decode(material).ok(),
+        URL_SAFE.decode(material).ok(),
+        URL_SAFE_NO_PAD.decode(material).ok(),
+    ];
+    decoded.into_iter().flatten().find_map(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
 }
 
 impl CryptoVault for AesGcmVault {
