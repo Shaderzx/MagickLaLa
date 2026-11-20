@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use magicklala_graph::{
-    CredentialResolver, EngineServices, EventEmitter, NodeCatalog, NodeError, RunId, RunTrigger, SpellEngine, SpellGraph, SpellId, SpellValidator,
-    SubgraphResolver, TraceEvent, Value,
+    CredentialResolver, EngineServices, EventEmitter, NodeCatalog, NodeContext, NodeError, NodeExecutor, NodeOutcome, NodeSpec, RunId, RunTrigger, SocketSpec,
+    SocketType, SpellEngine, SpellGraph, SpellId, SpellValidator, SubgraphResolver, TraceEvent, Value,
 };
-use magicklala_nodes::{HttpLlmGateway, InMemoryKnowledge, InMemoryMemory, default_registry};
+use magicklala_nodes::{HttpLlmGateway, InMemoryKnowledge, InMemoryMemory, NodeRegistry, default_registry};
 
 struct StdoutEmitter;
 
@@ -39,31 +39,101 @@ fn credentials_from_env() -> Result<Option<Arc<dyn CredentialResolver>>, String>
     Ok(Some(Arc::new(FileCredentials(secrets))))
 }
 
-struct FileSubgraphs(BTreeMap<SpellId, SpellGraph>);
+struct FileSubgraphs(BTreeMap<(SpellId, Option<u32>), SpellGraph>);
 
 impl SubgraphResolver for FileSubgraphs {
-    fn resolve(&self, spell_id: SpellId, _release_version: Option<u32>) -> Option<SpellGraph> {
-        self.0.get(&spell_id).cloned()
+    fn resolve(&self, spell_id: SpellId, release_version: Option<u32>) -> Option<SpellGraph> {
+        self.0.get(&(spell_id, release_version)).cloned()
     }
 }
 
-fn load_subgraphs(paths: &[String]) -> Result<Option<Arc<dyn SubgraphResolver>>, String> {
-    if paths.is_empty() {
+struct SubgraphFile {
+    release_version: Option<u32>,
+    path: String,
+}
+
+fn release_file(raw: &str) -> Result<SubgraphFile, String> {
+    let (version, path) = raw.split_once('=').ok_or("--subgraph-release needs <version>=<spell.json>")?;
+    let version =
+        version.parse::<u32>().ok().filter(|version| *version > 0).ok_or_else(|| format!("--subgraph-release version {version:?} is not a positive number"))?;
+    Ok(SubgraphFile { release_version: Some(version), path: path.to_owned() })
+}
+
+fn load_subgraphs(files: &[SubgraphFile]) -> Result<Option<Arc<dyn SubgraphResolver>>, String> {
+    if files.is_empty() {
         return Ok(None);
     }
     let mut graphs = BTreeMap::new();
-    for path in paths {
+    for SubgraphFile { release_version, path } in files {
         let source = std::fs::read_to_string(path).map_err(|error| format!("cannot read {path}: {error}"))?;
         let graph: SpellGraph = serde_json::from_str(&source).map_err(|error| format!("invalid subgraph {path}: {error}"))?;
-        graphs.insert(graph.id, graph);
+        graphs.insert((graph.id, *release_version), graph);
     }
     Ok(Some(Arc::new(FileSubgraphs(graphs))))
+}
+
+struct TallyProbe(NodeSpec);
+
+impl TallyProbe {
+    fn new() -> Self {
+        Self(NodeSpec {
+            kind: "probe/tally".to_owned(),
+            title: "Tally Probe".to_owned(),
+            category: "probe".to_owned(),
+            description: "Counts its own runs in the hits variable and announces it before joining inputs a and b".to_owned(),
+            inputs: vec![SocketSpec::input("a", SocketType::String), SocketSpec::input("b", SocketType::String)],
+            outputs: vec![SocketSpec::output("text", SocketType::String)],
+            config: Vec::new(),
+            is_trigger: false,
+        })
+    }
+}
+
+fn text_of(value: Option<Value>) -> String {
+    match value {
+        Some(Value::String(text)) => text,
+        Some(other) => other.to_json().to_string(),
+        None => String::new(),
+    }
+}
+
+#[async_trait]
+impl NodeExecutor for TallyProbe {
+    fn spec(&self) -> &NodeSpec {
+        &self.0
+    }
+
+    async fn execute(&self, ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeError> {
+        let hits = match ctx.variable("hits") {
+            Some(Value::Int(previous)) => previous + 1,
+            _ => 1,
+        };
+        ctx.set_variable("hits", Value::Int(hits))?;
+        ctx.events().emit(TraceEvent::StreamChunk {
+            run_id: ctx.run_id(),
+            node_id: ctx.node().id.clone(),
+            delta: format!("entered {hits}"),
+            subgraph_path: Vec::new(),
+        });
+        let a = text_of(ctx.input("a").await?);
+        let b = text_of(ctx.input("b").await?);
+        Ok(NodeOutcome::default().with_output("text", Value::String(format!("{a}+{b}"))))
+    }
+}
+
+fn registry(probe_nodes: bool) -> NodeRegistry {
+    let mut registry = default_registry();
+    if probe_nodes {
+        registry.register(Arc::new(TallyProbe::new()));
+    }
+    registry
 }
 
 struct Arguments {
     spell: String,
     step_limit: Option<u64>,
-    subgraphs: Vec<String>,
+    subgraphs: Vec<SubgraphFile>,
+    probe_nodes: bool,
     payload: serde_json::Value,
     trigger: Option<String>,
     run_id: Option<RunId>,
@@ -78,6 +148,7 @@ fn parse_arguments() -> Result<Arguments, String> {
     let mut validate_only = false;
     let mut step_limit = None;
     let mut subgraphs = Vec::new();
+    let mut probe_nodes = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -95,21 +166,23 @@ fn parse_arguments() -> Result<Arguments, String> {
                 let raw = args.next().ok_or("--step-limit needs a number")?;
                 step_limit = Some(raw.parse::<u64>().map_err(|error| format!("--step-limit is not a number: {error}"))?);
             }
-            "--subgraph" => subgraphs.push(args.next().ok_or("--subgraph needs a spell file")?),
+            "--subgraph" => subgraphs.push(SubgraphFile { release_version: None, path: args.next().ok_or("--subgraph needs a spell file")? }),
+            "--subgraph-release" => subgraphs.push(release_file(&args.next().ok_or("--subgraph-release needs <version>=<spell.json>")?)?),
+            "--probe-nodes" => probe_nodes = true,
             other if spell.is_none() => spell = Some(other.to_owned()),
             other => return Err(format!("unexpected argument {other}")),
         }
     }
     let spell = spell.ok_or(
-        "usage: run_spell <spell.json> [--payload <json>] [--trigger <node>] [--run-id <uuid>] [--step-limit <n>] [--subgraph <spell.json>]... [--validate]",
+        "usage: run_spell <spell.json> [--payload <json>] [--trigger <node>] [--run-id <uuid>] [--step-limit <n>] [--subgraph <spell.json>]... [--subgraph-release <version>=<spell.json>]... [--probe-nodes] [--validate]",
     )?;
-    Ok(Arguments { spell, step_limit, subgraphs, payload, trigger, run_id, validate_only })
+    Ok(Arguments { spell, step_limit, subgraphs, probe_nodes, payload, trigger, run_id, validate_only })
 }
 
 async fn run(arguments: Arguments) -> Result<ExitCode, String> {
     let source = std::fs::read_to_string(&arguments.spell).map_err(|error| format!("cannot read {}: {error}", arguments.spell))?;
     let graph: SpellGraph = serde_json::from_str(&source).map_err(|error| format!("invalid spell: {error}"))?;
-    let registry = Arc::new(default_registry());
+    let registry = Arc::new(registry(arguments.probe_nodes));
     if arguments.validate_only {
         let errors = SpellValidator::new(registry.specs()).validate(&graph).err().unwrap_or_default();
         println!("{}", serde_json::json!({ "valid": errors.is_empty(), "errors": errors }));

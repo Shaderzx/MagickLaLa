@@ -25,14 +25,60 @@ impl Default for RunId {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum TraceEvent {
-    RunStarted { run_id: RunId, spell_id: SpellId, at: DateTime<Utc> },
-    NodeStarted { run_id: RunId, node_id: NodeId, at: DateTime<Utc> },
-    NodeFinished { run_id: RunId, node_id: NodeId, at: DateTime<Utc>, duration_ms: u64 },
-    NodeFailed { run_id: RunId, node_id: NodeId, at: DateTime<Utc>, error: String },
-    WireActivated { run_id: RunId, wire_id: WireId, at: DateTime<Utc>, value: Option<Value> },
-    StreamChunk { run_id: RunId, node_id: NodeId, delta: String },
-    VariableSet { run_id: RunId, name: String, value: Value },
-    RunFinished { run_id: RunId, summary: RunSummary },
+    RunStarted {
+        run_id: RunId,
+        spell_id: SpellId,
+        at: DateTime<Utc>,
+    },
+    NodeStarted {
+        run_id: RunId,
+        node_id: NodeId,
+        at: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        subgraph_path: Vec<NodeId>,
+    },
+    NodeFinished {
+        run_id: RunId,
+        node_id: NodeId,
+        at: DateTime<Utc>,
+        duration_ms: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        subgraph_path: Vec<NodeId>,
+    },
+    NodeFailed {
+        run_id: RunId,
+        node_id: NodeId,
+        at: DateTime<Utc>,
+        error: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        subgraph_path: Vec<NodeId>,
+    },
+    WireActivated {
+        run_id: RunId,
+        wire_id: WireId,
+        at: DateTime<Utc>,
+        value: Option<Value>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        subgraph_path: Vec<NodeId>,
+    },
+    StreamChunk {
+        run_id: RunId,
+        node_id: NodeId,
+        delta: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        subgraph_path: Vec<NodeId>,
+    },
+    VariableSet {
+        run_id: RunId,
+        name: String,
+        value: Value,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        subgraph_path: Vec<NodeId>,
+    },
+    RunFinished {
+        run_id: RunId,
+        summary: RunSummary,
+    },
 }
 
 impl TraceEvent {
@@ -46,6 +92,30 @@ impl TraceEvent {
             | TraceEvent::StreamChunk { run_id, .. }
             | TraceEvent::VariableSet { run_id, .. }
             | TraceEvent::RunFinished { run_id, .. } => *run_id,
+        }
+    }
+
+    pub fn subgraph_path(&self) -> &[NodeId] {
+        match self {
+            TraceEvent::NodeStarted { subgraph_path, .. }
+            | TraceEvent::NodeFinished { subgraph_path, .. }
+            | TraceEvent::NodeFailed { subgraph_path, .. }
+            | TraceEvent::WireActivated { subgraph_path, .. }
+            | TraceEvent::StreamChunk { subgraph_path, .. }
+            | TraceEvent::VariableSet { subgraph_path, .. } => subgraph_path,
+            TraceEvent::RunStarted { .. } | TraceEvent::RunFinished { .. } => &[],
+        }
+    }
+
+    pub fn subgraph_path_mut(&mut self) -> Option<&mut Vec<NodeId>> {
+        match self {
+            TraceEvent::NodeStarted { subgraph_path, .. }
+            | TraceEvent::NodeFinished { subgraph_path, .. }
+            | TraceEvent::NodeFailed { subgraph_path, .. }
+            | TraceEvent::WireActivated { subgraph_path, .. }
+            | TraceEvent::StreamChunk { subgraph_path, .. }
+            | TraceEvent::VariableSet { subgraph_path, .. } => Some(subgraph_path),
+            TraceEvent::RunStarted { .. } | TraceEvent::RunFinished { .. } => None,
         }
     }
 }

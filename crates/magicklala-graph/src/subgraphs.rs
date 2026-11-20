@@ -9,16 +9,15 @@ pub type SubgraphKey = (SpellId, Option<u32>);
 pub type ResolvedSubgraphs = HashMap<SubgraphKey, Arc<SpellGraph>>;
 
 struct Frame {
-    key: Option<SubgraphKey>,
-    spell: SpellId,
+    key: SubgraphKey,
     references: Vec<SubgraphRef>,
     cursor: usize,
     height: usize,
 }
 
 impl Frame {
-    fn new(key: Option<SubgraphKey>, graph: &SpellGraph) -> Self {
-        Self { key, spell: graph.id, references: graph.subgraphs.clone(), cursor: 0, height: 0 }
+    fn new(key: SubgraphKey, graph: &SpellGraph) -> Self {
+        Self { key, references: graph.subgraphs.clone(), cursor: 0, height: 0 }
     }
 
     fn reach(&mut self, child_height: usize) {
@@ -26,23 +25,36 @@ impl Frame {
     }
 }
 
-fn key_of(reference: &SubgraphRef) -> SubgraphKey {
+fn lookup_key(reference: &SubgraphRef) -> SubgraphKey {
     (reference.spell_id, reference.release_version)
+}
+
+fn snapshot_name((spell, version): SubgraphKey) -> String {
+    match version {
+        Some(version) => format!("{}@{version}", spell.0),
+        None => spell.0.to_string(),
+    }
 }
 
 fn too_deep(reference: &SubgraphRef, levels: usize) -> SpellError {
     SpellError::Internal(format!("subgraph nesting through node {:?} reaches {levels} levels and exceeds {MAX_SUBGRAPH_DEPTH} levels", reference.node_id.0))
 }
 
-fn cycle_through(frames: &[Frame], reference: &SubgraphRef) -> Option<SpellError> {
-    let start = frames.iter().position(|frame| frame.spell == reference.spell_id)?;
-    let chain: Vec<String> =
-        frames[start..].iter().map(|frame| frame.spell).chain(std::iter::once(reference.spell_id)).map(|spell| spell.0.to_string()).collect();
+fn cycle_through(frames: &[Frame], snapshot: SubgraphKey, reference: &SubgraphRef) -> Option<SpellError> {
+    let start = frames.iter().position(|frame| frame.key == snapshot)?;
+    let chain: Vec<String> = frames[start..].iter().map(|frame| frame.key).chain(std::iter::once(snapshot)).map(snapshot_name).collect();
     Some(SpellError::Internal(format!("subgraph cycle through node {:?}: {}", reference.node_id.0, chain.join(" -> "))))
 }
 
 fn unresolved(reference: &SubgraphRef) -> SpellError {
     SpellError::Internal(format!("subgraph {:?} for node {:?} cannot be resolved", reference.spell_id, reference.node_id))
+}
+
+fn resolve_child(resolved: &ResolvedSubgraphs, resolver: &dyn SubgraphResolver, reference: &SubgraphRef) -> Result<Arc<SpellGraph>, SpellError> {
+    if let Some(child) = resolved.get(&lookup_key(reference)) {
+        return Ok(Arc::clone(child));
+    }
+    resolver.resolve(reference.spell_id, reference.release_version).map(Arc::new).ok_or_else(|| unresolved(reference))
 }
 
 fn walk_subgraphs(
@@ -52,7 +64,7 @@ fn walk_subgraphs(
 ) -> Result<ResolvedSubgraphs, SpellError> {
     let mut resolved = ResolvedSubgraphs::new();
     let mut heights: HashMap<SubgraphKey, usize> = HashMap::new();
-    let mut frames = vec![Frame::new(None, root)];
+    let mut frames = vec![Frame::new((root.id, None), root)];
     loop {
         let depth = frames.len().saturating_sub(1);
         let Some(frame) = frames.last_mut() else {
@@ -64,19 +76,18 @@ fn walk_subgraphs(
             let Some(done) = frames.pop() else {
                 return Ok(resolved);
             };
-            if let Some(key) = done.key {
-                heights.insert(key, done.height);
-            }
+            heights.insert(done.key, done.height);
             if let Some(parent) = frames.last_mut() {
                 parent.reach(done.height);
             }
             continue;
         };
-        if let Some(cycle) = cycle_through(&frames, &reference) {
+        let child = resolve_child(&resolved, resolver, &reference)?;
+        let snapshot = (child.id, reference.release_version);
+        if let Some(cycle) = cycle_through(&frames, snapshot, &reference) {
             return Err(cycle);
         }
-        let key = key_of(&reference);
-        if let Some(height) = heights.get(&key).copied() {
+        if let Some(height) = heights.get(&snapshot).copied() {
             let levels = depth + 1 + height;
             if levels > MAX_SUBGRAPH_DEPTH {
                 return Err(too_deep(&reference, levels));
@@ -84,15 +95,15 @@ fn walk_subgraphs(
             if let Some(frame) = frames.last_mut() {
                 frame.reach(height);
             }
+            resolved.entry(lookup_key(&reference)).or_insert(child);
             continue;
         }
         if depth + 1 > MAX_SUBGRAPH_DEPTH {
             return Err(too_deep(&reference, depth + 1));
         }
-        let child = resolver.resolve(reference.spell_id, reference.release_version).ok_or_else(|| unresolved(&reference))?;
         check(&child)?;
-        frames.push(Frame::new(Some(key), &child));
-        resolved.insert(key, Arc::new(child));
+        frames.push(Frame::new(snapshot, &child));
+        resolved.insert(lookup_key(&reference), child);
     }
 }
 

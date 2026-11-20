@@ -611,11 +611,11 @@ fn studio_node(id: &str, kind: &str, x: f32, config: serde_json::Value) -> NodeI
     NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position: [x, 0.0], config }
 }
 
-fn child_spell() -> SpellGraph {
+fn child_spell(template: &str) -> SpellGraph {
     let mut spell = SpellGraph::new("Child Agent");
     spell.nodes = vec![
         studio_node("child_start", "event/on_start", 0.0, serde_json::Value::Null),
-        studio_node("child_words", "text/template", 280.0, json!({ "template": "child saw {{topic}}" })),
+        studio_node("child_words", "text/template", 280.0, json!({ "template": template })),
         studio_node("child_send", "io/send_message", 560.0, serde_json::Value::Null),
     ];
     spell.wires = vec![
@@ -677,9 +677,46 @@ fn type_spell_id(rt: &mut Runtime<StudioApp>, call: &NodeId, spell_id: &str) -> 
     if held == spell_id && rt.find("prompt-field").is_some() { Ok(()) } else { Err(format!("inspector field holds {held:?} instead of {spell_id:?}")) }
 }
 
+fn type_release_version(rt: &mut Runtime<StudioApp>, call: &NodeId, version: &str) -> Result<(), String> {
+    let (selected, typed) = (call.clone(), version.to_owned());
+    rt.update(move |app, _| {
+        app.canvas.select(Some(selected.clone()));
+        app.versions.insert(selected.clone(), rune::TextEdit::new(&typed));
+    });
+    rt.frame(0.0);
+    let held = rt.state.versions.get(call).map(|edit| edit.text.clone()).unwrap_or_default();
+    if held == version && rt.find("release-version-field").is_some() {
+        Ok(())
+    } else {
+        Err(format!("release version field holds {held:?} instead of {version:?}"))
+    }
+}
+
+fn caption_above(rt: &Runtime<StudioApp>, key: &str) -> Option<String> {
+    let [_, field_top, _, _] = rect(rt, key)?;
+    let [panel_left, _, panel_width, _] = rect(rt, "inspector")?;
+    rt.elements()
+        .into_iter()
+        .filter(|element| element.rect[0] >= panel_left && element.rect[0] < panel_left + panel_width && element.rect[1] + element.rect[3] <= field_top + 0.5)
+        .filter_map(|element| element.text.map(|text| (element.rect[1], text)))
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, text)| text)
+}
+
+fn run_once(rt: &mut Runtime<StudioApp>) -> Result<serde_json::Value, String> {
+    click(rt, "run-spell")?;
+    settle(rt)?;
+    Ok(run_report(&rt.state))
+}
+
 fn subgraph(db_path: &Path) -> Result<serde_json::Value, String> {
-    let child = child_spell();
-    StudioStore::open(Some(db_path)).and_then(|mut store| store.publish(&child)).map_err(|error| error.to_string())?;
+    let mut child = child_spell("v1 saw {{topic}}");
+    let mut child_store = StudioStore::open(Some(db_path)).map_err(|error| error.to_string())?;
+    child_store.publish(&child).map_err(|error| error.to_string())?;
+    if let Some(words) = child.nodes.iter_mut().find(|node| node.id.0 == "child_words") {
+        words.config = json!({ "template": "draft saw {{topic}}" });
+    }
+    child_store.save_draft(&child).map_err(|error| error.to_string())?;
     let mut app = StudioApp::with_spell(parent_spell(), registry_specs());
     app.store = Some(StudioStore::open(Some(db_path)).map_err(|error| error.to_string())?);
     let content = app.run_payload["content"].as_str().unwrap_or_default().to_owned();
@@ -697,7 +734,13 @@ fn subgraph(db_path: &Path) -> Result<serde_json::Value, String> {
     let selected = call.clone();
     rt.update(move |app, _| app.canvas.select(Some(selected)));
     rt.frame(0.0);
-    let placed = json!({ "kind": "flow/subgraph", "editor": rt.find("prompt-field").is_some(), "caption": editor_caption(&rt) });
+    let placed = json!({
+        "kind": "flow/subgraph",
+        "editor": rt.find("prompt-field").is_some(),
+        "caption": editor_caption(&rt),
+        "versionField": rt.find("release-version-field").is_some(),
+        "versionCaption": caption_above(&rt, "release-version-field"),
+    });
     let child_id = child.id.0.to_string();
     type_spell_id(&mut rt, &call, &child_id)?;
     let call_name = call.0.clone();
@@ -710,9 +753,15 @@ fn subgraph(db_path: &Path) -> Result<serde_json::Value, String> {
     connect(&mut rt, (&call_name, "result"), ("words", "result"))?;
     let mut pointed = validation_of(&mut rt)?;
     pointed["config"] = rt.state.spell.node(&call).map(|node| node.config.clone()).unwrap_or_default();
-    click(&mut rt, "run-spell")?;
-    settle(&mut rt)?;
-    let run = run_report(&rt.state);
+    let run = run_once(&mut rt)?;
+    type_release_version(&mut rt, &call, "1")?;
+    let mut pinned = validation_of(&mut rt)?;
+    pinned["config"] = rt.state.spell.node(&call).map(|node| node.config.clone()).unwrap_or_default();
+    pinned["run"] = run_once(&mut rt)?;
+    type_release_version(&mut rt, &call, "zero")?;
+    let bad_version = validation_of(&mut rt)?;
+    type_release_version(&mut rt, &call, "")?;
+    let unpinned = validation_of(&mut rt)?;
     let missing_id = SpellGraph::new("never published").id.0.to_string();
     type_spell_id(&mut rt, &call, &missing_id)?;
     let mut missing = validation_of(&mut rt)?;
@@ -732,9 +781,57 @@ fn subgraph(db_path: &Path) -> Result<serde_json::Value, String> {
         "placed": placed,
         "pointed": pointed,
         "run": run,
+        "pinned": pinned,
+        "badVersion": bad_version,
+        "unpinned": unpinned,
         "missing": missing,
         "deleted": deleted,
     }))
+}
+
+fn trace_entry(event: &magicklala_graph::TraceEvent) -> Option<serde_json::Value> {
+    use magicklala_graph::TraceEvent;
+    let (kind, node) = match event {
+        TraceEvent::NodeStarted { node_id, .. } => ("NodeStarted", node_id),
+        TraceEvent::NodeFinished { node_id, .. } => ("NodeFinished", node_id),
+        TraceEvent::NodeFailed { node_id, .. } => ("NodeFailed", node_id),
+        _ => return None,
+    };
+    let path: Vec<&str> = event.subgraph_path().iter().map(|step| step.0.as_str()).collect();
+    Some(json!({ "kind": kind, "path": path, "node": node.0 }))
+}
+
+fn subgraph_collision(db_path: &Path) -> Result<serde_json::Value, String> {
+    let child_reply = "child reply";
+    let mut child = SpellGraph::new("Collision Child");
+    child.nodes = vec![
+        studio_node("start", "event/on_start", 0.0, serde_json::Value::Null),
+        studio_node("send", "io/send_message", 280.0, json!({ "content": child_reply })),
+    ];
+    child.wires = vec![studio_wire("w_flow", ("start", "out"), ("send", "in"))];
+    StudioStore::open(Some(db_path)).and_then(|mut store| store.publish(&child)).map_err(|error| error.to_string())?;
+    let mut parent = SpellGraph::new("Collision Parent");
+    parent.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("gate", "flow/branch", 280.0, json!({ "condition": true })),
+        studio_node("call", "flow/subgraph", 560.0, json!({ "spell_id": child.id.0.to_string() })),
+        studio_node("call/send", "io/send_message", 840.0, json!({ "content": "root node on the branch not taken" })),
+    ];
+    parent.wires = vec![
+        studio_wire("w_gate", ("trigger", "out"), ("gate", "in")),
+        studio_wire("w_true", ("gate", "true"), ("call", "in")),
+        studio_wire("w_false", ("gate", "false"), ("call/send", "in")),
+    ];
+    parent.subgraphs = vec![magicklala_graph::SubgraphRef { node_id: NodeId::from("call"), spell_id: child.id, release_version: None }];
+    let mut app = StudioApp::with_spell(parent, registry_specs());
+    app.store = Some(StudioStore::open(Some(db_path)).map_err(|error| error.to_string())?);
+    let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let run = run_once(&mut rt)?;
+    let statuses: serde_json::Map<String, serde_json::Value> =
+        rt.state.canvas.nodes.iter().map(|card| (card.id.0.clone(), json!(format!("{:?}", card.status)))).collect();
+    let trace: Vec<serde_json::Value> = rt.state.trace_events.iter().filter_map(trace_entry).collect();
+    Ok(json!({ "childReply": child_reply, "run": run, "statuses": statuses, "trace": trace }))
 }
 
 fn number(raw: Option<&String>, name: &str) -> Result<u64, String> {
@@ -745,13 +842,14 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("subgraph-collision") => subgraph_collision(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("publish-renamed") => {
             let db = args.get(1).ok_or("missing database path")?;
             publish_renamed(Path::new(db), args.get(2).ok_or("missing new spell name")?)
         }
         _ => match args {
             [desktop, compact, db_path] => probe(PathBuf::from(desktop), PathBuf::from(compact), PathBuf::from(db_path)),
-            _ => Err("usage: studio_probe <desktop.png> <compact.png> <studio.sqlite> | cancel-run <delay-ms> <deadline-ms> | publish-renamed <studio.sqlite> <name> | subgraph <studio.sqlite>".to_owned()),
+            _ => Err("usage: studio_probe <desktop.png> <compact.png> <studio.sqlite> | cancel-run <delay-ms> <deadline-ms> | publish-renamed <studio.sqlite> <name> | subgraph <studio.sqlite> | subgraph-collision <studio.sqlite>".to_owned()),
         },
     }
 }

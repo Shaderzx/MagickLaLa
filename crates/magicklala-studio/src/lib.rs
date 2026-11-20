@@ -147,6 +147,18 @@ impl StudioStore {
         Ok(release)
     }
 
+    pub fn save_draft(&mut self, spell: &SpellGraph) -> Result<SpellRecord, StudioError> {
+        let id = match self.spell_record_id {
+            Some(id) => id,
+            None => self.resolve_spell_record(spell)?,
+        };
+        let repository = self.repository.clone();
+        let graph = spell.clone();
+        let record = block(move || async move { repository.save_spell_graph(id, graph).await })?.map_err(|error| StudioError::Store(error.to_string()))?;
+        self.spell_record_id = Some(record.id);
+        Ok(record)
+    }
+
     pub fn latest_release(&self) -> Result<Option<(SpellGraph, Vec<SpellRelease>)>, StudioError> {
         let repository = self.repository.clone();
         block(move || async move {
@@ -194,11 +206,9 @@ fn subgraph_keys(graph: &SpellGraph) -> impl Iterator<Item = SubgraphKey> + '_ {
 }
 
 async fn released_graph(repository: &SqliteStore, record: &SpellRecord, version: Option<u32>) -> Result<Option<SpellGraph>, magicklala_store::StoreError> {
-    let mut releases = repository.list_releases(record.id).await?;
-    releases.sort_by_key(|release| release.version);
     Ok(match version {
-        Some(version) => releases.into_iter().find(|release| release.version == version).map(|release| release.graph),
-        None => Some(releases.pop().map_or_else(|| record.graph.clone(), |release| release.graph)),
+        None => Some(record.graph.clone()),
+        Some(version) => repository.list_releases(record.id).await?.into_iter().find(|release| release.version == version).map(|release| release.graph),
     })
 }
 
@@ -239,6 +249,30 @@ impl SubgraphResolver for StudioSubgraphResolver {
     }
 }
 
+pub fn parse_release_version(raw: &str) -> Result<Option<u32>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed.parse::<u32>().ok().filter(|version| *version > 0).map(Some).ok_or_else(|| format!("release version {trimmed:?} must be a positive whole number"))
+}
+
+fn configured_release_version(node: &NodeInstance) -> Result<Option<u32>, String> {
+    match node.config.get(SUBGRAPH_VERSION_FIELD) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(raw)) => parse_release_version(raw),
+        Some(other) => parse_release_version(&other.to_string()),
+    }
+}
+
+fn release_version_text(config: &serde_json::Value, kept: Option<&SubgraphRef>) -> String {
+    match config.get(SUBGRAPH_VERSION_FIELD) {
+        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(serde_json::Value::Null) | None => kept.and_then(|reference| reference.release_version).map(|version| version.to_string()).unwrap_or_default(),
+        Some(other) => other.to_string(),
+    }
+}
+
 fn subgraph_target(node: &NodeInstance, previous: &[SubgraphRef]) -> Option<SubgraphRef> {
     let kept = previous.iter().find(|reference| reference.node_id == node.id);
     let configured = node.config.get(SUBGRAPH_SPELL_FIELD).and_then(serde_json::Value::as_str).map(str::trim).filter(|text| !text.is_empty());
@@ -246,9 +280,7 @@ fn subgraph_target(node: &NodeInstance, previous: &[SubgraphRef]) -> Option<Subg
         return kept.cloned();
     };
     let spell_id: SpellId = serde_json::from_value(serde_json::Value::String(configured.to_owned())).ok()?;
-    let configured_version = node.config.get(SUBGRAPH_VERSION_FIELD).and_then(serde_json::Value::as_u64).and_then(|version| u32::try_from(version).ok());
-    let release_version =
-        configured_version.or_else(|| kept.filter(|reference| reference.spell_id == spell_id).and_then(|reference| reference.release_version));
+    let release_version = configured_release_version(node).ok()?;
     Some(SubgraphRef { node_id: node.id.clone(), spell_id, release_version })
 }
 
@@ -334,6 +366,27 @@ impl RunReport {
         let error = summary.error.clone().or(failure).filter(|_| summary.status != RunStatus::Succeeded);
         Self { outcome: RunOutcome::Finished(summary.status), replies, error }
     }
+}
+
+fn with_release_version(mut config: serde_json::Value, text: &str) -> serde_json::Value {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        if let Some(map) = config.as_object_mut() {
+            map.remove(SUBGRAPH_VERSION_FIELD);
+        }
+        return config;
+    }
+    let value = match parse_release_version(trimmed) {
+        Ok(Some(version)) => json!(version),
+        _ => serde_json::Value::String(trimmed.to_owned()),
+    };
+    if !config.is_object() {
+        config = json!({});
+    }
+    if let Some(map) = config.as_object_mut() {
+        map.insert(SUBGRAPH_VERSION_FIELD.to_owned(), value);
+    }
+    config
 }
 
 pub fn editable_field(kind: &str) -> Option<&'static str> {
@@ -432,6 +485,7 @@ pub struct StudioApp {
     pub pending_trace: VecDeque<TraceEvent>,
     pub runs: u32,
     pub prompts: BTreeMap<NodeId, TextEdit>,
+    pub versions: BTreeMap<NodeId, TextEdit>,
     pub chat: Vec<ChatMessage>,
     pub chat_input: TextEdit,
     pub releases: Vec<Release>,
@@ -501,6 +555,7 @@ impl StudioApp {
             pending_trace: VecDeque::new(),
             runs: 0,
             prompts: BTreeMap::new(),
+            versions: BTreeMap::new(),
             chat: vec![ChatMessage { from_user: false, text: "Hi! Send a message to run this spell.".to_owned() }],
             chat_input: TextEdit::new(""),
             releases: Vec::new(),
@@ -557,10 +612,22 @@ impl StudioApp {
             };
             self.prompts.insert(id.clone(), TextEdit::new(text));
         }
+        if kind == SUBGRAPH_KIND {
+            let kept = self.spell.subgraphs.iter().find(|reference| reference.node_id == id);
+            self.versions.insert(id.clone(), TextEdit::new(release_version_text(&config, kept)));
+        }
         self.configs.insert(id, config);
     }
 
     pub fn node_config(&self, id: &NodeId, kind: &str) -> serde_json::Value {
+        let config = self.prompted_config(id, kind);
+        match self.versions.get(id).filter(|_| kind == SUBGRAPH_KIND) {
+            Some(edit) => with_release_version(config, &edit.text),
+            None => config,
+        }
+    }
+
+    fn prompted_config(&self, id: &NodeId, kind: &str) -> serde_json::Value {
         let mut config = self.configs.get(id).cloned().unwrap_or(serde_json::Value::Null);
         let (Some(field), Some(edit)) = (editable_field(kind), self.prompts.get(id)) else { return config };
         let present = config.get(field).is_some();
@@ -610,6 +677,16 @@ impl StudioApp {
     }
 
     fn check_spell(&self) -> Result<(), Vec<String>> {
+        let version_errors: Vec<String> = self
+            .spell
+            .nodes
+            .iter()
+            .filter(|node| node.kind == SUBGRAPH_KIND)
+            .filter_map(|node| configured_release_version(node).err().map(|error| format!("node {:?}: {error}", node.id.0)))
+            .collect();
+        if !version_errors.is_empty() {
+            return Err(version_errors);
+        }
         let validator = SpellValidator::new(self.specs.clone());
         validator.validate(&self.spell).map_err(|errors| errors.iter().map(ToString::to_string).collect::<Vec<_>>())?;
         if self.spell.subgraphs.is_empty() {
@@ -845,6 +922,7 @@ impl StudioApp {
         self.close_context_menu();
         if let Some(removed) = self.canvas.remove_selected_node() {
             self.prompts.remove(&removed.id);
+            self.versions.remove(&removed.id);
             self.configs.remove(&removed.id);
             self.validation = ValidationState::Unchecked;
             self.sync_spell();
@@ -1344,10 +1422,33 @@ fn inspector_body(app: &StudioApp, t: &Tones) -> El {
         .child(label("SOCKETS", 10.5, 700.0, t.muted))
         .child(sockets)
         .pb(14.0);
-    match (field, editor) {
+    let column = match (field, editor) {
         (Some(field), Some(editor)) => column.child(label(editor_caption(field), 10.5, 700.0, t.muted)).child(editor),
         _ => column,
+    };
+    match release_version_editor(app, card, t) {
+        Some(version) => column.child(label("RELEASE VERSION", 10.5, 700.0, t.muted)).child(version),
+        None => column,
     }
+}
+
+fn release_version_editor(app: &StudioApp, card: &magicklala_canvas::NodeCardModel, t: &Tones) -> Option<El> {
+    let edit = app.versions.get(&card.id).filter(|_| card.kind == SUBGRAPH_KIND)?;
+    let id = card.id.clone();
+    Some(
+        text_input(edit, prompt_font())
+            .single_line()
+            .key("release-version-field")
+            .label(format!("{} release version, blank runs the saved draft", card.title))
+            .w_full()
+            .h(32.0)
+            .px(10.0)
+            .radius(8.0)
+            .fill(t.background)
+            .border(1.0, t.line)
+            .color(t.ink)
+            .on_edit(move |app: &mut StudioApp| app.versions.entry(id.clone()).or_insert_with(|| TextEdit::new(""))),
+    )
 }
 
 pub fn prompt_font() -> TextStyle {
@@ -1440,13 +1541,20 @@ fn trace_strip(app: &StudioApp, t: &Tones) -> El {
 }
 
 fn trace_line(event: &TraceEvent, at_ms: u64, canvas: &CanvasState) -> TraceLine {
-    let title = |id: &NodeId| canvas.card(id).map_or_else(|| id.0.clone(), |card| card.title.clone());
+    let path = event.subgraph_path();
+    let title = |id: &NodeId| {
+        if path.is_empty() {
+            canvas.card(id).map_or_else(|| id.0.clone(), |card| card.title.clone())
+        } else {
+            path.iter().chain(std::iter::once(id)).map(|step| step.0.as_str()).collect::<Vec<_>>().join(" › ")
+        }
+    };
     let (kind, detail, status) = match event {
         TraceEvent::RunStarted { .. } => ("RunStarted", String::new(), ExecutionStatus::Running),
         TraceEvent::NodeStarted { node_id, .. } => ("NodeStarted", title(node_id), ExecutionStatus::Running),
         TraceEvent::NodeFinished { node_id, duration_ms, .. } => ("NodeFinished", format!("{} {duration_ms}ms", title(node_id)), ExecutionStatus::Succeeded),
         TraceEvent::NodeFailed { node_id, error, .. } => ("NodeFailed", format!("{} {error}", title(node_id)), ExecutionStatus::Failed),
-        TraceEvent::WireActivated { wire_id, .. } => ("WireActivated", wire_id.0.clone(), ExecutionStatus::Succeeded),
+        TraceEvent::WireActivated { wire_id, .. } => ("WireActivated", title(&NodeId::from(wire_id.0.as_str())), ExecutionStatus::Succeeded),
         TraceEvent::StreamChunk { node_id, .. } => ("StreamChunk", title(node_id), ExecutionStatus::Running),
         TraceEvent::VariableSet { name, .. } => ("VariableSet", name.clone(), ExecutionStatus::Succeeded),
         TraceEvent::RunFinished { summary, .. } => (

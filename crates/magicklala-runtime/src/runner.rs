@@ -135,12 +135,12 @@ impl ReleaseRunner for TemplateReplyRunner {
         let mut outputs = BTreeMap::new();
         for (node_id, template) in Self::reply_nodes(&release.graph) {
             let node_started = Utc::now();
-            events.emit(TraceEvent::NodeStarted { run_id, node_id: node_id.clone(), at: node_started });
+            events.emit(TraceEvent::NodeStarted { run_id, node_id: node_id.clone(), at: node_started, subgraph_path: Vec::new() });
             let reply = Self::render(template, event);
             outputs.insert(node_id.0.clone(), Value::String(reply.clone()));
             actions.push(reply_action(event, reply));
             let duration_ms = u64::try_from((Utc::now() - node_started).num_milliseconds().max(0)).unwrap_or_default();
-            events.emit(TraceEvent::NodeFinished { run_id, node_id: node_id.clone(), at: Utc::now(), duration_ms });
+            events.emit(TraceEvent::NodeFinished { run_id, node_id: node_id.clone(), at: Utc::now(), duration_ms, subgraph_path: Vec::new() });
         }
         let summary = RunSummary {
             run_id,

@@ -372,7 +372,7 @@ test('a Studio run whose subgraph node call runs a child node send leaves the un
     expect(report.run.status).toBe('Succeeded');
     expect(report.run.replies).toEqual([report.childReply]);
     expect(report.statuses).toEqual({ trigger: 'Succeeded', gate: 'Succeeded', call: 'Succeeded', 'call/send': 'Idle' });
-    expect(report.trace).toContainEqual({ kind: 'NodeFinished', path: ['call'], node: 'send' });
+    expect(report.trace.filter((line: { kind: string; node: string }) => line.kind === 'NodeFinished' && line.node === 'send')).toEqual([{ kind: 'NodeFinished', path: ['call'], node: 'send' }]);
     expect(report.trace.filter((line: { node: string; path: string[] }) => line.node === 'call/send')).toEqual([]);
   } finally {
     await rm(dir, { recursive: true, force: true });

@@ -568,7 +568,7 @@ async fn stream_text(ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeError
         let chunk = chunk?;
         if !chunk.delta.is_empty() {
             full.push_str(&chunk.delta);
-            events.emit(TraceEvent::StreamChunk { run_id, node_id: node_id.clone(), delta: chunk.delta });
+            events.emit(TraceEvent::StreamChunk { run_id, node_id: node_id.clone(), delta: chunk.delta, subgraph_path: Vec::new() });
         }
         if chunk.done {
             break;
@@ -684,7 +684,7 @@ async fn stream_message(ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeEr
     let run_id = ctx.run_id();
     let node_id = ctx.node().id.clone();
     for word in content.split_inclusive(' ') {
-        events.emit(TraceEvent::StreamChunk { run_id, node_id: node_id.clone(), delta: word.to_owned() });
+        events.emit(TraceEvent::StreamChunk { run_id, node_id: node_id.clone(), delta: word.to_owned(), subgraph_path: Vec::new() });
     }
     Ok(NodeOutcome::fire("out").with_output("sent", content.clone()).with_reply(content))
 }

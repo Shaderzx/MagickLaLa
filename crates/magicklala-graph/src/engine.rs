@@ -3,6 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -30,6 +31,7 @@ type SharedOutputs = Arc<NodeOutputs>;
 type Memo = Arc<Mutex<HashMap<NodeId, SharedOutputs>>>;
 type Scope = Arc<BTreeMap<NodeId, SharedOutputs>>;
 type JoinQueues = HashMap<Option<WireId>, VecDeque<Scope>>;
+type WaitCell = Arc<Mutex<Option<NodeId>>>;
 
 pub const DEFAULT_WHILE_LOOP_MAX_ITERATIONS: u64 = 1000;
 pub const MAX_ACTIVATION_LOG_BYTES: usize = 1024 * 1024;
@@ -226,10 +228,64 @@ enum Readiness {
     Waiting(NodeId),
 }
 
-enum Attempt {
-    Done(NodeOutcome, Vec<TraceEvent>),
-    Waiting(NodeId),
-    Failed(NodeError),
+struct WaitForData {
+    memo: Memo,
+    waiting_on: WaitCell,
+    source: NodeId,
+}
+
+impl Future for WaitForData {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+        if locked(&self.memo).contains_key(&self.source) {
+            return Poll::Ready(());
+        }
+        *locked(&self.waiting_on) = Some(self.source.clone());
+        Poll::Pending
+    }
+}
+
+struct DataFrame {
+    node: NodeId,
+    started_at: Instant,
+    waiting_on: WaitCell,
+    future: BoxFuture<Result<NodeOutcome, NodeError>>,
+}
+
+struct DataStack {
+    state: Arc<RunState>,
+    frames: Vec<DataFrame>,
+    pending: HashSet<NodeId>,
+    failure: String,
+}
+
+impl DataStack {
+    fn new(state: Arc<RunState>) -> Self {
+        Self { state, frames: Vec::new(), pending: HashSet::new(), failure: NodeError::Cancelled.to_string() }
+    }
+
+    fn fail(&mut self, fault: Fault) -> Fault {
+        self.failure = match &fault {
+            Fault::Node(error) => error.to_string(),
+            Fault::Run(error) => error.to_string(),
+        };
+        fault
+    }
+}
+
+impl Drop for DataStack {
+    fn drop(&mut self) {
+        while let Some(frame) = self.frames.pop() {
+            self.state.emit(TraceEvent::NodeFailed {
+                run_id: self.state.run_id(),
+                node_id: frame.node,
+                at: Utc::now(),
+                error: self.failure.clone(),
+                subgraph_path: Vec::new(),
+            });
+        }
+    }
 }
 
 struct QualifiedEvents {
@@ -237,23 +293,12 @@ struct QualifiedEvents {
     caller: NodeId,
 }
 
-impl QualifiedEvents {
-    fn qualify(&self, id: &mut String) {
-        *id = format!("{}/{id}", self.caller.0);
-    }
-}
-
 impl EventEmitter for QualifiedEvents {
     fn emit(&self, mut event: TraceEvent) {
-        match &mut event {
-            TraceEvent::RunStarted { .. } | TraceEvent::RunFinished { .. } => return,
-            TraceEvent::NodeStarted { node_id, .. }
-            | TraceEvent::NodeFinished { node_id, .. }
-            | TraceEvent::NodeFailed { node_id, .. }
-            | TraceEvent::StreamChunk { node_id, .. } => self.qualify(&mut node_id.0),
-            TraceEvent::WireActivated { wire_id, .. } => self.qualify(&mut wire_id.0),
-            TraceEvent::VariableSet { .. } => {}
-        }
+        let Some(path) = event.subgraph_path_mut() else {
+            return;
+        };
+        path.insert(0, self.caller.clone());
         self.inner.emit(event);
     }
 }
@@ -502,7 +547,8 @@ impl RunState {
             }
         };
         let value = outputs.and_then(|outputs| outputs.get(&wire.from_socket).cloned());
-        let event = TraceEvent::WireActivated { run_id: self.run_id(), wire_id: wire.id.clone(), at: Utc::now(), value: value.clone() };
+        let event =
+            TraceEvent::WireActivated { run_id: self.run_id(), wire_id: wire.id.clone(), at: Utc::now(), value: value.clone(), subgraph_path: Vec::new() };
         Readiness::Ready(value, Some(event))
     }
 
@@ -520,63 +566,84 @@ impl RunState {
     }
 
     async fn materialize(self: &Arc<Self>, target: NodeId, memo: &Memo, scope: &Scope) -> Result<(), Fault> {
-        let mut demand = vec![target.clone()];
-        let mut pending: HashSet<NodeId> = HashSet::from([target]);
-        let mut started: HashMap<NodeId, Instant> = HashMap::new();
-        while let Some(node) = demand.last().cloned() {
-            if locked(memo).contains_key(&node) {
-                demand.pop();
-                pending.remove(&node);
-                continue;
-            }
-            if self.shared.cancellation.is_cancelled() {
-                return Err(Fault::Run(SpellError::Cancelled));
-            }
-            if !started.contains_key(&node) {
-                self.shared.count_step().map_err(Fault::Run)?;
-                self.emit(TraceEvent::NodeStarted { run_id: self.run_id(), node_id: node.clone(), at: Utc::now() });
-                self.shared.executed.fetch_add(1, Ordering::SeqCst);
-                started.insert(node.clone(), Instant::now());
-            }
-            match self.attempt_data_node(&node, memo, scope).await {
-                Attempt::Waiting(source) if pending.insert(source.clone()) => demand.push(source),
-                Attempt::Waiting(source) => {
-                    return Err(Fault::Node(self.data_failure(&node, NodeError::Other(format!("value cycle through node {:?}", source.0)))));
-                }
-                Attempt::Failed(error) => return Err(Fault::Node(self.data_failure(&node, error))),
-                Attempt::Done(outcome, wires) => {
-                    self.record_replies(&outcome.replies).map_err(|error| Fault::Node(self.data_failure(&node, error)))?;
-                    wires.into_iter().for_each(|event| self.emit(event));
-                    let outputs = Arc::new(outcome.outputs);
-                    locked(memo).insert(node.clone(), Arc::clone(&outputs));
-                    locked(&self.outputs).insert(node.clone(), outputs);
-                    let duration_ms = started.get(&node).copied().map_or(0, elapsed_ms);
-                    self.emit(TraceEvent::NodeFinished { run_id: self.run_id(), node_id: node.clone(), at: Utc::now(), duration_ms });
-                    demand.pop();
-                    pending.remove(&node);
-                }
-            }
+        let mut stack = DataStack::new(Arc::clone(self));
+        self.push_frame(target, memo, scope, &mut stack)?;
+        std::future::poll_fn(|cx| self.drive(cx, &mut stack, memo, scope)).await
+    }
+
+    fn push_frame(self: &Arc<Self>, node: NodeId, memo: &Memo, scope: &Scope, stack: &mut DataStack) -> Result<(), Fault> {
+        if !stack.pending.insert(node.clone()) {
+            return Err(stack.fail(Fault::Node(NodeError::Other(format!("value cycle through node {:?}", node.0)))));
         }
+        if self.shared.cancellation.is_cancelled() {
+            return Err(stack.fail(Fault::Run(SpellError::Cancelled)));
+        }
+        self.shared.count_step().map_err(|error| stack.fail(Fault::Run(error)))?;
+        let (Some(instance), Some(executor)) = (self.instances.get(&node).cloned(), self.executors.get(&node).cloned()) else {
+            return Err(stack.fail(Fault::Node(NodeError::Other(format!("node {node:?} is not part of the spell")))));
+        };
+        self.emit(TraceEvent::NodeStarted { run_id: self.run_id(), node_id: node.clone(), at: Utc::now(), subgraph_path: Vec::new() });
+        self.shared.executed.fetch_add(1, Ordering::SeqCst);
+        let waiting_on = WaitCell::default();
+        let mut context = ExecContext::data(Arc::clone(self), instance, memo.clone(), scope.clone(), Arc::clone(&waiting_on));
+        let future: BoxFuture<Result<NodeOutcome, NodeError>> = Box::pin(async move { executor.execute(&mut context).await });
+        stack.frames.push(DataFrame { node, started_at: Instant::now(), waiting_on, future });
         Ok(())
     }
 
-    async fn attempt_data_node(self: &Arc<Self>, node: &NodeId, memo: &Memo, scope: &Scope) -> Attempt {
-        let (Some(instance), Some(executor)) = (self.instances.get(node).cloned(), self.executors.get(node).cloned()) else {
-            return Attempt::Failed(NodeError::Other(format!("node {node:?} is not part of the spell")));
-        };
-        let mut context = ExecContext::data(Arc::clone(self), instance, memo.clone(), scope.clone());
-        let result = executor.execute(&mut context).await;
-        match (context.inputs, result) {
-            (Inputs::Data { waiting_on: Some(source), .. }, _) => Attempt::Waiting(source),
-            (Inputs::Data { wires, .. }, Ok(outcome)) => Attempt::Done(outcome, wires),
-            (_, Ok(outcome)) => Attempt::Done(outcome, Vec::new()),
-            (_, Err(error)) => Attempt::Failed(error),
+    fn drive(self: &Arc<Self>, cx: &mut Context<'_>, stack: &mut DataStack, memo: &Memo, scope: &Scope) -> Poll<Result<(), Fault>> {
+        loop {
+            if self.shared.cancellation.is_cancelled() {
+                return Poll::Ready(Err(stack.fail(Fault::Run(SpellError::Cancelled))));
+            }
+            let Some(top) = stack.frames.last_mut() else {
+                return Poll::Ready(Ok(()));
+            };
+            let result = match top.future.as_mut().poll(cx) {
+                Poll::Ready(result) => result,
+                Poll::Pending => {
+                    let Some(source) = locked(&top.waiting_on).take() else {
+                        return Poll::Pending;
+                    };
+                    if locked(memo).contains_key(&source) {
+                        continue;
+                    }
+                    if let Err(fault) = self.push_frame(source, memo, scope, stack) {
+                        return Poll::Ready(Err(fault));
+                    }
+                    continue;
+                }
+            };
+            let Some(frame) = stack.frames.pop() else {
+                continue;
+            };
+            stack.pending.remove(&frame.node);
+            if let Err(error) = result.and_then(|outcome| self.finish_data_node(&frame, outcome, memo)) {
+                self.emit(TraceEvent::NodeFailed {
+                    run_id: self.run_id(),
+                    node_id: frame.node.clone(),
+                    at: Utc::now(),
+                    error: error.to_string(),
+                    subgraph_path: Vec::new(),
+                });
+                return Poll::Ready(Err(stack.fail(Fault::Node(error))));
+            }
         }
     }
 
-    fn data_failure(&self, node: &NodeId, error: NodeError) -> NodeError {
-        self.emit(TraceEvent::NodeFailed { run_id: self.run_id(), node_id: node.clone(), at: Utc::now(), error: error.to_string() });
-        error
+    fn finish_data_node(&self, frame: &DataFrame, outcome: NodeOutcome, memo: &Memo) -> Result<(), NodeError> {
+        self.record_replies(&outcome.replies)?;
+        let outputs = Arc::new(outcome.outputs);
+        locked(memo).insert(frame.node.clone(), Arc::clone(&outputs));
+        locked(&self.outputs).insert(frame.node.clone(), outputs);
+        self.emit(TraceEvent::NodeFinished {
+            run_id: self.run_id(),
+            node_id: frame.node.clone(),
+            at: Utc::now(),
+            duration_ms: elapsed_ms(frame.started_at),
+            subgraph_path: Vec::new(),
+        });
+        Ok(())
     }
 
     fn record_replies(&self, replies: &[String]) -> Result<(), NodeError> {
@@ -648,19 +715,31 @@ impl RunState {
     }
 
     fn fail_node(&self, node: &NodeId, error: NodeError) -> SpellError {
-        self.emit(TraceEvent::NodeFailed { run_id: self.run_id(), node_id: node.clone(), at: Utc::now(), error: error.to_string() });
+        self.emit(TraceEvent::NodeFailed { run_id: self.run_id(), node_id: node.clone(), at: Utc::now(), error: error.to_string(), subgraph_path: Vec::new() });
         SpellError::Node { node: node.clone(), source: error }
     }
 
     fn fault_on(&self, node: &NodeId, fault: Fault) -> SpellError {
         match fault {
             Fault::Node(NodeError::Cancelled) | Fault::Run(SpellError::Cancelled) => {
-                self.emit(TraceEvent::NodeFailed { run_id: self.run_id(), node_id: node.clone(), at: Utc::now(), error: NodeError::Cancelled.to_string() });
+                self.emit(TraceEvent::NodeFailed {
+                    run_id: self.run_id(),
+                    node_id: node.clone(),
+                    at: Utc::now(),
+                    error: NodeError::Cancelled.to_string(),
+                    subgraph_path: Vec::new(),
+                });
                 SpellError::Cancelled
             }
             Fault::Node(error) => self.fail_node(node, error),
             Fault::Run(error) => {
-                self.emit(TraceEvent::NodeFailed { run_id: self.run_id(), node_id: node.clone(), at: Utc::now(), error: error.to_string() });
+                self.emit(TraceEvent::NodeFailed {
+                    run_id: self.run_id(),
+                    node_id: node.clone(),
+                    at: Utc::now(),
+                    error: error.to_string(),
+                    subgraph_path: Vec::new(),
+                });
                 error
             }
         }
@@ -693,7 +772,13 @@ impl RunState {
         };
         let expected = self.incoming_flow_wires(node);
         let message = format!("join incomplete: node {:?} received {arrived} of {expected} branches", node.0);
-        self.emit(TraceEvent::NodeFailed { run_id: self.run_id(), node_id: (*node).clone(), at: Utc::now(), error: message.clone() });
+        self.emit(TraceEvent::NodeFailed {
+            run_id: self.run_id(),
+            node_id: (*node).clone(),
+            at: Utc::now(),
+            error: message.clone(),
+            subgraph_path: Vec::new(),
+        });
         Err(SpellError::Internal(message))
     }
 
@@ -712,7 +797,7 @@ impl RunState {
             return Err(SpellError::Internal(format!("node {node:?} is not part of the spell")));
         };
         let started = Instant::now();
-        self.emit(TraceEvent::NodeStarted { run_id: self.run_id(), node_id: node.clone(), at: Utc::now() });
+        self.emit(TraceEvent::NodeStarted { run_id: self.run_id(), node_id: node.clone(), at: Utc::now(), subgraph_path: Vec::new() });
         self.shared.executed.fetch_add(1, Ordering::SeqCst);
         let mut context = ExecContext::flow(self.clone(), instance, socket, scope.clone());
         let cancellation = self.shared.cancellation.clone();
@@ -726,7 +811,13 @@ impl RunState {
         };
         locked(&self.outputs).insert(node.clone(), Arc::clone(&outputs.1));
         locked(&self.activations).record(node, &outputs.1);
-        self.emit(TraceEvent::NodeFinished { run_id: self.run_id(), node_id: node.clone(), at: Utc::now(), duration_ms: elapsed_ms(started) });
+        self.emit(TraceEvent::NodeFinished {
+            run_id: self.run_id(),
+            node_id: node.clone(),
+            at: Utc::now(),
+            duration_ms: elapsed_ms(started),
+            subgraph_path: Vec::new(),
+        });
         Ok(outputs)
     }
 
@@ -768,7 +859,7 @@ impl RunState {
     async fn fan_out(self: &Arc<Self>, node: &NodeId, sockets: &[String], scope: Scope, work: &mut VecDeque<Work>) -> Result<(), SpellError> {
         let wires: Vec<Wire> = self.graph.wires_out_of(node).filter(|wire| sockets.contains(&wire.from_socket)).cloned().collect();
         for wire in &wires {
-            self.emit(TraceEvent::WireActivated { run_id: self.run_id(), wire_id: wire.id.clone(), at: Utc::now(), value: None });
+            self.emit(TraceEvent::WireActivated { run_id: self.run_id(), wire_id: wire.id.clone(), at: Utc::now(), value: None, subgraph_path: Vec::new() });
         }
         let activation = |wire: Wire, scope: Scope| Activation { node: wire.to_node, socket: wire.to_socket, via: Some(wire.id), scope };
         if wires.len() <= 1 {
@@ -798,7 +889,7 @@ fn elapsed_ms(started: Instant) -> u64 {
 
 enum Inputs {
     Flow { fault: Option<SpellError> },
-    Data { waiting_on: Option<NodeId>, wires: Vec<TraceEvent> },
+    Data { waiting_on: WaitCell },
 }
 
 struct ExecContext {
@@ -815,8 +906,20 @@ impl ExecContext {
         Self { state, node, trigger_socket: Some(socket.to_owned()), memo: Memo::default(), scope, inputs: Inputs::Flow { fault: None } }
     }
 
-    fn data(state: Arc<RunState>, node: NodeInstance, memo: Memo, scope: Scope) -> Self {
-        Self { state, node, trigger_socket: None, memo, scope, inputs: Inputs::Data { waiting_on: None, wires: Vec::new() } }
+    fn data(state: Arc<RunState>, node: NodeInstance, memo: Memo, scope: Scope, waiting_on: WaitCell) -> Self {
+        Self { state, node, trigger_socket: None, memo, scope, inputs: Inputs::Data { waiting_on } }
+    }
+
+    async fn data_input(&self, socket: &str, waiting_on: WaitCell) -> Option<Value> {
+        loop {
+            match self.state.ready_input(&self.node.id, socket, &self.memo, &self.scope) {
+                Readiness::Ready(value, event) => {
+                    event.into_iter().for_each(|event| self.state.emit(event));
+                    return value;
+                }
+                Readiness::Waiting(source) => WaitForData { memo: self.memo.clone(), waiting_on: Arc::clone(&waiting_on), source }.await,
+            }
+        }
     }
 
     fn take_fault(&mut self) -> Option<SpellError> {
@@ -843,17 +946,10 @@ impl NodeContext for ExecContext {
 
     async fn input(&mut self, socket: &str) -> Result<Option<Value>, NodeError> {
         match &mut self.inputs {
-            Inputs::Data { waiting_on, wires } => match self.state.ready_input(&self.node.id, socket, &self.memo, &self.scope) {
-                Readiness::Ready(value, event) => {
-                    wires.extend(event);
-                    Ok(value)
-                }
-                Readiness::Waiting(source) => {
-                    let message = format!("input {socket} waits for data node {:?}", source.0);
-                    *waiting_on = Some(source);
-                    Err(NodeError::Other(message))
-                }
-            },
+            Inputs::Data { waiting_on } => {
+                let waiting_on = Arc::clone(waiting_on);
+                Ok(self.data_input(socket, waiting_on).await)
+            }
             Inputs::Flow { fault } => match self.state.pull_value(&self.node.id, socket, &self.memo, &self.scope).await {
                 Ok(value) => Ok(value),
                 Err(Fault::Node(error)) => Err(error),
@@ -876,7 +972,7 @@ impl NodeContext for ExecContext {
 
     fn set_variable(&mut self, name: &str, value: Value) -> Result<(), NodeError> {
         locked(&self.state.variables).insert(name.to_owned(), value.clone());
-        self.state.emit(TraceEvent::VariableSet { run_id: self.state.run_id(), name: name.to_owned(), value });
+        self.state.emit(TraceEvent::VariableSet { run_id: self.state.run_id(), name: name.to_owned(), value, subgraph_path: Vec::new() });
         Ok(())
     }
 

@@ -364,6 +364,9 @@ impl CanvasState {
     }
 
     pub fn apply_trace_event(&mut self, event: &TraceEvent) {
+        if !event.subgraph_path().is_empty() {
+            return;
+        }
         match event {
             TraceEvent::RunStarted { .. } => self.reset_execution(),
             TraceEvent::NodeStarted { node_id, .. } => self.set_status(node_id, ExecutionStatus::Running),
