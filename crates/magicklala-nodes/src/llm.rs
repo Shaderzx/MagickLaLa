@@ -1,14 +1,16 @@
 use std::collections::VecDeque;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use magicklala_graph::{LlmGateway, LlmMessage, LlmRequest, LlmResponse, LlmRole, LlmStream, LlmStreamChunk, NodeError, TokenUsage};
+use magicklala_graph::{CredentialResolver, LlmGateway, LlmMessage, LlmRequest, LlmResponse, LlmRole, LlmStream, LlmStreamChunk, NodeError, TokenUsage};
 use serde_json::{Value as Json, json};
 
 pub const BASE_URL_ENV: &str = "MAGICKLALA_LLM_BASE_URL";
 pub const API_KEY_ENV: &str = "MAGICKLALA_LLM_API_KEY";
+pub const MAX_STREAM_FRAME_BYTES: usize = 1_048_576;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmProvider {
@@ -45,6 +47,10 @@ impl LlmProvider {
             Self::Ollama => "OLLAMA_API_KEY",
         }
     }
+
+    fn has_completion_marker(self) -> bool {
+        matches!(self, Self::OpenAi | Self::Anthropic | Self::Ollama)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -67,6 +73,7 @@ impl LlmGatewayConfig {
 pub struct HttpLlmGateway {
     client: reqwest::Client,
     config: LlmGatewayConfig,
+    credentials: Option<Arc<dyn CredentialResolver>>,
 }
 
 type ByteStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, String>> + Send>>;
@@ -83,11 +90,31 @@ impl HttpLlmGateway {
         if let Some(timeout) = config.request_timeout {
             builder = builder.timeout(timeout);
         }
-        Self { client: builder.build().unwrap_or_default(), config }
+        Self { client: builder.build().unwrap_or_default(), config, credentials: None }
     }
 
     pub fn from_env() -> Self {
         Self::new(LlmGatewayConfig::from_env())
+    }
+
+    pub fn with_credential_resolver(mut self, resolver: Arc<dyn CredentialResolver>) -> Self {
+        self.credentials = Some(resolver);
+        self
+    }
+
+    async fn request_key(&self, provider: LlmProvider, request: &LlmRequest) -> Result<Option<String>, NodeError> {
+        let Some(credential_id) = request.credential_id.as_deref().filter(|id| !id.is_empty()) else {
+            return Ok(self.api_key(provider));
+        };
+        let resolver = self
+            .credentials
+            .as_ref()
+            .ok_or_else(|| NodeError::InvalidConfig(format!("credential {credential_id} cannot be resolved: no credential resolver is configured")))?;
+        match resolver.resolve(credential_id).await {
+            Ok(secret) if !secret.is_empty() => Ok(Some(secret)),
+            Ok(_) => Err(NodeError::InvalidConfig(format!("credential {credential_id} cannot be resolved: it is empty"))),
+            Err(error) => Err(NodeError::InvalidConfig(format!("credential {credential_id} cannot be resolved: {error}"))),
+        }
     }
 
     fn base_url(&self, provider: LlmProvider) -> String {
@@ -109,9 +136,9 @@ impl HttpLlmGateway {
         }
     }
 
-    async fn post(&self, provider: LlmProvider, url: &str, body: &Json) -> Result<reqwest::Response, NodeError> {
+    async fn post(&self, provider: LlmProvider, url: &str, body: &Json, key: Option<String>) -> Result<reqwest::Response, NodeError> {
         let mut request = self.client.post(url).json(body);
-        if let Some(key) = self.api_key(provider) {
+        if let Some(key) = key {
             request = match provider {
                 LlmProvider::Anthropic => request.header("x-api-key", key),
                 LlmProvider::Gemini => request.header("x-goog-api-key", key),
@@ -303,21 +330,45 @@ struct StreamDecoder {
     completed: bool,
 }
 
+fn sse_data(event: &str) -> Option<String> {
+    let data: Vec<&str> = event
+        .split('\n')
+        .filter_map(|line| line.strip_prefix("data"))
+        .filter_map(|rest| if rest.is_empty() { Some("") } else { rest.strip_prefix(':') })
+        .map(|value| value.strip_prefix(' ').unwrap_or(value))
+        .collect();
+    if data.is_empty() { None } else { Some(data.join("\n")) }
+}
+
 impl StreamDecoder {
-    fn take_line(&mut self) -> Option<String> {
-        let end = self.buffer.iter().position(|byte| *byte == b'\n')?;
-        let line: Vec<u8> = self.buffer.drain(..=end).collect();
-        Some(String::from_utf8_lossy(&line).trim().to_owned())
+    fn new(bytes: ByteStream, provider: LlmProvider) -> Self {
+        let framing = if provider == LlmProvider::Ollama { Framing::JsonLines } else { Framing::ServerSentEvents };
+        Self { bytes, buffer: Vec::new(), pending: VecDeque::new(), provider, framing, finished: false, completed: false }
     }
 
-    fn accept_line(&mut self, line: &str) -> Result<(), NodeError> {
+    fn take_frame(&mut self) -> Option<String> {
+        let delimiter: &[u8] = match self.framing {
+            Framing::ServerSentEvents => b"\n\n",
+            Framing::JsonLines => b"\n",
+        };
+        let end = self.buffer.windows(delimiter.len()).position(|window| window == delimiter)?;
+        let frame: Vec<u8> = self.buffer.drain(..end + delimiter.len()).collect();
+        Some(String::from_utf8_lossy(&frame[..end]).into_owned())
+    }
+
+    fn ingest(&mut self, bytes: &[u8]) {
+        self.buffer.extend(bytes.iter().copied().filter(|byte| *byte != b'\r'));
+    }
+
+    fn accept_frame(&mut self, frame: &str) -> Result<(), NodeError> {
         let payload = match self.framing {
-            Framing::ServerSentEvents => match line.strip_prefix("data:") {
-                Some(data) => data.trim(),
+            Framing::ServerSentEvents => match sse_data(frame) {
+                Some(data) => data,
                 None => return Ok(()),
             },
-            Framing::JsonLines => line,
+            Framing::JsonLines => frame.trim().to_owned(),
         };
+        let payload = payload.trim();
         if payload.is_empty() {
             return Ok(());
         }
@@ -350,6 +401,22 @@ impl StreamDecoder {
         self.finished = true;
     }
 
+    fn close(&mut self) -> Result<(), NodeError> {
+        let rest = String::from_utf8_lossy(&std::mem::take(&mut self.buffer)).into_owned();
+        if !rest.trim().is_empty() {
+            self.accept_frame(&rest)?;
+        }
+        if self.completed {
+            self.finished = true;
+            return Ok(());
+        }
+        if self.provider.has_completion_marker() {
+            return Err(NodeError::Llm("upstream stream closed before completion marker".to_owned()));
+        }
+        self.finish();
+        Ok(())
+    }
+
     async fn next_chunk(mut self) -> Result<Option<(LlmStreamChunk, Self)>, NodeError> {
         loop {
             if let Some(chunk) = self.pending.pop_front() {
@@ -358,20 +425,17 @@ impl StreamDecoder {
             if self.finished {
                 return Ok(None);
             }
-            if let Some(line) = self.take_line() {
-                self.accept_line(&line)?;
+            if let Some(frame) = self.take_frame() {
+                self.accept_frame(&frame)?;
                 continue;
             }
+            if self.buffer.len() > MAX_STREAM_FRAME_BYTES {
+                return Err(NodeError::Llm("stream frame exceeds 1 MiB".to_owned()));
+            }
             match self.bytes.next().await {
-                Some(Ok(bytes)) => self.buffer.extend_from_slice(&bytes),
+                Some(Ok(bytes)) => self.ingest(&bytes),
                 Some(Err(error)) => return Err(NodeError::Llm(error)),
-                None => {
-                    let rest = String::from_utf8_lossy(&std::mem::take(&mut self.buffer)).trim().to_owned();
-                    if !rest.is_empty() {
-                        self.accept_line(&rest)?;
-                    }
-                    self.finish();
-                }
+                None => self.close()?,
             }
         }
     }
@@ -381,19 +445,20 @@ impl StreamDecoder {
 impl LlmGateway for HttpLlmGateway {
     async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, NodeError> {
         let provider = LlmProvider::from_name(&request.provider);
+        let key = self.request_key(provider, &request).await?;
         let url = self.endpoint(provider, &request.model, false);
-        let response = self.post(provider, &url, &request_body(provider, &request, false)).await?;
+        let response = self.post(provider, &url, &request_body(provider, &request, false), key).await?;
         let json: Json = response.json().await.map_err(|error| NodeError::Llm(format!("invalid response body: {error}")))?;
         Ok(parse_response(provider, &request, &json))
     }
 
     async fn stream(&self, request: LlmRequest) -> Result<LlmStream, NodeError> {
         let provider = LlmProvider::from_name(&request.provider);
+        let key = self.request_key(provider, &request).await?;
         let url = self.endpoint(provider, &request.model, true);
-        let response = self.post(provider, &url, &request_body(provider, &request, true)).await?;
+        let response = self.post(provider, &url, &request_body(provider, &request, true), key).await?;
         let bytes: ByteStream = Box::pin(response.bytes_stream().map(|item| item.map(|bytes| bytes.to_vec()).map_err(|error| error.to_string())));
-        let framing = if provider == LlmProvider::Ollama { Framing::JsonLines } else { Framing::ServerSentEvents };
-        let decoder = StreamDecoder { bytes, buffer: Vec::new(), pending: VecDeque::new(), provider, framing, finished: false, completed: false };
+        let decoder = StreamDecoder::new(bytes, provider);
         Ok(Box::pin(futures::stream::try_unfold(decoder, StreamDecoder::next_chunk)))
     }
 
@@ -408,7 +473,7 @@ impl LlmGateway for HttpLlmGateway {
             LlmProvider::Ollama => (format!("{base}/api/embed"), json!({ "model": model, "input": text }), "/embeddings/0"),
             LlmProvider::OpenAi | LlmProvider::Anthropic => (format!("{base}/v1/embeddings"), json!({ "model": model, "input": text }), "/data/0/embedding"),
         };
-        let response = self.post(provider, &url, &body).await?;
+        let response = self.post(provider, &url, &body, self.api_key(provider)).await?;
         let json: Json = response.json().await.map_err(|error| NodeError::Llm(format!("invalid embedding body: {error}")))?;
         json.pointer(pointer)
             .and_then(Json::as_array)

@@ -65,7 +65,8 @@ async fn run(arguments: Arguments) -> Result<ExitCode, String> {
         memory: Some(Arc::new(InMemoryMemory::new())),
         knowledge: Some(Arc::new(InMemoryKnowledge::new())),
     };
-    let engine = SpellEngine::new(registry, services);
+    let allow_private_http = std::env::var("MAGICKLALA_ALLOW_PRIVATE_HTTP").is_ok_and(|flag| flag == "1");
+    let engine = SpellEngine::new(registry, services).with_private_http(allow_private_http);
     let trigger = RunTrigger { node: trigger_node.as_str().into(), socket: "out".to_owned(), payload: Value::from(arguments.payload) };
     match engine.run(&graph, trigger, Arc::new(StdoutEmitter)).await {
         Ok(_) => Ok(ExitCode::SUCCESS),

@@ -1,3 +1,4 @@
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,6 +9,9 @@ use regex::Regex;
 use serde_json::json;
 
 use crate::script::run_rhai;
+
+pub(crate) const MAX_HTTP_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
+const MAX_HTTP_REDIRECTS: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Op {
@@ -302,33 +306,148 @@ async fn validate(ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeError> {
     Ok(NodeOutcome::default().with_output("valid", problems.is_empty()).with_output("errors", Value::Array(problems)))
 }
 
+fn is_private_address(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [first, second, ..] = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || first == 0
+                || (first == 100 && (64..128).contains(&second))
+                || (first == 198 && (18..20).contains(&second))
+                || first >= 240
+        }
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_private_address(IpAddr::V4(mapped));
+            }
+            let head = v6.segments()[0];
+            v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() || (head & 0xfe00) == 0xfc00 || (head & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+async fn resolve_target(url: &reqwest::Url, allow_private: bool) -> Result<Option<(String, Vec<SocketAddr>)>, NodeError> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(NodeError::InvalidConfig(format!("net/http_fetch only supports http and https, not {}", url.scheme())));
+    }
+    let host = url.host_str().ok_or_else(|| NodeError::InvalidConfig(format!("{url} has no host")))?.to_owned();
+    let port = url.port_or_known_default().unwrap_or(80);
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    let addresses: Vec<SocketAddr> = match bare.parse::<IpAddr>() {
+        Ok(ip) => vec![SocketAddr::new(ip, port)],
+        Err(_) => tokio::net::lookup_host((bare, port)).await.map_err(|error| NodeError::Service(format!("cannot resolve {host}: {error}")))?.collect(),
+    };
+    if addresses.is_empty() {
+        return Err(NodeError::Service(format!("cannot resolve {host}: no addresses")));
+    }
+    if allow_private {
+        return Ok(None);
+    }
+    if let Some(blocked) = addresses.iter().find(|address| is_private_address(address.ip())) {
+        return Err(NodeError::Service(format!("net/http_fetch refuses to connect to private address {} for host {host}", blocked.ip())));
+    }
+    Ok(if bare.parse::<IpAddr>().is_ok() { None } else { Some((bare.to_owned(), addresses)) })
+}
+
+async fn read_capped(mut response: reqwest::Response) -> Result<Vec<u8>, NodeError> {
+    let too_large = || NodeError::Service(format!("response exceeds {MAX_HTTP_RESPONSE_BYTES} bytes"));
+    if response.content_length().is_some_and(|length| length > MAX_HTTP_RESPONSE_BYTES as u64) {
+        return Err(too_large());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| NodeError::Service(error.to_string()))? {
+        if body.len() + chunk.len() > MAX_HTTP_RESPONSE_BYTES {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+struct FetchPlan {
+    method: reqwest::Method,
+    headers: Vec<(String, String)>,
+    body: Value,
+    timeout: Duration,
+    allow_private: bool,
+}
+
+impl FetchPlan {
+    async fn send(&self, url: &reqwest::Url, method: &reqwest::Method, with_body: bool) -> Result<reqwest::Response, NodeError> {
+        let mut builder = reqwest::Client::builder().timeout(self.timeout).redirect(reqwest::redirect::Policy::none());
+        if let Some((host, addresses)) = resolve_target(url, self.allow_private).await? {
+            builder = builder.resolve_to_addrs(&host, &addresses);
+        }
+        let client = builder.build().map_err(|error| NodeError::Service(error.to_string()))?;
+        let mut request = client.request(method.clone(), url.clone());
+        for (name, header) in &self.headers {
+            request = request.header(name, header);
+        }
+        if with_body {
+            request = match &self.body {
+                Value::Null => request,
+                Value::String(text) => request.body(text.clone()),
+                other => request.json(&other.to_json()),
+            };
+        }
+        request.send().await.map_err(|error| NodeError::Service(error.to_string()))
+    }
+
+    async fn follow(&self, start: reqwest::Url) -> Result<reqwest::Response, NodeError> {
+        let mut url = start;
+        let mut method = self.method.clone();
+        let mut with_body = true;
+        for _ in 0..=MAX_HTTP_REDIRECTS {
+            let response = self.send(&url, &method, with_body).await?;
+            if !response.status().is_redirection() {
+                return Ok(response);
+            }
+            let Some(location) = response.headers().get(reqwest::header::LOCATION).and_then(|value| value.to_str().ok()) else {
+                return Ok(response);
+            };
+            let next = url.join(location).map_err(|error| NodeError::Service(format!("invalid redirect location: {error}")))?;
+            if !matches!(response.status().as_u16(), 307 | 308) {
+                method = reqwest::Method::GET;
+                with_body = false;
+            }
+            url = next;
+        }
+        Err(NodeError::Service(format!("more than {MAX_HTTP_REDIRECTS} redirects")))
+    }
+}
+
 async fn http_fetch(ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeError> {
     let url = required_text(ctx, "url").await?;
     let body = value(ctx, "body").await?;
     let method_name = config_text(ctx, "method").unwrap_or_else(|| "GET".to_owned()).to_uppercase();
     let method = reqwest::Method::from_bytes(method_name.as_bytes()).map_err(|error| NodeError::InvalidConfig(error.to_string()))?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(config_u64(ctx, "timeout_ms", 30_000)))
-        .build()
-        .map_err(|error| NodeError::Service(error.to_string()))?;
-    let mut request = client.request(method, &url);
-    if let Some(headers) = ctx.node().config.get("headers").and_then(serde_json::Value::as_object) {
-        for (name, header) in headers {
-            request = request.header(name, Value::from(header.clone()).to_text());
-        }
-    }
-    request = match body {
-        Value::Null => request,
-        Value::String(text) => request.body(text),
-        other => request.json(&other.to_json()),
-    };
+    let target = reqwest::Url::parse(&url).map_err(|error| NodeError::InvalidConfig(format!("invalid url {url}: {error}")))?;
+    let headers = ctx
+        .node()
+        .config
+        .get("headers")
+        .and_then(serde_json::Value::as_object)
+        .map(|headers| headers.iter().map(|(name, header)| (name.clone(), Value::from(header.clone()).to_text())).collect())
+        .unwrap_or_default();
+    let plan =
+        FetchPlan { method, headers, body, timeout: Duration::from_millis(config_u64(ctx, "timeout_ms", 30_000)), allow_private: ctx.allow_private_http() };
     let cancellation = ctx.cancellation();
-    let response = tokio::select! {
-        response = request.send() => response.map_err(|error| NodeError::Service(error.to_string()))?,
+    let fetched = async {
+        let response = plan.follow(target).await?;
+        let status = i64::from(response.status().as_u16());
+        Ok::<_, NodeError>((status, read_capped(response).await?))
+    };
+    let (status, bytes) = tokio::select! {
+        fetched = fetched => fetched?,
         () = cancellation.cancelled() => return Err(NodeError::Cancelled),
     };
-    let status = i64::from(response.status().as_u16());
-    let text = response.text().await.map_err(|error| NodeError::Service(error.to_string()))?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
     let json = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
     Ok(NodeOutcome::fire("out").with_output("status", status).with_output("body", text).with_output("json", Value::Json(json)))
 }
@@ -414,6 +533,9 @@ async fn structured_json(ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeE
 }
 
 fn agent_id(ctx: &dyn NodeContext) -> String {
+    if let Some(bound) = ctx.agent_id() {
+        return bound.to_owned();
+    }
     config_text(ctx, "agent_id")
         .or_else(|| ctx.variable("agent_id").map(|found| found.to_text()))
         .filter(|id| !id.is_empty())

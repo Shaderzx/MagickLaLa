@@ -30,6 +30,13 @@ pub enum ValidationError {
     NoTrigger,
     #[error("variable {0} is declared twice")]
     DuplicateVariable(String),
+    #[error("wait_for_all {node:?} joins mutually exclusive outputs of {conditional:?} through wires {wires:?}, so it can never complete")]
+    ExclusiveJoin {
+        node: NodeId,
+        #[serde(rename = "source")]
+        conditional: NodeId,
+        wires: Vec<WireId>,
+    },
     #[error("subgraph node {node:?} calls its own spell {spell:?}")]
     SubgraphCycle { node: NodeId, spell: SpellId },
 }
