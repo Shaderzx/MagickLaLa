@@ -19,9 +19,19 @@ type TraceEvent = {
   delta?: string;
   error?: string;
   name?: string;
-  summary?: { run_id: string; status: string; error?: string | null; outputs: Record<string, { type: string; value: unknown }>; activations?: EmittedActivation[] };
+  summary?: RunSummary;
 };
-type SpellRun = { code: number | null; signal: NodeJS.Signals | null; events: TraceEvent[]; stdout: string; stderr: string };
+type RunSummary = {
+  run_id: string;
+  status: string;
+  error?: string | null;
+  nodes_executed?: number;
+  outputs: Record<string, { type: string; value: unknown }>;
+  activations?: EmittedActivation[];
+  activations_truncated?: boolean;
+  replies?: string[];
+};
+type SpellRun = { code: number | null; signal: NodeJS.Signals | null; events: TraceEvent[]; summary?: RunSummary; stdout: string; stderr: string };
 
 async function buildRunSpell() {
   await execFileAsync('cargo', ['build', '-q', '-p', 'magicklala-nodes', '--example', 'run_spell'], { cwd: repoRoot, timeout: 900_000, maxBuffer: 64 * 1024 * 1024 });
@@ -31,6 +41,7 @@ function runSpell(args: string[], env: Record<string, string>, onEvent: (event: 
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(exampleBinary, args, { cwd: repoRoot, env: { ...process.env, ...env } });
     const events: TraceEvent[] = [];
+    let returned: RunSummary | undefined;
     let stdout = '';
     let stderr = '';
     let pending = '';
@@ -40,9 +51,13 @@ function runSpell(args: string[], env: Record<string, string>, onEvent: (event: 
       const lines = pending.split('\n');
       pending = lines.pop() ?? '';
       for (const line of lines.filter((candidate) => candidate.trim().startsWith('{'))) {
-        const event = JSON.parse(line) as TraceEvent;
-        events.push(event);
-        onEvent(event);
+        const parsed = JSON.parse(line) as TraceEvent & { run_summary?: RunSummary };
+        if (parsed.run_summary) {
+          returned = parsed.run_summary;
+          continue;
+        }
+        events.push(parsed);
+        onEvent(parsed);
       }
     });
     child.stderr.on('data', (chunk: Buffer) => {
@@ -50,7 +65,7 @@ function runSpell(args: string[], env: Record<string, string>, onEvent: (event: 
       process.stderr.write(chunk);
     });
     child.on('error', rejectRun);
-    child.on('close', (code, signal) => resolveRun({ code, signal, events, stdout, stderr }));
+    child.on('close', (code, signal) => resolveRun({ code, signal, events, summary: returned, stdout, stderr }));
   });
 }
 
@@ -140,9 +155,8 @@ test('parallel_research runs both research branches at the same time, joins them
     for (const prompt of llm.completionPrompts) expect(prompt).toContain('rust async runtimes');
     expect(llm.streamPrompts).toHaveLength(1);
     for (const prompt of llm.completionPrompts) expect(llm.streamPrompts[0]).toContain(`finding about ${prompt}`);
-    const finished = run.events.find((event) => event.event === 'run_finished');
-    expect(finished?.summary?.status).toBe('succeeded');
-    expect(finished?.summary?.outputs[`${sendNode}.sent`]).toEqual({ type: 'string', value: streamDeltas.join('') });
+    expect(summaryOf(run)?.status).toBe('succeeded');
+    expect(summaryOf(run)?.outputs[`${sendNode}.sent`]).toEqual({ type: 'string', value: streamDeltas.join('') });
   } finally {
     await llm.close();
   }
@@ -159,7 +173,7 @@ test('webhook_router routes each webhook through the Rhai script to the matching
   const defaultWire = spell.wires.find((wire) => wire.from_node === switchNode?.id && wire.from_socket === 'default');
   expect(eventIndex(routed.events, 'node_finished', ordersWire?.to_node ?? '')).toBeGreaterThan(-1);
   expect(eventIndex(routed.events, 'node_started', defaultWire?.to_node ?? '')).toBe(-1);
-  const routedSummary = routed.events.find((event) => event.event === 'run_finished')?.summary;
+  const routedSummary = summaryOf(routed);
   expect(routedSummary?.outputs[`${ordersWire?.to_node}.sent`]).toEqual({ type: 'string', value: 'Order 42 received' });
 
   const unrouted = await runSpell([join(repoRoot, 'examples', 'webhook_router.json'), '--payload', JSON.stringify({ method: 'POST', path: '/hooks/shop', headers: {}, body: { type: 'ping', id: 7 } })], {});
@@ -353,7 +367,7 @@ test('net/http_fetch refuses loopback and cloud metadata addresses unless privat
       const allowed = await runSpell([path], { MAGICKLALA_ALLOW_PRIVATE_HTTP: '1' });
       expect(allowed.code).toBe(0);
       expect(internal.requests).toEqual(['GET /admin']);
-      expect(allowed.events.find((event) => event.event === 'run_finished')?.summary?.outputs['fetch.body']).toEqual({ type: 'string', value: 'internal secret' });
+      expect(summaryOf(allowed)?.outputs['fetch.body']).toEqual({ type: 'string', value: 'internal secret' });
     });
   } finally {
     await internal.close();
@@ -393,7 +407,7 @@ async function startScriptedServer(respond: (request: RecordedRequest, response:
 }
 
 function summaryOf(run: SpellRun) {
-  return run.events.find((event) => event.event === 'run_finished')?.summary;
+  return run.summary ?? run.events.find((event) => event.event === 'run_finished')?.summary;
 }
 
 test('a flow cycle between two branches runs until the step limit and fails cleanly instead of overflowing the stack', async () => {
@@ -554,20 +568,33 @@ test('net/http_fetch connects directly and never through an HTTP_PROXY from the 
   }
 });
 
-test('net/http_fetch drops credentials on a cross-origin redirect and keeps the other headers', async () => {
+test('net/http_fetch forwards only accept, accept-language, content-type and user-agent on a cross-origin redirect', async () => {
   const landing = await startScriptedServer((_request, response) => response.writeHead(200, { 'content-type': 'text/plain' }).end('landed'));
   const origin = await startScriptedServer((_request, response) => response.writeHead(302, { location: `${landing.baseUrl}/landing` }).end());
   try {
-    const headers = { Authorization: 'Bearer top-secret', Cookie: 'session=abc', 'X-Api-Key': 'key-123', 'Proxy-Authorization': 'Basic cHJveHk=', 'X-Trace': 'keep-me' };
+    const safe = { Accept: 'application/json', 'Accept-Language': 'nl-NL', 'User-Agent': 'magicklala-e2e' };
+    const secret = {
+      Authorization: 'Bearer top-secret',
+      Cookie: 'session=abc',
+      'X-Api-Key': 'key-123',
+      'Proxy-Authorization': 'Basic cHJveHk=',
+      'X-Auth-Token': 'auth-token-1',
+      'Api-Key': 'api-key-2',
+      'X-Goog-Api-Key': 'goog-key-3',
+      'Private-Token': 'gitlab-token-4',
+      'X-Trace': 'custom-header-5',
+    };
+    const headers = { ...safe, ...secret };
     const nodes = [spellNode('start', 'event/on_start'), spellNode('fetch', 'net/http_fetch', { url: `${origin.baseUrl}/start`, headers, timeout_ms: 5000 })];
     await withSpellFile(nodes, [spellWire('w_start', 'start', 'out', 'fetch', 'in')], async (path) => {
       const run = await runSpell([path], { MAGICKLALA_ALLOW_PRIVATE_HTTP: '1' });
       expect(run.code).toBe(0);
       expect(origin.requests.map((request) => request.headers.authorization)).toEqual(['Bearer top-secret']);
       expect(landing.requests.map((request) => request.url)).toEqual(['/landing']);
+      expect(origin.requests.map((request) => request.headers['x-goog-api-key'])).toEqual(['goog-key-3']);
       const forwarded = landing.requests[0]?.headers ?? {};
-      expect([forwarded.authorization, forwarded.cookie, forwarded['x-api-key'], forwarded['proxy-authorization']]).toEqual([undefined, undefined, undefined, undefined]);
-      expect(forwarded['x-trace']).toBe('keep-me');
+      expect(Object.keys(secret).map((name) => forwarded[name.toLowerCase()])).toEqual(Object.keys(secret).map(() => undefined));
+      expect(Object.keys(safe).map((name) => forwarded[name.toLowerCase()])).toEqual(Object.values(safe));
       expect(summaryOf(run)?.outputs['fetch.body']).toEqual({ type: 'string', value: 'landed' });
     });
   } finally {
@@ -615,9 +642,9 @@ test('net/http_fetch refuses NAT64, site-local and IPv4-compatible IPv6 addresse
 });
 
 test('a spell that calls a subgraph fails before any node runs when no subgraph resolver is configured', async () => {
-  const nodes = [spellNode('start', 'event/on_start'), spellNode('after', 'io/send_message', { content: 'should not run' })];
-  const subgraphs = [{ node_id: 'after', spell_id: '0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a99' }];
-  await withSpellFile(nodes, [spellWire('w_start', 'start', 'out', 'after', 'in')], async (path) => {
+  const nodes = [spellNode('start', 'event/on_start'), spellNode('call', 'flow/subgraph'), spellNode('after', 'io/send_message', { content: 'should not run' })];
+  const subgraphs = [{ node_id: 'call', spell_id: '0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a99' }];
+  await withSpellFile(nodes, [spellWire('w_start', 'start', 'out', 'call', 'in'), spellWire('w_after', 'call', 'out', 'after', 'in')], async (path) => {
     const run = await runSpell([path], {});
     expect(run.code).toBe(1);
     expect(run.stderr).toContain('SubgraphResolverUnavailable');
@@ -661,4 +688,174 @@ test('a caller-supplied run id is used by the run summary and every trace event'
     expect([...new Set(run.events.map((event) => event.run_id))]).toEqual([runId]);
     expect(summaryOf(run)?.run_id).toBe(runId);
   });
+});
+function dataChain(length: number) {
+  const links = Array.from({ length }, (_, index) => `link_${index}`);
+  const nodes = [
+    spellNode('start', 'event/on_start'),
+    ...links.map((id, index) => spellNode(id, 'text/template', { template: index === 0 ? 'seed' : '{{text}}' })),
+    spellNode('send', 'io/send_message'),
+  ];
+  const wires = [
+    spellWire('w_start', 'start', 'out', 'send', 'in'),
+    ...links.slice(1).map((id, index) => spellWire(`w_${id}`, links[index], 'text', id, 'text')),
+    spellWire('w_content', links[length - 1], 'text', 'send', 'content'),
+  ];
+  return { nodes, wires };
+}
+
+test('validating a 50,000-node pure data chain finishes without overflowing the stack', async () => {
+  const chain = dataChain(50_000);
+  await withSpellFile(chain.nodes, chain.wires, async (path) => {
+    const validation = await runSpell([path, '--validate'], {});
+    expect(validation.signal).toBeNull();
+    expect(validation.code).toBe(0);
+    expect(JSON.parse(validation.stdout)).toEqual({ valid: true, errors: [] });
+  });
+});
+
+test('a 3,500-node pure data chain runs without overflowing the stack and every data node counts against the step limit', async () => {
+  const chain = dataChain(3_500);
+  const steps = chain.nodes.length;
+  await withSpellFile(chain.nodes, chain.wires, async (path) => {
+    const over = await runSpell([path, '--step-limit', String(steps - 1)], {});
+    expect(over.signal).toBeNull();
+    expect(over.code).toBe(1);
+    expect(summaryOf(over)?.error).toBe(`step limit ${steps - 1} exceeded`);
+    expect(eventIndex(over.events, 'node_finished', 'send')).toBe(-1);
+    const within = await runSpell([path, '--step-limit', String(steps)], {});
+    expect(within.signal).toBeNull();
+    expect(within.code).toBe(0);
+    expect(summaryOf(within)?.replies).toEqual(['seed']);
+    expect(summaryOf(within)?.nodes_executed).toBe(steps);
+  });
+});
+
+const childSpellId = '0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c01';
+const childSpell = {
+  schema_version: 1,
+  id: childSpellId,
+  name: 'child',
+  nodes: [spellNode('child_start', 'event/on_start'), spellNode('child_words', 'text/template', { template: 'child saw {{topic}}' }), spellNode('child_send', 'io/send_message')],
+  wires: [
+    spellWire('cw_flow', 'child_start', 'out', 'child_send', 'in'),
+    spellWire('cw_topic', 'child_start', 'payload', 'child_words', 'topic'),
+    spellWire('cw_content', 'child_words', 'text', 'child_send', 'content'),
+  ],
+};
+
+async function withChildSpell<T>(use: (childPath: string) => Promise<T>) {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-child-'));
+  try {
+    const childPath = join(dir, 'child.json');
+    await writeFile(childPath, JSON.stringify(childSpell));
+    return await use(childPath);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test('a flow/subgraph node runs the child spell with its payload, returns its result, outputs and replies, and shares the parent step limit', async () => {
+  const nodes = [spellNode('start', 'event/on_start'), spellNode('call', 'flow/subgraph'), spellNode('words', 'text/template', { template: 'parent heard {{result}}' }), spellNode('send', 'io/send_message')];
+  const wires = [
+    spellWire('w_call', 'start', 'out', 'call', 'in'),
+    spellWire('w_payload', 'start', 'payload', 'call', 'payload'),
+    spellWire('w_send', 'call', 'out', 'send', 'in'),
+    spellWire('w_result', 'call', 'result', 'words', 'result'),
+    spellWire('w_content', 'words', 'text', 'send', 'content'),
+  ];
+  const totalSteps = nodes.length + childSpell.nodes.length;
+  await withChildSpell(async (childPath) => {
+    await withSpellFile(nodes, wires, async (path) => {
+      const run = await runSpell([path, '--subgraph', childPath, '--payload', JSON.stringify('rust'), '--step-limit', String(totalSteps)], {});
+      expect(run.code).toBe(0);
+      const summary = summaryOf(run);
+      expect(summary?.replies).toEqual(['child saw rust', 'parent heard child saw rust']);
+      expect(summary?.outputs['call.result']).toEqual({ type: 'string', value: 'child saw rust' });
+      expect(summary?.outputs['call.outputs']?.value).toMatchObject({ 'child_send.sent': 'child saw rust', 'child_words.text': 'child saw rust' });
+      expect(eventIndex(run.events, 'node_finished', 'child_send')).toBeLessThan(eventIndex(run.events, 'node_finished', 'send'));
+      expect(run.events.filter((event) => event.event === 'run_finished')).toHaveLength(1);
+
+      const starved = await runSpell([path, '--subgraph', childPath, '--payload', JSON.stringify('rust'), '--step-limit', String(nodes.length)], {});
+      expect(starved.code).toBe(1);
+      expect(summaryOf(starved)?.error).toBe(`step limit ${nodes.length} exceeded`);
+      expect(eventIndex(starved.events, 'node_finished', 'child_send')).toBe(-1);
+      expect(eventIndex(starved.events, 'node_started', 'send')).toBe(-1);
+    }, { subgraphs: [{ node_id: 'call', spell_id: childSpellId }] });
+  });
+});
+
+test('the validator rejects a subgraphs entry that no flow/subgraph node calls and a flow/subgraph node with no target', async () => {
+  const nodes = [spellNode('start', 'event/on_start'), spellNode('send', 'io/send_message', { content: 'hi' }), spellNode('call', 'flow/subgraph')];
+  const wires = [spellWire('w_send', 'start', 'out', 'send', 'in'), spellWire('w_call', 'send', 'out', 'call', 'in')];
+  await withChildSpell(async (childPath) => {
+    await withSpellFile(nodes, wires, async (path) => {
+      const validation = await runSpell([path, '--validate'], {});
+      expect(validation.code).toBe(2);
+      expect(JSON.parse(validation.stdout)).toEqual({
+        valid: false,
+        errors: [
+          { kind: 'orphan_subgraph', detail: { node: 'send', spell: childSpellId } },
+          { kind: 'subgraph_target_missing', detail: { node: 'call' } },
+        ],
+      });
+      const run = await runSpell([path, '--subgraph', childPath], {});
+      expect(run.code).toBe(1);
+      expect(run.events).toEqual([]);
+    }, { subgraphs: [{ node_id: 'send', spell_id: childSpellId }] });
+  });
+});
+
+test('a run whose node outputs pass 1 MiB truncates the activation log but keeps every reply in order and sends a compact run_finished event', async () => {
+  const bulk = 'z'.repeat(600 * 1024);
+  const nodes = [
+    spellNode('start', 'event/on_start'),
+    spellNode('before', 'io/send_message', { content: 'before the flood' }),
+    spellNode('bulk_a', 'var/set', { name: 'a', value: bulk }),
+    spellNode('bulk_b', 'var/set', { name: 'b', value: bulk }),
+    spellNode('after', 'io/send_message', { content: 'after the flood' }),
+  ];
+  const wires = [
+    spellWire('w_before', 'start', 'out', 'before', 'in'),
+    spellWire('w_a', 'before', 'out', 'bulk_a', 'in'),
+    spellWire('w_b', 'bulk_a', 'out', 'bulk_b', 'in'),
+    spellWire('w_after', 'bulk_b', 'out', 'after', 'in'),
+  ];
+  await withSpellFile(nodes, wires, async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(0);
+    const summary = summaryOf(run);
+    expect(summary?.activations_truncated).toBe(true);
+    expect(summary?.replies).toEqual(['before the flood', 'after the flood']);
+    expect(summary?.activations?.find((activation) => activation.node_id === 'after')?.outputs).toEqual({});
+    const finished = run.events.find((event) => event.event === 'run_finished');
+    expect(finished?.summary).toMatchObject({ run_id: summary?.run_id, status: 'succeeded', activations_truncated: true, outputs: {}, activations: [], replies: [] });
+    expect(JSON.stringify(finished).length).toBeLessThan(2_048);
+  });
+});
+
+test('an OpenAI [DONE] marker does not end a Gemini or Anthropic stream that never sent its own completion marker', async () => {
+  const provider = await startScriptedServer((request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    const chunk = request.url.includes('gemini') ? { candidates: [{ content: { parts: [{ text: 'half of it' }] } }] } : { type: 'content_block_delta', delta: { type: 'text_delta', text: 'half of it' } };
+    response.end(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`);
+  });
+  try {
+    const cases = [
+      { provider: 'gemini', model: 'gemini-2.0-flash', failure: 'gemini stream ended without a finishReason' },
+      { provider: 'anthropic', model: 'claude-haiku-5-5', failure: 'anthropic stream sent [DONE] instead of message_stop' },
+    ];
+    for (const { provider: name, model, failure } of cases) {
+      const nodes = [spellNode('start', 'event/on_start'), spellNode('writer', 'ai/stream_text', { provider: name, model, prompt: 'write' })];
+      await withSpellFile(nodes, [spellWire('w_start', 'start', 'out', 'writer', 'in')], async (path) => {
+        const run = await runSpell([path], { MAGICKLALA_LLM_BASE_URL: provider.baseUrl });
+        expect(run.code).toBe(1);
+        expect(failureOf(run, 'writer')).toContain(failure);
+        expect(summaryOf(run)?.outputs['writer.text']).toBeUndefined();
+      });
+    }
+    expect(provider.requests.map((request) => request.url)).toEqual(['/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse', '/v1/messages']);
+  } finally {
+    await provider.close();
+  }
 });
