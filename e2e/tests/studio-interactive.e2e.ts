@@ -4,16 +4,22 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { DatabaseSync } from 'node:sqlite';
 import { inflateSync } from 'node:zlib';
 
 const run = promisify(execFile);
 const repoRoot = resolve(import.meta.dirname, '..', '..');
 const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+const catalogCategoryOrder = ['events', 'flow', 'ai', 'memory', 'knowledge', 'io', 'code', 'variables', 'text', 'logic', 'json', 'network', 'time'];
+const unreachableLlm = 'http://127.0.0.1:9';
+
+type ExampleSpell = { nodes: { id: string; config: unknown }[]; wires: { id: string }[] };
+type RunReport = { status: string; events: string[]; failedNodes: string[]; replies: string[]; error: string | null; validation: string };
 
 type Bounds = { key: string; left: number | null; right: number | null; top: number | null; bottom: number | null };
 
 type ProbeReport = {
-  registry: { kinds: string[]; appKinds: string[]; paletteKinds: string[] };
+  registry: { kinds: string[]; appKinds: string[]; paletteKinds: string[]; categories: string[] };
   defaultSpell: { nodes: number; wires: number; titles: string[]; kinds: string[]; registryErrors: string[] };
   toolbar: { width: number; height: number; theme: string; items: Bounds[] }[];
   contextMenu: {
@@ -28,7 +34,14 @@ type ProbeReport = {
   spawn: { paletteKind: string; nodesBefore: number; nodesAfter: number; spawnedKind: string };
   drag: { node: string; before: [number, number]; after: [number, number]; pointerDelta: [number, number] };
   validate: { status: string };
-  run: { events: string[]; succeededNodes: number; activeWires: number };
+  run: RunReport & { succeededNodes: number; activeWires: number };
+  preserve: { file: string; canvasWires: number; validation: string; wireIds: string[]; configs: Record<string, unknown> }[];
+  edit: { node: string; script: string; config: Record<string, unknown> };
+  execution: { webhook: RunReport; invalid: RunReport };
+  chat: { message: string; echoReply: string; failingReply: string; failingError: string | null };
+  publish: { version: number; graph: unknown; reopened: { versions: number[]; spell: unknown } };
+  palette: { categories: string[]; order: string[]; accents: Record<string, number[]> };
+  inspector: { width: number; height: number; editorBottom: number | null; panelBottom: number | null };
   theme: { before: string; after: string };
   renders: { path: string; width: number; height: number }[];
 };
@@ -71,13 +84,14 @@ function pngFacts(bytes: Buffer) {
   return { width, height, distinctColors: colors.size, entropy };
 }
 
-test('studio probe drives a registry palette, spawn, drag, validate, run trace, theme toggle, a right-click canvas menu and an unclipped 960px toolbar, then renders dark and light desktop and compact PNGs headlessly', { timeout: 900_000 }, async () => {
+test('studio probe keeps example configs and dynamic wires, runs spells and chat through the real engine, publishes releases that survive a reopen, and drives palette, drag, context menu, 960px toolbar and dark and light PNGs headlessly', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-probe-'));
   const desktop = join(dir, 'studio-desktop.png');
   const compact = join(dir, 'studio-compact.png');
+  const dbPath = join(dir, 'studio.sqlite');
   try {
-    const env = { ...process.env, DISPLAY: '', WAYLAND_DISPLAY: '' };
-    const { stdout } = await run('cargo', ['run', '-q', '-p', 'magicklala-studio', '--example', 'studio_probe', '--', desktop, compact], {
+    const env = { ...process.env, DISPLAY: '', WAYLAND_DISPLAY: '', MAGICKLALA_LLM_BASE_URL: unreachableLlm, MAGICKLALA_LLM_API_KEY: '', OPENAI_API_KEY: '' };
+    const { stdout } = await run('cargo', ['run', '-q', '-p', 'magicklala-studio', '--example', 'studio_probe', '--', desktop, compact, dbPath], {
       cwd: repoRoot,
       env,
       timeout: 900_000,
@@ -104,8 +118,57 @@ test('studio probe drives a registry palette, spawn, drag, validate, run trace, 
     expect(report.run.events).toContain('NodeStarted');
     expect(report.run.events).toContain('WireActivated');
     expect(report.run.events).toContain('NodeFinished');
-    expect(report.run.succeededNodes).toBe(report.defaultSpell.nodes);
-    expect(report.run.activeWires).toBe(report.defaultSpell.wires);
+    expect(report.run.events).toContain('NodeFailed');
+    expect(report.run.status).toBe('Failed');
+    expect(report.run.failedNodes).toEqual(['llm']);
+    expect(report.run.error).toContain(unreachableLlm.replace('http://', ''));
+    expect(report.run.replies).toEqual([]);
+    expect(report.run.succeededNodes).toBeLessThan(report.defaultSpell.nodes);
+
+    for (const name of ['webhook_router.json', 'parallel_research.json']) {
+      const example = JSON.parse(await readFile(join(repoRoot, 'examples', name), 'utf8')) as ExampleSpell;
+      const loaded = report.preserve.find((entry) => entry.file === name);
+      expect(loaded?.validation).toBe('valid');
+      expect(loaded?.canvasWires).toBe(example.wires.length);
+      expect([...(loaded?.wireIds ?? [])].sort()).toEqual(example.wires.map((wire) => wire.id).sort());
+      expect(loaded?.configs).toEqual(Object.fromEntries(example.nodes.map((node) => [node.id, node.config])));
+    }
+    const router = JSON.parse(await readFile(join(repoRoot, 'examples', 'webhook_router.json'), 'utf8')) as ExampleSpell;
+    const classify = router.nodes.find((node) => node.id === report.edit.node)?.config as Record<string, unknown>;
+    expect(report.edit.script).not.toBe(classify.script);
+    expect(report.edit.config).toEqual({ ...classify, script: report.edit.script });
+
+    expect(report.execution.webhook.status).toBe('Succeeded');
+    expect(report.execution.webhook.failedNodes).toEqual([]);
+    expect(report.execution.webhook.events).toContain('NodeFinished');
+    expect(report.execution.webhook.replies).toEqual(['Order 42 received']);
+    expect(report.execution.invalid.status).toBe('Invalid');
+    expect(report.execution.invalid.validation).toBe('invalid');
+    expect(report.execution.invalid.events).not.toContain('RunFinished');
+    expect(report.execution.invalid.error).toContain('nope/unknown');
+
+    expect(report.chat.echoReply).toBe(`Echo: ${report.chat.message}`);
+    expect(report.chat.failingError).toContain(unreachableLlm.replace('http://', ''));
+    expect(report.chat.failingReply).toContain(report.chat.failingError ?? 'missing error');
+
+    expect((await stat(dbPath)).size).toBeGreaterThan(0);
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const rows = db.prepare('SELECT version, graph FROM spell_releases ORDER BY version').all() as { version: number; graph: string }[];
+    db.close();
+    expect(rows.map((row) => row.version)).toEqual([report.publish.version]);
+    expect(JSON.parse(rows[0].graph)).toEqual(report.publish.graph);
+    expect(report.publish.reopened.versions).toEqual([report.publish.version]);
+    expect(report.publish.reopened.spell).toEqual(report.publish.graph);
+
+    expect(report.palette.order).toEqual(catalogCategoryOrder);
+    expect(report.registry.categories.every((category) => catalogCategoryOrder.includes(category))).toBe(true);
+    expect(report.palette.categories).toEqual(catalogCategoryOrder.filter((category) => report.registry.categories.includes(category)));
+    expect(new Set(catalogCategoryOrder.map((category) => JSON.stringify(report.palette.accents[category]))).size).toBe(catalogCategoryOrder.length);
+
+    expect(report.inspector).toMatchObject({ width: 960, height: 640 });
+    expect(report.inspector.editorBottom).not.toBeNull();
+    expect(report.inspector.panelBottom).not.toBeNull();
+    expect((report.inspector.panelBottom ?? 0) - (report.inspector.editorBottom ?? 0)).toBeGreaterThanOrEqual(12);
 
     expect(report.theme).toEqual({ before: 'dark', after: 'light' });
 
