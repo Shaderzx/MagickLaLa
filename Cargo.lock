@@ -2440,9 +2440,11 @@ dependencies = [
  "magicklala-canvas",
  "magicklala-graph",
  "magicklala-nodes",
+ "magicklala-store",
  "rune",
  "serde_json",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

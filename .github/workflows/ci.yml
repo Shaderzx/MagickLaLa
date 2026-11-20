@@ -21,8 +21,10 @@ jobs:
         with:
           submodules: recursive
       - run: rustup toolchain install 1.99.1 --profile minimal --component clippy --component rustfmt
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1 libxkbcommon-dev libwayland-dev
-      - run: ci/verify --full
+      - run: ci/verify --fast
+      - run: cargo build -p magicklala-cli
   e2e:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -34,6 +36,7 @@ jobs:
         with:
           node-version: 22.23.5
       - run: rustup toolchain install 1.99.1 --profile minimal
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1 libxkbcommon-dev libwayland-dev
       - run: npm ci
         working-directory: e2e

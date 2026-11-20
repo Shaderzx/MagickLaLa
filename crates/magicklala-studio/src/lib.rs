@@ -1,10 +1,15 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::path::Path;
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use magicklala_canvas::{CanvasState, ExecutionStatus, category_accent, interactive_canvas_view, status_color};
-use magicklala_graph::{NodeCatalog, NodeId, NodeInstance, NodeSpec, SpellGraph, SpellValidator, TraceEvent, VariableDef, Wire, WireId};
+use magicklala_graph::{
+    EngineServices, EventEmitter, NodeCatalog, NodeId, NodeInstance, NodeSpec, RunStatus, RunSummary, RunTrigger, SpellEngine, SpellGraph, SpellValidator,
+    TraceEvent, Value, VariableDef, Wire, WireId,
+};
+use magicklala_nodes::{HttpLlmGateway, InMemoryKnowledge, InMemoryMemory, LlmGatewayConfig, default_registry};
+use magicklala_store::{NewProject, NewSpell, NewSpellRelease, Repository, SpellRecordId, SpellRelease, SqliteStore};
 use rune::{App, AppSpec, Color, Cx, El, ScrollSpec, TextEdit, TextStyle, col, el, row, text, text_input};
 use serde_json::json;
 use thiserror::Error;
@@ -14,14 +19,23 @@ pub const TOOLBAR_HEIGHT: f32 = 48.0;
 pub const LEFT_RAIL_WIDTH: f32 = 240.0;
 pub const INSPECTOR_WIDTH: f32 = 300.0;
 pub const TRACE_HEIGHT: f32 = 110.0;
-pub const PALETTE_CATEGORY_ORDER: [&str; 7] = ["events", "flow", "ai", "memory", "knowledge", "io", "code"];
+pub const PALETTE_CATEGORY_ORDER: [&str; 13] =
+    ["events", "flow", "ai", "memory", "knowledge", "io", "code", "variables", "text", "logic", "json", "network", "time"];
 pub const LEGACY_KIND_PREFIX: &str = "core/";
 pub const CONTEXT_MENU_SIZE: (f32, f32) = (210.0, 150.0);
 pub const QUICK_ADD_KIND: &str = "ai/generate_text";
 pub const COMPACT_TOOLBAR_BELOW: f32 = 1100.0;
+pub const STUDIO_PROJECT: &str = "Studio";
+pub const STUDIO_CHANNEL: &str = "studio";
+pub const STUDIO_SENDER: &str = "studio-user";
+pub const CHAT_TRIGGER_KIND: &str = "event/on_message";
+const REPLY_OUTPUTS: [&str; 2] = ["reply", "content"];
+const SENT_OUTPUT_SUFFIX: &str = ".sent";
 
 static LAUNCH_SIZE: Mutex<Option<(f32, f32)>> = Mutex::new(None);
 static LAUNCH_THEME: Mutex<Option<Theme>> = Mutex::new(None);
+static LAUNCH_DB: Mutex<Option<PathBuf>> = Mutex::new(None);
+static RUNTIME: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
 
 #[derive(Debug, Error)]
 pub enum StudioError {
@@ -29,17 +43,183 @@ pub enum StudioError {
     Rune(String),
     #[error("snapshot was not written to {0}")]
     MissingSnapshot(String),
+    #[error("studio store failed: {0}")]
+    Store(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StudioConfig {
     pub size: (f32, f32),
+    pub db_path: Option<PathBuf>,
 }
 
 impl Default for StudioConfig {
     fn default() -> Self {
-        Self { size: (1280.0, 800.0) }
+        Self { size: (1280.0, 800.0), db_path: None }
     }
+}
+
+fn runtime() -> Result<&'static tokio::runtime::Runtime, StudioError> {
+    RUNTIME
+        .get_or_init(|| tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().ok())
+        .as_ref()
+        .ok_or_else(|| StudioError::Store("tokio runtime could not start".to_owned()))
+}
+
+fn block<F>(future: F) -> Result<F::Output, StudioError>
+where
+    F: Future + Send,
+    F::Output: Send,
+{
+    let runtime = runtime()?;
+    if tokio::runtime::Handle::try_current().is_err() {
+        return Ok(runtime.block_on(future));
+    }
+    std::thread::scope(|scope| scope.spawn(|| runtime.block_on(future)).join()).map_err(|_| StudioError::Store("studio worker panicked".to_owned()))
+}
+
+pub struct StudioStore {
+    repository: SqliteStore,
+    pub url: String,
+}
+
+impl StudioStore {
+    pub fn open(db_path: Option<&Path>) -> Result<Self, StudioError> {
+        let url = db_path.map_or_else(|| "sqlite::memory:".to_owned(), |path| format!("sqlite://{}", path.display()));
+        let target = url.clone();
+        let repository = block(async move {
+            let store = SqliteStore::connect(&target).await?;
+            store.migrate().await?;
+            Ok::<_, magicklala_store::StoreError>(store)
+        })?
+        .map_err(|error| StudioError::Store(error.to_string()))?;
+        Ok(Self { repository, url })
+    }
+
+    fn spell_record(&self, spell: &SpellGraph) -> Result<SpellRecordId, StudioError> {
+        let repository = self.repository.clone();
+        let spell = spell.clone();
+        block(async move {
+            let project = match repository.list_projects().await?.into_iter().find(|project| project.name == STUDIO_PROJECT) {
+                Some(project) => project,
+                None => {
+                    repository.create_project(NewProject { name: STUDIO_PROJECT.to_owned(), description: "Spells published from Studio".to_owned() }).await?
+                }
+            };
+            let existing = repository.list_spells(project.id).await?.into_iter().find(|record| record.name == spell.name);
+            let record = match existing {
+                Some(record) => record,
+                None => repository.create_spell(NewSpell { project_id: project.id, name: spell.name.clone(), graph: spell.clone() }).await?,
+            };
+            Ok::<_, magicklala_store::StoreError>(record.id)
+        })?
+        .map_err(|error| StudioError::Store(error.to_string()))
+    }
+
+    pub fn publish(&self, spell: &SpellGraph) -> Result<SpellRelease, StudioError> {
+        let id = self.spell_record(spell)?;
+        let repository = self.repository.clone();
+        let graph = spell.clone();
+        block(async move {
+            repository.save_spell_graph(id, graph).await?;
+            repository.create_release(NewSpellRelease { spell_id: id, notes: "Published from Studio".to_owned() }).await
+        })?
+        .map_err(|error| StudioError::Store(error.to_string()))
+    }
+
+    pub fn latest_release(&self) -> Result<Option<(SpellGraph, Vec<SpellRelease>)>, StudioError> {
+        let repository = self.repository.clone();
+        block(async move {
+            let Some(project) = repository.list_projects().await?.into_iter().find(|project| project.name == STUDIO_PROJECT) else {
+                return Ok(None);
+            };
+            let mut newest: Option<Vec<SpellRelease>> = None;
+            for record in repository.list_spells(project.id).await? {
+                let mut releases = repository.list_releases(record.id).await?;
+                releases.sort_by_key(|release| release.version);
+                let newer = match (releases.last(), newest.as_ref().and_then(|current| current.last())) {
+                    (Some(candidate), Some(current)) => candidate.created_at > current.created_at,
+                    (Some(_), None) => true,
+                    _ => false,
+                };
+                if newer {
+                    newest = Some(releases);
+                }
+            }
+            Ok::<_, magicklala_store::StoreError>(newest.and_then(|releases| releases.last().map(|release| (release.graph.clone(), releases.clone()))))
+        })?
+        .map_err(|error| StudioError::Store(error.to_string()))
+    }
+}
+
+#[derive(Default)]
+struct TraceCollector(Mutex<Vec<TraceEvent>>);
+
+impl EventEmitter for TraceCollector {
+    fn emit(&self, event: TraceEvent) {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).push(event);
+    }
+}
+
+impl TraceCollector {
+    fn take(&self) -> Vec<TraceEvent> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunOutcome {
+    Finished(RunStatus),
+    Invalid,
+}
+
+impl RunOutcome {
+    pub fn label(self) -> String {
+        match self {
+            RunOutcome::Finished(status) => format!("{status:?}"),
+            RunOutcome::Invalid => "Invalid".to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunReport {
+    pub outcome: RunOutcome,
+    pub replies: Vec<String>,
+    pub error: Option<String>,
+}
+
+impl RunReport {
+    fn invalid(error: String) -> Self {
+        Self { outcome: RunOutcome::Invalid, replies: Vec::new(), error: Some(error) }
+    }
+
+    fn from_summary(summary: &RunSummary, failure: Option<String>) -> Self {
+        let replies = REPLY_OUTPUTS
+            .iter()
+            .filter_map(|key| summary.outputs.get(*key))
+            .chain(summary.outputs.iter().filter(|(name, _)| name.ends_with(SENT_OUTPUT_SUFFIX)).map(|(_, value)| value))
+            .filter_map(|value| value.as_str().map(str::to_owned))
+            .collect();
+        let error = summary.error.clone().or(failure).filter(|_| summary.status != RunStatus::Succeeded);
+        Self { outcome: RunOutcome::Finished(summary.status), replies, error }
+    }
+}
+
+pub fn editable_field(kind: &str) -> Option<&'static str> {
+    match kind {
+        "text/template" => Some("template"),
+        kind if kind.starts_with("code/") => Some("script"),
+        kind if kind.starts_with("ai/") => Some("prompt"),
+        _ => None,
+    }
+}
+
+fn studio_services() -> EngineServices {
+    let config = LlmGatewayConfig::from_env();
+    let llm: Option<Arc<dyn magicklala_graph::LlmGateway>> =
+        if config.base_url.is_some() || config.api_key.is_some() { Some(Arc::new(HttpLlmGateway::new(config))) } else { None };
+    EngineServices { llm, memory: Some(Arc::new(InMemoryMemory::new())), knowledge: Some(Arc::new(InMemoryKnowledge::new())) }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,15 +304,41 @@ pub struct StudioApp {
     pub chat: Vec<ChatMessage>,
     pub chat_input: TextEdit,
     pub releases: Vec<Release>,
+    pub configs: BTreeMap<NodeId, serde_json::Value>,
+    pub run_payload: serde_json::Value,
+    pub last_run: Option<RunReport>,
+    pub last_published: Option<SpellRelease>,
+    pub store: Option<StudioStore>,
+    pub store_error: Option<String>,
 }
 
 impl StudioApp {
     pub fn demo() -> Self {
-        let mut app = Self::from_registry();
+        let db_path = LAUNCH_DB.lock().ok().and_then(|path| path.clone());
+        let mut app = Self::open(&StudioConfig { db_path, ..StudioConfig::default() }).unwrap_or_else(|error| {
+            let mut app = Self::from_registry();
+            app.store_error = Some(error.to_string());
+            app
+        });
         if LAUNCH_THEME.lock().ok().and_then(|theme| *theme) == Some(Theme::Light) {
             app.toggle_theme();
         }
         app
+    }
+
+    pub fn open(config: &StudioConfig) -> Result<Self, StudioError> {
+        let store = StudioStore::open(config.db_path.as_deref())?;
+        let mut app = match store.latest_release()? {
+            Some((graph, releases)) => {
+                let mut app = Self::with_spell(graph, registry_specs());
+                app.releases = releases.iter().map(|release| Release { version: release.version, nodes: release.graph.nodes.len() }).collect();
+                app.last_published = releases.last().cloned();
+                app
+            }
+            None => Self::from_registry(),
+        };
+        app.store = Some(store);
+        Ok(app)
     }
 
     pub fn from_registry() -> Self {
@@ -158,11 +364,18 @@ impl StudioApp {
             prompts: BTreeMap::new(),
             chat: vec![ChatMessage { from_user: false, text: "Hi! Send a message to run this spell.".to_owned() }],
             chat_input: TextEdit::new(""),
-            releases: vec![Release { version: 1, nodes: 5 }],
+            releases: Vec::new(),
+            configs: BTreeMap::new(),
+            run_payload: serde_json::json!({ "channel": STUDIO_CHANNEL, "sender": STUDIO_SENDER, "content": "Hello from Studio" }),
+            last_run: None,
+            last_published: None,
+            store: None,
+            store_error: None,
         };
-        let ids: Vec<(NodeId, String)> = app.canvas.nodes.iter().map(|card| (card.id.clone(), card.kind.clone())).collect();
-        for (id, kind) in ids {
-            app.prompts.insert(id, TextEdit::new(default_prompt(&kind)));
+        let nodes: Vec<(NodeId, String, serde_json::Value)> =
+            app.spell.nodes.iter().map(|node| (node.id.clone(), node.kind.clone(), node.config.clone())).collect();
+        for (id, kind, config) in nodes {
+            app.track_config(id, &kind, config);
         }
         let viewport = app.canvas_size();
         app.canvas.fit(viewport);
@@ -184,10 +397,45 @@ impl StudioApp {
         let spec = self.specs.iter().find(|spec| spec.kind == kind)?.clone();
         let center = self.canvas.camera.screen_to_world(screen);
         let id = self.canvas.add_node_from_spec(&spec, center);
-        self.prompts.insert(id.clone(), TextEdit::new(default_prompt(kind)));
+        self.track_config(id.clone(), kind, serde_json::Value::Null);
         self.validation = ValidationState::Unchecked;
         self.sync_spell();
         Some(id)
+    }
+
+    fn track_config(&mut self, id: NodeId, kind: &str, config: serde_json::Value) {
+        if let Some(field) = editable_field(kind) {
+            let text = match config.get(field) {
+                Some(serde_json::Value::String(text)) => text.clone(),
+                Some(other) => other.to_string(),
+                None if config.is_null() => default_prompt(kind),
+                None => String::new(),
+            };
+            self.prompts.insert(id.clone(), TextEdit::new(text));
+        }
+        self.configs.insert(id, config);
+    }
+
+    pub fn node_config(&self, id: &NodeId, kind: &str) -> serde_json::Value {
+        let mut config = self.configs.get(id).cloned().unwrap_or(serde_json::Value::Null);
+        let (Some(field), Some(edit)) = (editable_field(kind), self.prompts.get(id)) else { return config };
+        let present = config.get(field).is_some();
+        if !present && edit.text.is_empty() {
+            return config;
+        }
+        if present
+            && config.get(field).and_then(serde_json::Value::as_str).is_none()
+            && config.get(field).map(ToString::to_string).as_deref() == Some(edit.text.as_str())
+        {
+            return config;
+        }
+        if !config.is_object() {
+            config = json!({});
+        }
+        if let Some(map) = config.as_object_mut() {
+            map.insert(field.to_owned(), serde_json::Value::String(edit.text.clone()));
+        }
+        config
     }
 
     pub fn sync_spell(&mut self) {
@@ -195,12 +443,7 @@ impl StudioApp {
             .canvas
             .nodes
             .iter()
-            .map(|card| NodeInstance {
-                id: card.id.clone(),
-                kind: card.kind.clone(),
-                position: card.position,
-                config: self.prompts.get(&card.id).map_or(serde_json::Value::Null, |prompt| json!({ "prompt": prompt.text })),
-            })
+            .map(|card| NodeInstance { id: card.id.clone(), kind: card.kind.clone(), position: card.position, config: self.node_config(&card.id, &card.kind) })
             .collect();
         self.spell.wires = self
             .canvas
@@ -226,16 +469,59 @@ impl StudioApp {
     }
 
     pub fn run_spell(&mut self) -> usize {
-        self.sync_spell();
+        let payload = self.run_payload.clone();
+        self.execute(None, payload);
+        self.trace.len()
+    }
+
+    fn trigger(&self, prefer: Option<&str>, payload: &serde_json::Value) -> Option<RunTrigger> {
+        let spec_of = |node: &NodeInstance| self.specs.iter().find(|spec| spec.kind == node.kind && spec.is_trigger);
+        let triggers: Vec<(&NodeInstance, &NodeSpec)> = self.spell.nodes.iter().filter_map(|node| spec_of(node).map(|spec| (node, spec))).collect();
+        let (node, spec) = prefer.and_then(|kind| triggers.iter().find(|(node, _)| node.kind == kind)).or_else(|| triggers.first()).copied()?;
+        let socket = spec.outputs.first().map_or_else(|| "out".to_owned(), |socket| socket.name.clone());
+        Some(RunTrigger { node: node.id.clone(), socket, payload: Value::from(payload.clone()) })
+    }
+
+    pub fn execute(&mut self, prefer: Option<&str>, payload: serde_json::Value) -> RunReport {
         self.runs += 1;
-        self.pending_trace = plan_trace(&self.spell).into();
         self.trace.clear();
         self.trace_events.clear();
-        let mut applied = 0;
-        while self.step_trace() {
-            applied += 1;
+        self.pending_trace.clear();
+        self.canvas.nodes.iter_mut().for_each(|card| card.status = ExecutionStatus::Idle);
+        self.canvas.wires.iter_mut().for_each(|wire| wire.active = false);
+        let report = match self.validate().clone() {
+            ValidationState::Invalid(errors) => RunReport::invalid(errors.join("; ")),
+            _ => match self.trigger(prefer, &payload) {
+                None => RunReport::invalid("spell has no trigger node".to_owned()),
+                Some(trigger) => self.run_engine(trigger),
+            },
+        };
+        if report.outcome == RunOutcome::Invalid {
+            let detail = report.error.clone().unwrap_or_default();
+            self.trace.push(TraceLine { at_ms: 0, kind: "RunRejected", detail, status: ExecutionStatus::Failed });
         }
-        applied
+        self.last_run = Some(report.clone());
+        report
+    }
+
+    fn run_engine(&mut self, trigger: RunTrigger) -> RunReport {
+        let engine = SpellEngine::new(Arc::new(default_registry()), studio_services());
+        let collector = Arc::new(TraceCollector::default());
+        let emitter: Arc<dyn EventEmitter> = collector.clone();
+        let graph = self.spell.clone();
+        let outcome = block(async move { engine.run(&graph, trigger, emitter).await.map_err(|error| error.to_string()) });
+        self.pending_trace = collector.take().into();
+        while self.step_trace() {}
+        let finished = self.trace_events.iter().rev().find_map(|event| match event {
+            TraceEvent::RunFinished { summary, .. } => Some(summary.clone()),
+            _ => None,
+        });
+        match (outcome, finished) {
+            (Ok(Ok(summary)), _) => RunReport::from_summary(&summary, None),
+            (Ok(Err(error)), Some(summary)) => RunReport::from_summary(&summary, Some(error)),
+            (Ok(Err(error)), None) => RunReport::invalid(error),
+            (Err(error), _) => RunReport { outcome: RunOutcome::Finished(RunStatus::Failed), replies: Vec::new(), error: Some(error.to_string()) },
+        }
     }
 
     pub fn step_trace(&mut self) -> bool {
@@ -261,6 +547,7 @@ impl StudioApp {
         self.close_context_menu();
         if let Some(removed) = self.canvas.remove_selected_node() {
             self.prompts.remove(&removed.id);
+            self.configs.remove(&removed.id);
             self.validation = ValidationState::Unchecked;
             self.sync_spell();
         }
@@ -281,10 +568,22 @@ impl StudioApp {
         self.canvas.light = self.theme == Theme::Light;
     }
 
-    pub fn publish(&mut self) -> u32 {
-        let version = self.releases.last().map_or(1, |release| release.version + 1);
-        self.releases.push(Release { version, nodes: self.canvas.nodes.len() });
-        version
+    pub fn publish(&mut self) -> Result<u32, StudioError> {
+        if let ValidationState::Invalid(errors) = self.validate().clone() {
+            let error = StudioError::Store(format!("cannot publish an invalid spell: {}", errors.join("; ")));
+            self.store_error = Some(error.to_string());
+            return Err(error);
+        }
+        if self.store.is_none() {
+            self.store = Some(StudioStore::open(None)?);
+        }
+        let store = self.store.as_ref().ok_or_else(|| StudioError::Store("no studio store".to_owned()))?;
+        let release = store.publish(&self.spell).inspect_err(|error| self.store_error = Some(error.to_string()))?;
+        self.releases.push(Release { version: release.version, nodes: release.graph.nodes.len() });
+        self.store_error = None;
+        let version = release.version;
+        self.last_published = Some(release);
+        Ok(version)
     }
 
     pub fn send_chat(&mut self) {
@@ -294,13 +593,21 @@ impl StudioApp {
         }
         self.chat.push(ChatMessage { from_user: true, text: message.clone() });
         self.chat_input = TextEdit::new("");
-        let events = self.run_spell();
-        self.chat.push(ChatMessage { from_user: false, text: format!("Run #{} finished: {events} trace events for \"{message}\".", self.runs) });
+        let report = self.execute(Some(CHAT_TRIGGER_KIND), json!({ "channel": STUDIO_CHANNEL, "sender": STUDIO_SENDER, "content": message }));
+        let text = match (report.replies.is_empty(), &report.error) {
+            (false, _) => report.replies.join("\n"),
+            (true, Some(error)) => format!("Run #{} {}: {error}", self.runs, report.outcome.label().to_lowercase()),
+            (true, None) => format!("Run #{} finished without a reply.", self.runs),
+        };
+        self.chat.push(ChatMessage { from_user: false, text });
     }
 }
 
 pub fn run_studio(config: StudioConfig) -> Result<(), StudioError> {
     remember_size(config.size);
+    if let Ok(mut slot) = LAUNCH_DB.lock() {
+        slot.clone_from(&config.db_path);
+    }
     remember_theme(Theme::Dark);
     App::new(spec(config)).args(Vec::new()).try_run().map_err(StudioError::Rune)
 }
@@ -319,7 +626,7 @@ pub fn render_headless_snapshot_themed(out_path: &Path, size: (f32, f32), theme:
     remember_theme(theme);
     let args =
         vec!["--snap".to_owned(), target.clone(), "--size".to_owned(), format!("{}x{}", size.0 as u32, size.1 as u32), "--scale".to_owned(), "1".to_owned()];
-    App::new(spec(StudioConfig { size })).args(args).try_run().map_err(StudioError::Rune)?;
+    App::new(spec(StudioConfig { size, db_path: None })).args(args).try_run().map_err(StudioError::Rune)?;
     if out_path.is_file() { Ok(()) } else { Err(StudioError::MissingSnapshot(target)) }
 }
 
@@ -512,7 +819,7 @@ fn toolbar(app: &StudioApp, t: &Tones) -> El {
             app.run_spell();
         }))
         .child(tool("publish", "Publish", false, |app| {
-            app.publish();
+            app.publish().ok();
         }))
         .child(tool("theme-toggle", if app.theme == Theme::Dark { "Light" } else { "Dark" }, false, StudioApp::toggle_theme))
         .child(zoom);
@@ -595,9 +902,16 @@ fn left_rail(app: &StudioApp, t: &Tones) -> El {
                     )),
                 )
             });
-            app.releases.iter().rev().fold(agents.child(label("RELEASES", 10.5, 700.0, t.muted)), |list, release| {
-                list.child(label(format!("v{} · {} nodes", release.version, release.nodes), 12.0, 500.0, t.ink))
-            })
+            let heading = agents.child(label("RELEASES", 10.5, 700.0, t.muted));
+            let heading = match (&app.store_error, app.releases.is_empty()) {
+                (Some(error), _) => heading.child(label(error, 11.5, 500.0, status_color(ExecutionStatus::Failed)).wrap()),
+                (None, true) => heading.child(label("Nothing published yet. Press Publish.", 11.5, 500.0, t.muted)),
+                (None, false) => heading,
+            };
+            app.releases
+                .iter()
+                .rev()
+                .fold(heading, |list, release| list.child(label(format!("v{} · {} nodes", release.version, release.nodes), 12.0, 500.0, t.ink)))
         }
     };
     col()
@@ -674,12 +988,14 @@ fn inspector_body(app: &StudioApp, t: &Tones) -> El {
         },
     );
     let id = card.id.clone();
-    let editor = app.prompts.get(&card.id).map(|edit| {
+    let field = editable_field(&card.kind);
+    let editor_height = if app.size.1 < 720.0 { 118.0 } else { 150.0 };
+    let editor = field.and_then(|field| app.prompts.get(&card.id).map(|edit| (field, edit))).map(|(field, edit)| {
         text_input(edit, font(12.5, 450.0).mono())
             .key("prompt-editor")
-            .label(format!("{} prompt", card.title))
+            .label(format!("{} {field}", card.title))
             .w_full()
-            .h(150.0)
+            .h(editor_height)
             .padding(10.0)
             .radius(8.0)
             .fill(t.background)
@@ -695,10 +1011,18 @@ fn inspector_body(app: &StudioApp, t: &Tones) -> El {
         ))
         .child(label("SOCKETS", 10.5, 700.0, t.muted))
         .child(sockets)
-        .child(label(if card.category.eq_ignore_ascii_case("code") { "RHAI SCRIPT" } else { "PROMPT" }, 10.5, 700.0, t.muted));
-    match editor {
-        Some(editor) => column.child(editor),
-        None => column,
+        .pb(14.0);
+    match (field, editor) {
+        (Some(field), Some(editor)) => column.child(label(editor_caption(field), 10.5, 700.0, t.muted)).child(editor),
+        _ => column,
+    }
+}
+
+fn editor_caption(field: &str) -> &'static str {
+    match field {
+        "script" => "RHAI SCRIPT",
+        "template" => "TEMPLATE",
+        _ => "PROMPT",
     }
 }
 
@@ -780,91 +1104,13 @@ fn trace_line(event: &TraceEvent, at_ms: u64, canvas: &CanvasState) -> TraceLine
         TraceEvent::WireActivated { wire_id, .. } => ("WireActivated", wire_id.0.clone(), ExecutionStatus::Succeeded),
         TraceEvent::StreamChunk { node_id, .. } => ("StreamChunk", title(node_id), ExecutionStatus::Running),
         TraceEvent::VariableSet { name, .. } => ("VariableSet", name.clone(), ExecutionStatus::Succeeded),
-        TraceEvent::RunFinished { summary, .. } => ("RunFinished", format!("{:?}", summary.status), ExecutionStatus::Succeeded),
+        TraceEvent::RunFinished { summary, .. } => (
+            "RunFinished",
+            format!("{:?}", summary.status),
+            if summary.status == RunStatus::Succeeded { ExecutionStatus::Succeeded } else { ExecutionStatus::Failed },
+        ),
     };
     TraceLine { at_ms, kind, detail, status }
-}
-
-fn timestamp(offset_ms: u64) -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_millis() as u64) + offset_ms;
-    let (secs, millis) = (now / 1000, now % 1000);
-    let days = (secs / 86_400) as i64;
-    let rem = secs % 86_400;
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z", rem / 3600, rem % 3600 / 60, rem % 60)
-}
-
-fn execution_order(spell: &SpellGraph) -> Vec<NodeId> {
-    let mut indegree: BTreeMap<&NodeId, usize> = spell.nodes.iter().map(|node| (&node.id, 0)).collect();
-    for wire in &spell.wires {
-        if let Some(count) = indegree.get_mut(&wire.to_node) {
-            *count += 1;
-        }
-    }
-    let mut ready: VecDeque<&NodeId> = spell.nodes.iter().map(|node| &node.id).filter(|id| indegree.get(id) == Some(&0)).collect();
-    let mut order = Vec::new();
-    while let Some(id) = ready.pop_front() {
-        order.push(id.clone());
-        for wire in spell.wires.iter().filter(|wire| &wire.from_node == id) {
-            if let Some(count) = indegree.get_mut(&wire.to_node) {
-                *count -= 1;
-                if *count == 0 {
-                    ready.push_back(&wire.to_node);
-                }
-            }
-        }
-    }
-    order
-}
-
-fn plan_trace(spell: &SpellGraph) -> Vec<TraceEvent> {
-    let run_id = uuid_like(spell);
-    let spell_id = serde_json::to_value(spell.id).unwrap_or(serde_json::Value::Null);
-    let mut clock = 0;
-    let mut next_at = || {
-        clock += 120;
-        timestamp(clock)
-    };
-    let started_at = next_at();
-    let mut raw = vec![json!({ "event": "run_started", "run_id": run_id, "spell_id": spell_id, "at": started_at })];
-    let order = execution_order(spell);
-    for node in &order {
-        raw.push(json!({ "event": "node_started", "run_id": run_id, "node_id": node.0, "at": next_at() }));
-        raw.push(json!({ "event": "node_finished", "run_id": run_id, "node_id": node.0, "at": next_at(), "duration_ms": 120 }));
-        for wire in spell.wires.iter().filter(|wire| &wire.from_node == node) {
-            raw.push(json!({ "event": "wire_activated", "run_id": run_id, "wire_id": wire.id.0, "at": next_at(), "value": null }));
-        }
-    }
-    let finished_at = next_at();
-    raw.push(json!({
-        "event": "run_finished",
-        "run_id": run_id,
-        "summary": {
-            "run_id": run_id,
-            "spell_id": spell_id,
-            "started_at": started_at,
-            "finished_at": finished_at,
-            "status": "succeeded",
-            "nodes_executed": order.len(),
-            "outputs": {},
-            "error": null
-        }
-    }));
-    raw.into_iter().filter_map(|value| serde_json::from_value(value).ok()).collect()
-}
-
-fn uuid_like(spell: &SpellGraph) -> String {
-    let base = spell.id.0.as_u128() ^ u128::from(SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_nanos() as u64));
-    let hex = format!("{base:032x}");
-    format!("{}-{}-4{}-a{}-{}", &hex[0..8], &hex[8..12], &hex[13..16], &hex[17..20], &hex[20..32])
 }
 
 fn default_prompt(kind: &str) -> String {

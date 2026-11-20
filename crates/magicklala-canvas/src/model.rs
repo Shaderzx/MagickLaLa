@@ -1,4 +1,4 @@
-use magicklala_graph::{NodeId, NodeSpec, RunStatus, SocketSpec, SocketType, SpellGraph, TraceEvent, WireId};
+use magicklala_graph::{DYNAMIC_SOCKET, NodeId, NodeSpec, RunStatus, SocketSpec, SocketType, SpellGraph, TraceEvent, WireId};
 
 use crate::Camera;
 
@@ -54,6 +54,7 @@ impl NodeCardModel {
         let place = |sockets: &[SocketSpec], x: f32| -> Vec<SocketModel> {
             sockets
                 .iter()
+                .filter(|socket| socket.name != DYNAMIC_SOCKET)
                 .enumerate()
                 .map(|(row, socket)| SocketModel {
                     name: socket.name.clone(),
@@ -64,19 +65,28 @@ impl NodeCardModel {
         };
         let inputs = spec.map(|spec| place(&spec.inputs, 0.0)).unwrap_or_default();
         let outputs = spec.map(|spec| place(&spec.outputs, CARD_WIDTH)).unwrap_or_default();
-        let rows = inputs.len().max(outputs.len()).max(1) as f32;
         Self {
             id,
             title: spec.map_or_else(|| kind.to_owned(), |spec| spec.title.clone()),
             kind: kind.to_owned(),
             category: spec.map_or_else(String::new, |spec| spec.category.clone()),
             position,
-            size: [CARD_WIDTH, CARD_HEADER + BODY_TOP * 2.0 + SOCKET_ROW * rows],
+            size: [CARD_WIDTH, card_height(inputs.len().max(outputs.len()))],
             inputs,
             outputs,
             selected: false,
             status: ExecutionStatus::Idle,
         }
+    }
+
+    pub fn ensure_socket(&mut self, name: &str, ty: SocketType, output: bool) {
+        let (sockets, x) = if output { (&mut self.outputs, CARD_WIDTH) } else { (&mut self.inputs, 0.0) };
+        if sockets.iter().any(|socket| socket.name == name) {
+            return;
+        }
+        let row = sockets.len() as f32;
+        sockets.push(SocketModel { name: name.to_owned(), ty, offset: [x, CARD_HEADER + BODY_TOP + SOCKET_ROW * (row + 0.5)] });
+        self.size[1] = card_height(self.inputs.len().max(self.outputs.len()));
     }
 
     pub fn socket_world(&self, name: &str, output: bool) -> Option<([f32; 2], SocketType)> {
@@ -90,6 +100,16 @@ impl NodeCardModel {
             && world[1] >= self.position[1]
             && world[1] <= self.position[1] + self.size[1]
     }
+}
+
+fn card_height(rows: usize) -> f32 {
+    CARD_HEADER + BODY_TOP * 2.0 + SOCKET_ROW * rows.max(1) as f32
+}
+
+fn resolved_type(spec: Option<&NodeSpec>, name: &str, output: bool) -> Option<SocketType> {
+    let spec = spec?;
+    let socket = if output { spec.resolve_output(name) } else { spec.resolve_input(name) };
+    socket.map(|socket| socket.ty)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -191,6 +211,18 @@ impl CanvasState {
             .map(|node| NodeCardModel::new(node.id.clone(), &node.kind, node.position, specs.iter().find(|spec| spec.kind == node.kind)))
             .collect();
         let mut state = Self { nodes, ..Self::default() };
+        let spec_of = |id: &NodeId| graph.nodes.iter().find(|node| &node.id == id).and_then(|node| specs.iter().find(|spec| spec.kind == node.kind));
+        for wire in &graph.wires {
+            let from_ty = resolved_type(spec_of(&wire.from_node), &wire.from_socket, true);
+            let to_ty = resolved_type(spec_of(&wire.to_node), &wire.to_socket, false);
+            let fallback = from_ty.or(to_ty).unwrap_or(SocketType::Any);
+            if let Some(card) = state.card_mut(&wire.from_node) {
+                card.ensure_socket(&wire.from_socket, from_ty.unwrap_or(fallback), true);
+            }
+            if let Some(card) = state.card_mut(&wire.to_node) {
+                card.ensure_socket(&wire.to_socket, to_ty.unwrap_or(fallback), false);
+            }
+        }
         state.wires = graph
             .wires
             .iter()

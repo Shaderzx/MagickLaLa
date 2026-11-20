@@ -126,7 +126,9 @@ fn main() -> ExitCode {
 fn dispatch(cli: Cli) -> CliResult {
     match cli.command {
         Command::Studio { snap: Some(path), width, height } => Ok(magicklala_studio::render_headless_snapshot_sized(&path, (width, height))?),
-        Command::Studio { snap: None, width, height } => Ok(magicklala_studio::run_studio(magicklala_studio::StudioConfig { size: (width, height) })?),
+        Command::Studio { snap: None, width, height } => {
+            Ok(magicklala_studio::run_studio(magicklala_studio::StudioConfig { size: (width, height), ..Default::default() })?)
+        }
         Command::Serve { bind, database_url } => block_on(serve(ServerConfig { bind, database_url })),
         Command::Spell { command } => spell(command),
         Command::Agent { server, command } => block_on(agent(server, command)),
