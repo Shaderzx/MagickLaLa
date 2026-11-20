@@ -19,7 +19,9 @@ pub use actor::{AgentRunStats, CHANNEL_LANE_CAPACITY, CHANNEL_LANE_IDLE, DEFAULT
 pub use bridges::{SharedEmbedder, StoreKnowledgeBridge, StoreMemoryBridge};
 pub use copilot::{CopilotEngine, CopilotError, CopilotRequest, CopilotSuggestion, GraphPatchOp, PatchRejection};
 pub use metered::{LlmCallScope, MeteredLlmGateway};
-pub use runner::{AgentRelease, EngineReleaseRunner, ReleaseRunner, TemplateReplyRunner, inbound_payload, structural_errors};
+pub use runner::{
+    AgentRelease, CORRELATION_ID_KEY, EngineReleaseRunner, ReleaseRunner, TemplateReplyRunner, correlation_id, inbound_payload, structural_errors,
+};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RuntimeError {

@@ -2439,6 +2439,7 @@ version = "0.0.1"
 dependencies = [
  "magicklala-canvas",
  "magicklala-graph",
+ "magicklala-nodes",
  "rune",
  "serde_json",
  "thiserror 2.0.21",

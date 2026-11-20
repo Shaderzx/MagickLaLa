@@ -8,7 +8,8 @@ use magicklala_connectors::{ConnectorKind, InboundEvent};
 use magicklala_embedder::{ChunkConfig, DocumentInput, DocumentKind, KnowledgePipeline};
 use magicklala_graph::{EventEmitter, NodeCatalog, NodeId, NodeSpec, RunTrigger, SpellGraph, SpellValidator, TraceEvent, ValidationError, Value, WireId};
 use magicklala_runtime::{
-    AgentStatus, CopilotError, CopilotRequest, CopilotSuggestion, DEFAULT_RUN_TIMEOUT, DispatchError, GraphPatchOp, RuntimeEvent, SharedEmbedder,
+    AgentStatus, CORRELATION_ID_KEY, CopilotError, CopilotRequest, CopilotSuggestion, DEFAULT_RUN_TIMEOUT, DispatchError, GraphPatchOp, RuntimeEvent,
+    SharedEmbedder, correlation_id,
 };
 use magicklala_store::*;
 use serde::{Deserialize, Serialize};
@@ -433,6 +434,10 @@ pub async fn start_agent(State(state): State<AppState>, ApiPath(id): ApiPath<Uui
         return Err(ApiError::conflict("agent_disabled", "agent is disabled"));
     }
     let pinned = pinned_release(&state, &agent).await?.ok_or_else(|| ApiError::conflict("no_release", "publish a release before starting the agent"))?;
+    let report = validation_report(&state, &pinned.graph);
+    if !report.valid {
+        return Err(ApiError::bad_request("invalid_spell", report.errors.join("; ")));
+    }
     state.supervisor.register(id).await;
     if state.supervisor.release(id).await.is_none_or(|deployed| deployed.graph != pinned.graph) {
         deploy(&state, id, pinned.graph).await?;
@@ -455,10 +460,7 @@ async fn pinned_release(state: &AppState, agent: &Agent) -> ApiResult<Option<Spe
 }
 
 async fn deploy(state: &AppState, agent_id: Uuid, graph: SpellGraph) -> ApiResult<()> {
-    match state.supervisor.deploy_release(agent_id, graph).await {
-        Ok(_) | Err(DispatchError::InvalidRelease(_)) => Ok(()),
-        Err(error) => Err(dispatch_error(error)),
-    }
+    state.supervisor.deploy_release(agent_id, graph).await.map(|_| ()).map_err(dispatch_error)
 }
 
 fn dispatch_error(error: DispatchError) -> ApiError {
@@ -481,11 +483,15 @@ enum RunOutcome {
     Failed(String),
 }
 
-async fn await_reply(events: &mut tokio::sync::broadcast::Receiver<RuntimeEvent>, agent_id: Uuid, channel: &str) -> ApiResult<String> {
+async fn await_reply(events: &mut tokio::sync::broadcast::Receiver<RuntimeEvent>, agent_id: Uuid, channel: &str, correlation: &str) -> ApiResult<String> {
     let wait = async {
         loop {
             match events.recv().await {
-                Ok(RuntimeEvent::Outbound { action }) if action.channel == channel && action.connector_id.is_nil() => return RunOutcome::Reply(action.content),
+                Ok(RuntimeEvent::Outbound { action })
+                    if action.channel == channel && action.connector_id.is_nil() && correlation_id(&action.payload) == Some(correlation) =>
+                {
+                    return RunOutcome::Reply(action.content);
+                }
                 Ok(RuntimeEvent::Trace { agent_id: Some(source), event: TraceEvent::RunFinished { summary, .. } })
                     if source == agent_id && summary.status != magicklala_graph::RunStatus::Succeeded =>
                 {
@@ -522,6 +528,11 @@ pub async fn deliver_chat(state: &AppState, agent_id: Uuid, body: ChatRequest) -
             metadata: serde_json::Value::Null,
         })
         .await?;
+    let correlation = Uuid::new_v4().to_string();
+    let mut payload = serde_json::to_value(&message).unwrap_or_default();
+    if let Some(fields) = payload.as_object_mut() {
+        fields.insert(CORRELATION_ID_KEY.to_owned(), serde_json::Value::String(correlation.clone()));
+    }
     let mut events = state.supervisor.bus().subscribe();
     let channel = body.channel.clone();
     state
@@ -533,12 +544,12 @@ pub async fn deliver_chat(state: &AppState, agent_id: Uuid, body: ChatRequest) -
             channel: body.channel,
             sender: body.sender,
             content: body.content,
-            payload: serde_json::to_value(&message).unwrap_or_default(),
+            payload,
             received_at: Utc::now(),
         })
         .await
         .map_err(dispatch_error)?;
-    let content = await_reply(&mut events, agent.id.0, &channel).await?;
+    let content = await_reply(&mut events, agent.id.0, &channel, &correlation).await?;
     let reply = state
         .store
         .append_chat(NewChatMessage {
@@ -547,7 +558,7 @@ pub async fn deliver_chat(state: &AppState, agent_id: Uuid, body: ChatRequest) -
             role: ChatRole::Assistant,
             sender: agent.name.clone(),
             content,
-            metadata: serde_json::json!({ "in_reply_to": message.id }),
+            metadata: serde_json::json!({ "in_reply_to": message.id, "correlation_id": correlation }),
         })
         .await?;
     Ok(ChatExchange { message, reply })

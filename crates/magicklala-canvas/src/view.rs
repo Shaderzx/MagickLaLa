@@ -125,6 +125,13 @@ pub fn interactive_canvas_view<S: 'static>(state: &CanvasState, size: (f32, f32)
                 _ => canvas.drag = DragState::Idle,
             }
         })
+        .on_secondary_press_local(move |s: &mut S, press, tx| {
+            tx.instant();
+            let canvas = lens(s);
+            let hit = canvas.node_at(canvas.camera.screen_to_world([press.x, press.y]));
+            canvas.select(hit);
+            canvas.context_menu = Some([press.x, press.y]);
+        })
         .child(backdrop)
         .child(wires);
     state.nodes.iter().fold(board, |board, card| board.child(card_view(state, card, palette, lens)))

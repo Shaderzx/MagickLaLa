@@ -34,8 +34,18 @@ pub fn inbound_payload(event: &InboundEvent) -> Value {
     ]))
 }
 
+pub const CORRELATION_ID_KEY: &str = "correlation_id";
+
+pub fn correlation_id(payload: &serde_json::Value) -> Option<&str> {
+    payload.get(CORRELATION_ID_KEY).and_then(serde_json::Value::as_str)
+}
+
 fn reply_action(event: &InboundEvent, content: String) -> OutboundAction {
-    OutboundAction { connector_id: event.connector_id, channel: event.channel.clone(), content, payload: serde_json::json!({ "in_reply_to": event.sender }) }
+    let mut payload = serde_json::json!({ "in_reply_to": event.sender });
+    if let Some(id) = correlation_id(&event.payload) {
+        payload[CORRELATION_ID_KEY] = serde_json::Value::String(id.to_owned());
+    }
+    OutboundAction { connector_id: event.connector_id, channel: event.channel.clone(), content, payload }
 }
 
 #[derive(Debug, Clone, Copy, Default)]

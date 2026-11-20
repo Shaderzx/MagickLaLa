@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use magicklala_canvas::{CanvasState, ExecutionStatus, category_accent, interactive_canvas_view, status_color};
-use magicklala_graph::{NodeId, NodeInstance, NodeSpec, SocketSpec, SocketType, SpellGraph, SpellValidator, TraceEvent, VariableDef, Wire, WireId};
+use magicklala_graph::{NodeCatalog, NodeId, NodeInstance, NodeSpec, SpellGraph, SpellValidator, TraceEvent, VariableDef, Wire, WireId};
 use rune::{App, AppSpec, Color, Cx, El, ScrollSpec, TextEdit, TextStyle, col, el, row, text, text_input};
 use serde_json::json;
 use thiserror::Error;
@@ -14,9 +14,14 @@ pub const TOOLBAR_HEIGHT: f32 = 48.0;
 pub const LEFT_RAIL_WIDTH: f32 = 240.0;
 pub const INSPECTOR_WIDTH: f32 = 300.0;
 pub const TRACE_HEIGHT: f32 = 110.0;
-pub const PALETTE_CATEGORIES: [&str; 7] = ["Events", "Flow", "AI", "Memory", "Knowledge", "Data", "Script"];
+pub const PALETTE_CATEGORY_ORDER: [&str; 7] = ["events", "flow", "ai", "memory", "knowledge", "io", "code"];
+pub const LEGACY_KIND_PREFIX: &str = "core/";
+pub const CONTEXT_MENU_SIZE: (f32, f32) = (210.0, 150.0);
+pub const QUICK_ADD_KIND: &str = "ai/generate_text";
+pub const COMPACT_TOOLBAR_BELOW: f32 = 1100.0;
 
 static LAUNCH_SIZE: Mutex<Option<(f32, f32)>> = Mutex::new(None);
+static LAUNCH_THEME: Mutex<Option<Theme>> = Mutex::new(None);
 
 #[derive(Debug, Error)]
 pub enum StudioError {
@@ -123,11 +128,15 @@ pub struct StudioApp {
 
 impl StudioApp {
     pub fn demo() -> Self {
-        Self::with_spell(demo_spell(), demo_specs())
+        let mut app = Self::from_registry();
+        if LAUNCH_THEME.lock().ok().and_then(|theme| *theme) == Some(Theme::Light) {
+            app.toggle_theme();
+        }
+        app
     }
 
     pub fn from_registry() -> Self {
-        Self::demo()
+        Self::with_spell(demo_spell(), registry_specs())
     }
 
     pub fn with_spell(spell: SpellGraph, specs: Vec<NodeSpec>) -> Self {
@@ -166,10 +175,14 @@ impl StudioApp {
     }
 
     pub fn spawn(&mut self, kind: &str) -> Option<NodeId> {
-        let spec = self.specs.iter().find(|spec| spec.kind == kind)?.clone();
         let view = self.canvas_size();
         let count = self.canvas.nodes.len() as f32;
-        let center = self.canvas.camera.screen_to_world([view.0 * 0.5 - 100.0 + count * 12.0, view.1 * 0.62 + count * 8.0]);
+        self.spawn_at(kind, [view.0 * 0.5 - 100.0 + count * 12.0, view.1 * 0.62 + count * 8.0])
+    }
+
+    pub fn spawn_at(&mut self, kind: &str, screen: [f32; 2]) -> Option<NodeId> {
+        let spec = self.specs.iter().find(|spec| spec.kind == kind)?.clone();
+        let center = self.canvas.camera.screen_to_world(screen);
         let id = self.canvas.add_node_from_spec(&spec, center);
         self.prompts.insert(id.clone(), TextEdit::new(default_prompt(kind)));
         self.validation = ValidationState::Unchecked;
@@ -234,6 +247,35 @@ impl StudioApp {
         true
     }
 
+    pub fn close_context_menu(&mut self) {
+        self.canvas.context_menu = None;
+    }
+
+    pub fn quick_add_from_menu(&mut self) {
+        let anchor = self.canvas.context_menu.unwrap_or([self.canvas_size().0 * 0.5, self.canvas_size().1 * 0.5]);
+        self.close_context_menu();
+        self.spawn_at(QUICK_ADD_KIND, anchor);
+    }
+
+    pub fn delete_selected_node(&mut self) {
+        self.close_context_menu();
+        if let Some(removed) = self.canvas.remove_selected_node() {
+            self.prompts.remove(&removed.id);
+            self.validation = ValidationState::Unchecked;
+            self.sync_spell();
+        }
+    }
+
+    pub fn fit_view(&mut self) {
+        self.close_context_menu();
+        let size = self.canvas_size();
+        self.canvas.fit(size);
+    }
+
+    pub fn compact_toolbar(&self) -> bool {
+        self.size.0 < COMPACT_TOOLBAR_BELOW
+    }
+
     pub fn toggle_theme(&mut self) {
         self.theme = if self.theme == Theme::Dark { Theme::Light } else { Theme::Dark };
         self.canvas.light = self.theme == Theme::Light;
@@ -259,6 +301,7 @@ impl StudioApp {
 
 pub fn run_studio(config: StudioConfig) -> Result<(), StudioError> {
     remember_size(config.size);
+    remember_theme(Theme::Dark);
     App::new(spec(config)).args(Vec::new()).try_run().map_err(StudioError::Rune)
 }
 
@@ -267,12 +310,23 @@ pub fn render_headless_snapshot(out_path: &Path) -> Result<(), StudioError> {
 }
 
 pub fn render_headless_snapshot_sized(out_path: &Path, size: (f32, f32)) -> Result<(), StudioError> {
+    render_headless_snapshot_themed(out_path, size, Theme::Dark)
+}
+
+pub fn render_headless_snapshot_themed(out_path: &Path, size: (f32, f32), theme: Theme) -> Result<(), StudioError> {
     let target = out_path.display().to_string();
     remember_size(size);
+    remember_theme(theme);
     let args =
         vec!["--snap".to_owned(), target.clone(), "--size".to_owned(), format!("{}x{}", size.0 as u32, size.1 as u32), "--scale".to_owned(), "1".to_owned()];
     App::new(spec(StudioConfig { size })).args(args).try_run().map_err(StudioError::Rune)?;
     if out_path.is_file() { Ok(()) } else { Err(StudioError::MissingSnapshot(target)) }
+}
+
+fn remember_theme(theme: Theme) {
+    if let Ok(mut slot) = LAUNCH_THEME.lock() {
+        *slot = Some(theme);
+    }
 }
 
 fn remember_size(size: (f32, f32)) {
@@ -334,8 +388,50 @@ fn label(content: impl Into<String>, size: f32, weight: f32, color: Color) -> El
 }
 
 fn button(key: &str, caption: &str, primary: bool, t: &Tones, action: fn(&mut StudioApp)) -> El {
+    sized_button(key, caption, primary, 12.0, t, action)
+}
+
+fn sized_button(key: &str, caption: &str, primary: bool, padding: f32, t: &Tones, action: fn(&mut StudioApp)) -> El {
     let (fill, ink) = if primary { (t.accent, t.accent_ink) } else { (t.raised, t.ink) };
-    row().key(key).h(30.0).px(12.0).items_center().radius(7.0).fill(fill).border(1.0, t.line).child(label(caption, 12.5, 600.0, ink)).on_press(action)
+    row().key(key).h(30.0).px(padding).items_center().radius(7.0).fill(fill).border(1.0, t.line).child(label(caption, 12.5, 600.0, ink)).on_press(action)
+}
+
+fn menu_item(key: &str, caption: &str, enabled: bool, t: &Tones, action: fn(&mut StudioApp)) -> El {
+    row()
+        .key(key)
+        .w_full()
+        .h(30.0)
+        .px(10.0)
+        .items_center()
+        .radius(6.0)
+        .fill(t.raised)
+        .child(label(caption, 12.5, 550.0, if enabled { t.ink } else { t.muted }))
+        .on_press(action)
+}
+
+fn context_menu(app: &StudioApp, t: &Tones) -> Option<El> {
+    let anchor = app.canvas.context_menu?;
+    let view = app.canvas_size();
+    let x = anchor[0].min(view.0 - CONTEXT_MENU_SIZE.0).max(0.0);
+    let y = anchor[1].min(view.1 - CONTEXT_MENU_SIZE.1).max(0.0);
+    let quick_add = app.specs.iter().find(|spec| spec.kind == QUICK_ADD_KIND).map_or_else(|| QUICK_ADD_KIND.to_owned(), |spec| format!("Add {}", spec.title));
+    let delete = app.canvas.selected_card().map_or_else(|| "Delete node (none selected)".to_owned(), |card| format!("Delete {}", card.title));
+    Some(
+        col()
+            .key("context-menu")
+            .size(CONTEXT_MENU_SIZE.0, CONTEXT_MENU_SIZE.1)
+            .padding(6.0)
+            .gap(4.0)
+            .radius(9.0)
+            .fill(t.panel)
+            .border(1.0, t.line)
+            .shadow(6.0, 18.0, rgba(0.0, 0.0, 0.0, 0.35))
+            .absolute(x, y)
+            .child(menu_item(&palette_key(QUICK_ADD_KIND).replacen("palette-", "context-add-", 1), &quick_add, true, t, StudioApp::quick_add_from_menu))
+            .child(menu_item("context-delete-node", &delete, app.canvas.selection.is_some(), t, StudioApp::delete_selected_node))
+            .child(menu_item("context-fit-view", "Fit view", true, t, StudioApp::fit_view))
+            .child(menu_item("context-dismiss", "Dismiss", true, t, StudioApp::close_context_menu)),
+    )
 }
 
 fn pill(caption: impl Into<String>, color: Color, t: &Tones) -> El {
@@ -358,14 +454,23 @@ pub fn studio_view(app: &StudioApp, _: &mut Cx<StudioApp>) -> El {
         .grow(1.0)
         .min_h(0.0)
         .child(left_rail(app, &t))
-        .child(
-            el().key("center").grow(1.0).min_w(0.0).h_full().child(interactive_canvas_view::<StudioApp>(&app.canvas, app.canvas_size(), |app| &mut app.canvas)),
-        )
+        .child(el().key("center").grow(1.0).min_w(0.0).h_full().child(canvas_with_menu(app, &t)))
         .child(inspector(app, &t));
     col().key("studio").w_full().h_full().fill(t.background).child(toolbar(app, &t)).child(middle).child(trace_strip(app, &t))
 }
 
+fn canvas_with_menu(app: &StudioApp, t: &Tones) -> El {
+    let board = interactive_canvas_view::<StudioApp>(&app.canvas, app.canvas_size(), |app| &mut app.canvas);
+    match context_menu(app, t) {
+        Some(menu) => board.child(menu),
+        None => board,
+    }
+}
+
 fn toolbar(app: &StudioApp, t: &Tones) -> El {
+    let compact = app.compact_toolbar();
+    let (padding, gap, readout) = if compact { (9.0, 6.0, 44.0) } else { (12.0, 8.0, 52.0) };
+    let tool = |key: &str, caption: &str, primary: bool, action: fn(&mut StudioApp)| sized_button(key, caption, primary, padding, t, action);
     let brand = row()
         .gap(8.0)
         .items_center()
@@ -379,39 +484,44 @@ fn toolbar(app: &StudioApp, t: &Tones) -> El {
     let zoom = row()
         .gap(4.0)
         .items_center()
-        .child(button("zoom-out", "-", false, t, |app| app.canvas.camera.zoom_by(1.0 / 1.2, [app.canvas_size().0 / 2.0, app.canvas_size().1 / 2.0])))
-        .child(row().key("zoom-readout").w(52.0).justify_center().child(label(format!("{}%", app.canvas.camera.zoom_percent()), 12.0, 600.0, t.ink)))
-        .child(button("zoom-in", "+", false, t, |app| app.canvas.camera.zoom_by(1.2, [app.canvas_size().0 / 2.0, app.canvas_size().1 / 2.0])))
-        .child(button("zoom-fit", "Fit", false, t, |app| {
-            let size = app.canvas_size();
-            app.canvas.fit(size);
-        }));
-    let left =
-        row().gap(14.0).items_center().child(brand).child(el().w(1.0).h(22.0).fill(t.line)).child(label(&app.spell.name, 13.0, 600.0, t.ink)).child(pill(
-            format!("{} nodes · {} wires", app.canvas.nodes.len(), app.canvas.wires.len()),
-            t.accent,
-            t,
-        ));
-    let right = row()
-        .gap(8.0)
+        .child(tool("zoom-out", "-", false, |app| app.canvas.camera.zoom_by(1.0 / 1.2, [app.canvas_size().0 / 2.0, app.canvas_size().1 / 2.0])))
+        .child(row().key("zoom-readout").w(readout).justify_center().child(label(format!("{}%", app.canvas.camera.zoom_percent()), 12.0, 600.0, t.ink)))
+        .child(tool("zoom-in", "+", false, |app| app.canvas.camera.zoom_by(1.2, [app.canvas_size().0 / 2.0, app.canvas_size().1 / 2.0])))
+        .child(tool("zoom-fit", "Fit", false, StudioApp::fit_view));
+    let stats = if compact {
+        format!("{}n · {}w", app.canvas.nodes.len(), app.canvas.wires.len())
+    } else {
+        format!("{} nodes · {} wires", app.canvas.nodes.len(), app.canvas.wires.len())
+    };
+    let left = row()
+        .key("toolbar-left")
+        .gap(if compact { 10.0 } else { 14.0 })
         .items_center()
-        .child(pill(app.validation.label(), validation_color, t))
-        .child(button("validate", "Validate", false, t, |app| {
+        .child(brand)
+        .child(el().w(1.0).h(22.0).fill(t.line))
+        .child(label(&app.spell.name, 13.0, 600.0, t.ink))
+        .child(pill(stats, t.accent, t));
+    let right = row()
+        .gap(gap)
+        .items_center()
+        .child(pill(app.validation.label(), validation_color, t).key("validation-pill"))
+        .child(tool("validate", "Validate", false, |app| {
             app.validate();
         }))
-        .child(button("run-spell", "Run Spell", true, t, |app| {
+        .child(tool("run-spell", if compact { "Run" } else { "Run Spell" }, true, |app| {
             app.run_spell();
         }))
-        .child(button("publish", "Publish", false, t, |app| {
+        .child(tool("publish", "Publish", false, |app| {
             app.publish();
         }))
-        .child(button("theme-toggle", if app.theme == Theme::Dark { "Light" } else { "Dark" }, false, t, StudioApp::toggle_theme))
+        .child(tool("theme-toggle", if app.theme == Theme::Dark { "Light" } else { "Dark" }, false, StudioApp::toggle_theme))
         .child(zoom);
     row()
         .key("toolbar")
         .w_full()
         .h(TOOLBAR_HEIGHT)
-        .px(14.0)
+        .px(if compact { 10.0 } else { 14.0 })
+        .gap(gap)
         .items_center()
         .justify_between()
         .fill(t.panel)
@@ -444,7 +554,7 @@ fn left_rail(app: &StudioApp, t: &Tones) -> El {
         .child(tab("tab-palette", "Nodes", app.left_tab == LeftTab::Palette, t, |app| app.left_tab = LeftTab::Palette))
         .child(tab("tab-agents", "Agents & Releases", app.left_tab == LeftTab::Agents, t, |app| app.left_tab = LeftTab::Agents));
     let body = match app.left_tab {
-        LeftTab::Palette => PALETTE_CATEGORIES.iter().fold(col().gap(4.0), |list, category| {
+        LeftTab::Palette => palette_categories(&app.specs).iter().fold(col().gap(4.0), |list, category| {
             let entries: Vec<&NodeSpec> = app.specs.iter().filter(|spec| spec.category.eq_ignore_ascii_case(category)).collect();
             if entries.is_empty() {
                 return list;
@@ -585,7 +695,7 @@ fn inspector_body(app: &StudioApp, t: &Tones) -> El {
         ))
         .child(label("SOCKETS", 10.5, 700.0, t.muted))
         .child(sockets)
-        .child(label(if card.category.eq_ignore_ascii_case("script") { "RHAI SCRIPT" } else { "PROMPT" }, 10.5, 700.0, t.muted));
+        .child(label(if card.category.eq_ignore_ascii_case("code") { "RHAI SCRIPT" } else { "PROMPT" }, 10.5, 700.0, t.muted));
     match editor {
         Some(editor) => column.child(editor),
         None => column,
@@ -760,87 +870,28 @@ fn uuid_like(spell: &SpellGraph) -> String {
 fn default_prompt(kind: &str) -> String {
     match kind {
         "ai/generate_text" => "You are a helpful agent.\n\nMemory:\n{{memory}}\n\nKnowledge:\n{{knowledge}}\n\nUser: {{content}}".to_owned(),
-        "memory/recall" => "Recall the 5 most relevant memories for {{content}}".to_owned(),
+        "memory/search" => "Recall the 5 most relevant memories for {{content}}".to_owned(),
         "knowledge/search" => "Search the knowledge base for {{content}}".to_owned(),
-        "script/rhai" => "let reply = input.content;\nreply.to_upper()".to_owned(),
+        "code/rhai_script" => "let reply = input.content;\nreply.to_upper()".to_owned(),
         _ => String::new(),
     }
 }
 
-fn demo_specs() -> Vec<NodeSpec> {
-    let node = |kind: &str, title: &str, category: &str, inputs: Vec<SocketSpec>, outputs: Vec<SocketSpec>| NodeSpec {
-        kind: kind.to_owned(),
-        title: title.to_owned(),
-        category: category.to_owned(),
-        description: String::new(),
-        inputs,
-        outputs,
-        config: Vec::new(),
-        is_trigger: category == "Events",
-    };
-    let flow_in = || SocketSpec::input("in", SocketType::Flow);
-    let flow_out = || SocketSpec::output("out", SocketType::Flow);
-    vec![
-        node("events/on_message", "On Message", "Events", vec![], vec![flow_out(), SocketSpec::output("content", SocketType::String)]),
-        node("events/on_schedule", "On Schedule", "Events", vec![], vec![flow_out(), SocketSpec::output("tick", SocketType::Event)]),
-        node(
-            "flow/branch",
-            "Branch",
-            "Flow",
-            vec![flow_in(), SocketSpec::input("condition", SocketType::Bool)],
-            vec![SocketSpec::output("true", SocketType::Flow), SocketSpec::output("false", SocketType::Flow)],
-        ),
-        node("flow/delay", "Delay", "Flow", vec![flow_in(), SocketSpec::input("ms", SocketType::Int)], vec![flow_out()]),
-        node(
-            "ai/generate_text",
-            "Generate Text",
-            "AI",
-            vec![
-                flow_in(),
-                SocketSpec::input("prompt", SocketType::String),
-                SocketSpec::input("memory", SocketType::Array),
-                SocketSpec::input("knowledge", SocketType::Json),
-            ],
-            vec![flow_out(), SocketSpec::output("text", SocketType::String)],
-        ),
-        node(
-            "ai/embed",
-            "Embed Text",
-            "AI",
-            vec![flow_in(), SocketSpec::input("text", SocketType::String)],
-            vec![flow_out(), SocketSpec::output("vector", SocketType::Embedding)],
-        ),
-        node(
-            "memory/recall",
-            "Recall Memory",
-            "Memory",
-            vec![flow_in(), SocketSpec::input("query", SocketType::String)],
-            vec![flow_out(), SocketSpec::output("memories", SocketType::Array)],
-        ),
-        node("memory/store", "Store Memory", "Memory", vec![flow_in(), SocketSpec::input("content", SocketType::String)], vec![flow_out()]),
-        node(
-            "knowledge/search",
-            "Search Knowledge",
-            "Knowledge",
-            vec![flow_in(), SocketSpec::input("query", SocketType::String)],
-            vec![flow_out(), SocketSpec::output("hits", SocketType::Json)],
-        ),
-        node(
-            "data/json_get",
-            "JSON Get",
-            "Data",
-            vec![flow_in(), SocketSpec::input("object", SocketType::Json)],
-            vec![flow_out(), SocketSpec::output("value", SocketType::Any)],
-        ),
-        node("data/send_message", "Send Message", "Data", vec![flow_in(), SocketSpec::input("content", SocketType::String)], vec![]),
-        node(
-            "script/rhai",
-            "Rhai Script",
-            "Script",
-            vec![flow_in(), SocketSpec::input("input", SocketType::Json)],
-            vec![flow_out(), SocketSpec::output("result", SocketType::Any)],
-        ),
-    ]
+pub fn registry_specs() -> Vec<NodeSpec> {
+    magicklala_nodes::default_registry().specs().into_iter().filter(|spec| !spec.kind.starts_with(LEGACY_KIND_PREFIX)).collect()
+}
+
+pub fn palette_categories(specs: &[NodeSpec]) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for spec in specs {
+        let category = spec.category.to_ascii_lowercase();
+        if !found.contains(&category) {
+            found.push(category);
+        }
+    }
+    let rank = |category: &String| PALETTE_CATEGORY_ORDER.iter().position(|known| known == category).unwrap_or(PALETTE_CATEGORY_ORDER.len());
+    found.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
+    found
 }
 
 fn demo_spell() -> SpellGraph {
@@ -848,11 +899,11 @@ fn demo_spell() -> SpellGraph {
     let place =
         |id: &str, kind: &str, position: [f32; 2]| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position, config: serde_json::Value::Null };
     spell.nodes = vec![
-        place("trigger", "events/on_message", [40.0, 170.0]),
-        place("recall", "memory/recall", [310.0, 40.0]),
+        place("trigger", "event/on_message", [40.0, 170.0]),
+        place("recall", "memory/search", [310.0, 40.0]),
         place("search", "knowledge/search", [310.0, 290.0]),
         place("llm", "ai/generate_text", [590.0, 140.0]),
-        place("reply", "data/send_message", [870.0, 210.0]),
+        place("reply", "io/send_message", [870.0, 210.0]),
     ];
     let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
         id: WireId::from(id),
@@ -864,19 +915,17 @@ fn demo_spell() -> SpellGraph {
     spell.wires = vec![
         wire("w1", ("trigger", "out"), ("recall", "in")),
         wire("w2", ("trigger", "content"), ("recall", "query")),
-        wire("w3", ("trigger", "out"), ("search", "in")),
+        wire("w3", ("recall", "out"), ("search", "in")),
         wire("w4", ("trigger", "content"), ("search", "query")),
-        wire("w5", ("recall", "out"), ("llm", "in")),
-        wire("w6", ("recall", "memories"), ("llm", "memory")),
-        wire("w7", ("search", "hits"), ("llm", "knowledge")),
-        wire("w8", ("trigger", "content"), ("llm", "prompt")),
-        wire("w9", ("llm", "out"), ("reply", "in")),
-        wire("w10", ("llm", "text"), ("reply", "content")),
+        wire("w5", ("search", "out"), ("llm", "in")),
+        wire("w6", ("trigger", "content"), ("llm", "prompt")),
+        wire("w7", ("recall", "text"), ("llm", "system")),
+        wire("w8", ("llm", "out"), ("reply", "in")),
+        wire("w9", ("llm", "text"), ("reply", "content")),
     ];
     spell.variables = variables();
     spell
 }
-
 fn variables() -> Vec<VariableDef> {
     serde_json::from_value(json!([
         { "name": "agent_name", "ty": "string", "default": "Support Agent" },
