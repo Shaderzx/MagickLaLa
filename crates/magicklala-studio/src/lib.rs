@@ -92,7 +92,26 @@ where
 pub struct StudioStore {
     repository: SqliteStore,
     spell_record_id: Option<SpellRecordId>,
+    persistent: bool,
     pub url: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StudioWorkspace {
+    pub record: SpellRecordId,
+    pub graph: SpellGraph,
+    pub releases: Vec<SpellRelease>,
+    pub active_release: Option<u32>,
+}
+
+impl StudioWorkspace {
+    fn of(record: SpellRecord, releases: Vec<SpellRelease>) -> Self {
+        let (graph, active_release) = match releases.last() {
+            Some(release) if release.created_at > record.updated_at => (release.graph.clone(), Some(release.version)),
+            _ => (record.graph, None),
+        };
+        Self { record: record.id, graph, releases, active_release }
+    }
 }
 
 impl StudioStore {
@@ -105,7 +124,11 @@ impl StudioStore {
             Ok::<_, magicklala_store::StoreError>(store)
         })?
         .map_err(|error| StudioError::Store(error.to_string()))?;
-        Ok(Self { repository, spell_record_id: None, url })
+        Ok(Self { repository, spell_record_id: None, persistent: db_path.is_some(), url })
+    }
+
+    pub fn is_persistent(&self) -> bool {
+        self.persistent
     }
 
     pub fn spell_record_id(&self) -> Option<SpellRecordId> {
@@ -159,36 +182,41 @@ impl StudioStore {
         Ok(record)
     }
 
-    pub fn latest_release(&self) -> Result<Option<(SpellGraph, Vec<SpellRelease>)>, StudioError> {
+    pub fn latest_workspace(&self) -> Result<Option<StudioWorkspace>, StudioError> {
         let repository = self.repository.clone();
         block(move || async move {
-            let Some(project) = repository.list_projects().await?.into_iter().find(|project| project.name == STUDIO_PROJECT) else {
-                return Ok(None);
-            };
-            let mut newest: Option<Vec<SpellRelease>> = None;
-            for record in repository.list_spells(project.id).await? {
-                let mut releases = repository.list_releases(record.id).await?;
-                releases.sort_by_key(|release| release.version);
-                let newer = match (releases.last(), newest.as_ref().and_then(|current| current.last())) {
-                    (Some(candidate), Some(current)) => candidate.created_at > current.created_at,
-                    (Some(_), None) => true,
-                    _ => false,
-                };
-                if newer {
-                    newest = Some(releases);
+            let (studio, others): (Vec<_>, Vec<_>) = repository.list_projects().await?.into_iter().partition(|project| project.name == STUDIO_PROJECT);
+            let mut records = Vec::new();
+            for project in &studio {
+                records.extend(repository.list_spells(project.id).await?);
+            }
+            if records.is_empty() {
+                for project in &others {
+                    records.extend(repository.list_spells(project.id).await?);
                 }
             }
-            Ok::<_, magicklala_store::StoreError>(newest.and_then(|releases| releases.last().map(|release| (release.graph.clone(), releases.clone()))))
+            let touched = |record: &SpellRecord, releases: &[SpellRelease]| {
+                releases.last().map_or(record.updated_at, |release| release.created_at.max(record.updated_at))
+            };
+            let mut newest: Option<(SpellRecord, Vec<SpellRelease>)> = None;
+            for record in records {
+                let mut releases = repository.list_releases(record.id).await?;
+                releases.sort_by_key(|release| release.version);
+                if newest.as_ref().is_none_or(|(current, current_releases)| touched(&record, &releases) > touched(current, current_releases)) {
+                    newest = Some((record, releases));
+                }
+            }
+            Ok::<_, magicklala_store::StoreError>(newest.map(|(record, releases)| StudioWorkspace::of(record, releases)))
         })?
         .map_err(|error| StudioError::Store(error.to_string()))
     }
 
-    fn adopt_latest_release(&mut self) -> Result<Option<(SpellGraph, Vec<SpellRelease>)>, StudioError> {
-        let latest = self.latest_release()?;
-        if let Some(release) = latest.as_ref().and_then(|(_, releases)| releases.last()) {
-            self.spell_record_id = Some(release.spell_id);
+    fn adopt_latest_workspace(&mut self) -> Result<Option<StudioWorkspace>, StudioError> {
+        let workspace = self.latest_workspace()?;
+        if let Some(workspace) = &workspace {
+            self.spell_record_id = Some(workspace.record);
         }
-        Ok(latest)
+        Ok(workspace)
     }
 }
 
@@ -517,6 +545,7 @@ pub struct StudioApp {
     pub store: Option<StudioStore>,
     pub store_error: Option<String>,
     pub draft_status: Option<String>,
+    pub active_release_version: Option<u32>,
     pub run_timeout: Duration,
     run_started: Option<Instant>,
     active: Option<ActiveRun>,
@@ -542,17 +571,20 @@ impl StudioApp {
 
     pub fn open(config: &StudioConfig) -> Result<Self, StudioError> {
         let mut store = StudioStore::open(config.db_path.as_deref())?;
-        let mut app = match store.adopt_latest_release()? {
-            Some((graph, releases)) => {
-                let mut app = Self::with_spell(graph, registry_specs());
-                app.releases = releases.iter().map(|release| Release { version: release.version, nodes: release.graph.nodes.len() }).collect();
-                app.last_published = releases.last().cloned();
+        let workspace = store.adopt_latest_workspace()?;
+        let mut app = match &workspace {
+            Some(workspace) => {
+                let mut app = Self::with_spell(workspace.graph.clone(), registry_specs());
+                app.releases = workspace.releases.iter().map(|release| Release { version: release.version, nodes: release.graph.nodes.len() }).collect();
+                app.last_published = workspace.releases.last().cloned();
                 app
             }
             None => Self::from_registry(),
         };
         app.store = Some(store);
         app.run_timeout = config.run_timeout;
+        app.sync_spell();
+        app.active_release_version = workspace.and_then(|workspace| workspace.active_release);
         Ok(app)
     }
 
@@ -588,6 +620,7 @@ impl StudioApp {
             store: None,
             store_error: None,
             draft_status: None,
+            active_release_version: None,
             run_timeout: DEFAULT_RUN_TIMEOUT,
             run_started: None,
             active: None,
@@ -673,6 +706,21 @@ impl StudioApp {
     }
 
     pub fn sync_spell(&mut self) {
+        self.sync_edits();
+    }
+
+    pub fn sync_edits(&mut self) -> bool {
+        let before = (std::mem::take(&mut self.spell.nodes), std::mem::take(&mut self.spell.wires), self.spell.subgraphs.clone());
+        self.rebuild_spell();
+        let changed = before != (self.spell.nodes.clone(), self.spell.wires.clone(), self.spell.subgraphs.clone());
+        if changed {
+            self.draft_status = None;
+            self.active_release_version = None;
+        }
+        changed
+    }
+
+    fn rebuild_spell(&mut self) {
         self.spell.nodes = self
             .canvas
             .nodes
@@ -702,22 +750,33 @@ impl StudioApp {
             .collect();
     }
 
+    fn root_spell(&self) -> SpellId {
+        self.spell_record_id().map_or(self.spell.id, |record| SpellId(record.0))
+    }
+
     pub fn root_subgraph(&self) -> SubgraphKey {
-        (self.spell_record_id().map_or(self.spell.id, |record| SpellId(record.0)), None)
+        (self.root_spell(), self.active_release_version)
     }
 
     pub fn subgraph_resolver(&self) -> Result<StudioSubgraphResolver, StudioError> {
         StudioSubgraphResolver::load(self.store.as_ref(), &self.spell)
     }
 
-    fn check_spell(&self) -> Result<(), Vec<String>> {
-        let version_errors: Vec<String> = self
-            .spell
+    fn release_version_errors(&self) -> Vec<String> {
+        self.spell
             .nodes
             .iter()
             .filter(|node| node.kind == SUBGRAPH_KIND)
             .filter_map(|node| configured_release_version(node).err().map(|error| format!("node {:?}: {error}", node.id.0)))
-            .collect();
+            .collect()
+    }
+
+    fn check_spell(&self) -> Result<(), Vec<String>> {
+        self.check_spell_with_root(self.root_subgraph())
+    }
+
+    fn check_spell_with_root(&self, root: SubgraphKey) -> Result<(), Vec<String>> {
+        let version_errors = self.release_version_errors();
         if !version_errors.is_empty() {
             return Err(version_errors);
         }
@@ -727,7 +786,7 @@ impl StudioApp {
             return Ok(());
         }
         let resolver = self.subgraph_resolver().map_err(|error| vec![error.to_string()])?;
-        resolve_subgraphs_from(&self.spell, self.root_subgraph(), &resolver, &validator).map(drop).map_err(|error| vec![error.to_string()])
+        resolve_subgraphs_from(&self.spell, root, &resolver, &validator).map(drop).map_err(|error| vec![error.to_string()])
     }
 
     pub fn validate(&mut self) -> &ValidationState {
@@ -978,20 +1037,39 @@ impl StudioApp {
         self.canvas.light = self.theme == Theme::Light;
     }
 
+    fn refuse(&mut self, message: String) -> StudioError {
+        self.store_error = Some(message.clone());
+        StudioError::Store(message)
+    }
+
+    fn require_disk(&mut self, action: &str) -> Result<(), StudioError> {
+        if self.store.as_ref().is_some_and(StudioStore::is_persistent) {
+            return Ok(());
+        }
+        Err(self.refuse(format!("pass --db <file.sqlite> to {action} on disk")))
+    }
+
+    pub fn next_release_version(&self) -> u32 {
+        self.releases.iter().map(|release| release.version).max().unwrap_or(0).saturating_add(1)
+    }
+
     pub fn publish(&mut self) -> Result<u32, StudioError> {
-        if let ValidationState::Invalid(errors) = self.validate().clone() {
-            let error = StudioError::Store(format!("cannot publish an invalid spell: {}", errors.join("; ")));
-            self.store_error = Some(error.to_string());
-            return Err(error);
+        self.sync_spell();
+        self.require_disk("publish releases")?;
+        let target = (self.root_spell(), Some(self.next_release_version()));
+        if let Err(errors) = self.check_spell_with_root(target) {
+            let message = format!("cannot publish an invalid spell: {}", errors.join("; "));
+            self.validation = ValidationState::Invalid(errors);
+            return Err(self.refuse(message));
         }
-        if self.store.is_none() {
-            self.store = Some(StudioStore::open(None)?);
-        }
+        self.validation = ValidationState::Valid;
         let store = self.store.as_mut().ok_or_else(|| StudioError::Store("no studio store".to_owned()))?;
         let published = store.publish(&self.spell);
         let release = published.inspect_err(|error| self.store_error = Some(error.to_string()))?;
         self.releases.push(Release { version: release.version, nodes: release.graph.nodes.len() });
         self.store_error = None;
+        self.draft_status = None;
+        self.active_release_version = Some(release.version);
         let version = release.version;
         self.last_published = Some(release);
         Ok(version)
@@ -1000,14 +1078,16 @@ impl StudioApp {
     pub fn save_draft(&mut self) -> Result<SpellRecordId, StudioError> {
         self.sync_spell();
         self.draft_status = None;
-        if self.store.is_none() {
-            let opened = StudioStore::open(None).inspect_err(|error| self.store_error = Some(error.to_string()))?;
-            self.store = Some(opened);
+        let version_errors = self.release_version_errors();
+        if !version_errors.is_empty() {
+            return Err(self.refuse(format!("cannot save the draft: {}", version_errors.join("; "))));
         }
+        self.require_disk("save drafts")?;
         let store = self.store.as_mut().ok_or_else(|| StudioError::Store("no studio store".to_owned()))?;
         let saved = store.save_draft(&self.spell);
         let record = saved.inspect_err(|error| self.store_error = Some(error.to_string()))?;
         self.store_error = None;
+        self.active_release_version = None;
         self.draft_status = Some(DRAFT_SAVED.to_owned());
         Ok(record.id)
     }
@@ -1078,7 +1158,7 @@ fn spec(config: StudioConfig) -> AppSpec<StudioApp> {
     remember_run_timeout(config.run_timeout);
     AppSpec {
         setup: Some(StudioApp::set_waker),
-        poll: Some(|app, _, _| app.poll_background()),
+        poll: Some(|app, _, _| app.poll_background() | app.sync_edits()),
         ..AppSpec::new(TITLE, config.size, StudioApp::demo, studio_view)
     }
 }

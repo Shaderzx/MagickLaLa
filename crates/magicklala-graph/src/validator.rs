@@ -68,7 +68,7 @@ impl SpellValidator {
         if !graph.nodes.iter().any(|node| self.specs.get(&node.kind).is_some_and(|spec| spec.is_trigger)) {
             errors.push(ValidationError::NoTrigger);
         }
-        for subgraph in graph.subgraphs.iter().filter(|subgraph| subgraph.spell_id == graph.id) {
+        for subgraph in graph.subgraphs.iter().filter(|subgraph| subgraph.spell_id == graph.id && subgraph.release_version.is_none()) {
             errors.push(ValidationError::SubgraphCycle { node: subgraph.node_id.clone(), spell: subgraph.spell_id });
         }
         check_subgraph_calls(&index, &mut errors);

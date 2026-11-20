@@ -893,6 +893,133 @@ fn subgraph_ref_edit(db_path: &Path) -> Result<serde_json::Value, String> {
         "floatPinned": float_pinned,
     }))
 }
+fn studio_at(db_path: &Path) -> Result<Runtime<StudioApp>, String> {
+    let config = StudioConfig { db_path: Some(db_path.to_path_buf()), ..StudioConfig::default() };
+    let mut rt = Runtime::new(StudioApp::open(&config).map_err(|error| error.to_string())?, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    Ok(rt)
+}
+
+fn prompt_of(app: &StudioApp, node: &NodeId) -> serde_json::Value {
+    app.spell.node(node).and_then(|node| node.config.get("prompt").cloned()).unwrap_or_default()
+}
+
+fn release_versions(app: &StudioApp) -> Vec<u32> {
+    app.releases.iter().map(|release| release.version).collect()
+}
+
+fn saved(rt: &mut Runtime<StudioApp>) -> Result<serde_json::Value, String> {
+    click(rt, "save")?;
+    Ok(json!({ "status": rt.state.draft_status, "storeError": rt.state.store_error }))
+}
+
+fn reopened(app: &StudioApp, node: &NodeId) -> serde_json::Value {
+    json!({
+        "prompt": prompt_of(app, node),
+        "releases": release_versions(app),
+        "activeRelease": app.root_subgraph().1,
+        "recordId": app.spell_record_id(),
+    })
+}
+
+fn draft_reopen(db_path: &Path) -> Result<serde_json::Value, String> {
+    let node = NodeId::from("llm");
+    let typed = ["first saved draft for {{content}}", "draft saved after release 1 for {{content}}", "second edit after release 1 for {{content}}"];
+    let mut rt = studio_at(db_path)?;
+    type_prompt(&mut rt, &node, typed[0])?;
+    let first_save = saved(&mut rt)?;
+    drop(rt);
+    let mut rt = studio_at(db_path)?;
+    let first_reopen = reopened(&rt.state, &node);
+    click(&mut rt, "publish")?;
+    let published = json!({ "version": rt.state.last_published.as_ref().map(|release| release.version), "storeError": rt.state.store_error });
+    type_prompt(&mut rt, &node, typed[1])?;
+    let saved_after_release = saved(&mut rt)?;
+    type_prompt(&mut rt, &node, typed[2])?;
+    rt.update(|app, _| app.sync_spell());
+    rt.frame(0.0);
+    let edited = json!({ "prompt": prompt_of(&rt.state, &node), "status": rt.state.draft_status });
+    let saved_again = saved(&mut rt)?;
+    drop(rt);
+    let mut rt = studio_at(db_path)?;
+    let second_reopen = reopened(&rt.state, &node);
+    let mut resaved = saved(&mut rt)?;
+    resaved["prompt"] = prompt_of(&rt.state, &node);
+    Ok(json!({
+        "node": node.0,
+        "typed": { "first": typed[0], "between": typed[1], "afterRelease": typed[2] },
+        "firstSave": first_save,
+        "firstReopen": first_reopen,
+        "published": published,
+        "savedAfterRelease": saved_after_release,
+        "editedAfterSave": edited,
+        "savedAgain": saved_again,
+        "secondReopen": second_reopen,
+        "resaved": resaved,
+    }))
+}
+
+fn save_guards(db_path: &Path) -> Result<serde_json::Value, String> {
+    let mut memory =
+        Runtime::new(StudioApp::open(&StudioConfig::default()).map_err(|error| error.to_string())?, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    memory.frame(0.0);
+    click(&mut memory, "save")?;
+    let (status, save_error) = (memory.state.draft_status.clone(), memory.state.store_error.clone());
+    click(&mut memory, "publish")?;
+    let no_db = json!({ "status": status, "saveError": save_error, "publishError": memory.state.store_error, "releases": release_versions(&memory.state) });
+    let mut app = StudioApp::with_spell(api_shaped_parent(SpellGraph::new("unsaved child").id), registry_specs());
+    app.store = Some(StudioStore::open(Some(db_path)).map_err(|error| error.to_string())?);
+    let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let pinned = saved(&mut rt)?;
+    type_release_version(&mut rt, &NodeId::from("call"), "zero")?;
+    let zero = saved(&mut rt)?;
+    Ok(json!({ "noDb": no_db, "pinned": pinned, "zero": zero }))
+}
+
+fn calling_spell(name: &str, trigger: &str, callee: SpellId) -> SpellGraph {
+    let mut spell = SpellGraph::new(name);
+    spell.nodes = vec![studio_node("trigger", trigger, 0.0, serde_json::Value::Null), studio_node("call", "flow/subgraph", 280.0, json!({}))];
+    spell.wires = vec![studio_wire("w_call", ("trigger", "out"), ("call", "in"))];
+    spell.subgraphs = vec![magicklala_graph::SubgraphRef { node_id: NodeId::from("call"), spell_id: callee, release_version: None }];
+    spell
+}
+
+fn release_identity(db_path: &Path) -> Result<serde_json::Value, String> {
+    let a_draft_reply = "from A draft";
+    let mut a_draft = SpellGraph::new("Release A");
+    a_draft.nodes = vec![
+        studio_node("start", "event/on_start", 0.0, serde_json::Value::Null),
+        studio_node("send", "io/send_message", 280.0, json!({ "content": a_draft_reply })),
+    ];
+    a_draft.wires = vec![studio_wire("w_flow", ("start", "out"), ("send", "in"))];
+    let b_draft = calling_spell("Release B", "event/on_start", a_draft.id);
+    let mut a_release = calling_spell("Release A", "event/on_message", b_draft.id);
+    a_release.id = a_draft.id;
+    StudioStore::open(Some(db_path)).and_then(|mut store| store.save_draft(&b_draft)).map_err(|error| error.to_string())?;
+    let mut a_store = StudioStore::open(Some(db_path)).map_err(|error| error.to_string())?;
+    a_store.save_draft(&a_draft).map_err(|error| error.to_string())?;
+    a_store.publish(&a_release).map_err(|error| error.to_string())?;
+    drop(a_store);
+    let mut rt = studio_at(db_path)?;
+    let opened = json!({
+        "spellId": rt.state.spell.id,
+        "recordId": rt.state.spell_record_id(),
+        "activeRelease": rt.state.root_subgraph().1,
+        "releases": release_versions(&rt.state),
+    });
+    let checked = validation_of(&mut rt)?;
+    let validation = json!({ "validation": checked["validation"], "errors": checked["errors"] });
+    let run = run_once(&mut rt)?;
+    click(&mut rt, "publish")?;
+    let published = json!({
+        "version": rt.state.last_published.as_ref().map(|release| release.version),
+        "storeError": rt.state.store_error,
+        "activeRelease": rt.state.root_subgraph().1,
+        "releases": release_versions(&rt.state),
+    });
+    Ok(json!({ "aSpellId": a_draft.id, "aDraftReply": a_draft_reply, "opened": opened, "validation": validation, "run": run, "published": published }))
+}
 fn trace_entry(event: &magicklala_graph::TraceEvent) -> Option<serde_json::Value> {
     use magicklala_graph::TraceEvent;
     let (kind, node) = match event {
@@ -948,13 +1075,16 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-ref-edit") => subgraph_ref_edit(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-collision") => subgraph_collision(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("draft-reopen") => draft_reopen(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("save-guards") => save_guards(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("release-identity") => release_identity(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("publish-renamed") => {
             let db = args.get(1).ok_or("missing database path")?;
             publish_renamed(Path::new(db), args.get(2).ok_or("missing new spell name")?)
         }
         _ => match args {
             [desktop, compact, db_path] => probe(PathBuf::from(desktop), PathBuf::from(compact), PathBuf::from(db_path)),
-            _ => Err("usage: studio_probe <desktop.png> <compact.png> <studio.sqlite> | cancel-run <delay-ms> <deadline-ms> | publish-renamed <studio.sqlite> <name> | subgraph <studio.sqlite> | subgraph-ref-edit <studio.sqlite> | subgraph-collision <studio.sqlite>".to_owned()),
+            _ => Err("usage: studio_probe <desktop.png> <compact.png> <studio.sqlite> | cancel-run <delay-ms> <deadline-ms> | publish-renamed <studio.sqlite> <name> | subgraph <studio.sqlite> | subgraph-ref-edit <studio.sqlite> | subgraph-collision <studio.sqlite> | draft-reopen <studio.sqlite> | save-guards <studio.sqlite> | release-identity <studio.sqlite>".to_owned()),
         },
     }
 }

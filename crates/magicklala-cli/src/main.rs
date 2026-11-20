@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use magicklala_graph::{EngineServices, NodeCatalog, NodeId, RunTrigger, SpellEngine, SpellGraph, SpellId, SpellValidator, SubgraphKey, TraceEvent, Value};
 use magicklala_nodes::{HttpLlmGateway, InMemoryKnowledge, InMemoryMemory, LlmGatewayConfig, NodeRegistry, default_registry};
 use magicklala_server::{ALLOWED_HOSTS_ENV, API_TOKEN_ENV, AppState, ProjectSubgraphResolver, ServerConfig, Wiring};
-use magicklala_store::{AesGcmVault, CryptoVault, MASTER_KEY_ENV, ProjectId, Repository, SqliteStore, StoreResult, is_in_memory_database_url};
+use magicklala_store::{AesGcmVault, CryptoVault, MASTER_KEY_ENV, ProjectId, Repository, SpellRecord, SqliteStore, is_in_memory_database_url};
 
 const VAULT_KEY_ENV: &str = "MAGICKLALA_VAULT_KEY";
 const EMBEDDER_URL_ENV: &str = "MAGICKLALA_EMBEDDER_URL";
@@ -72,6 +72,8 @@ enum SpellCommand {
         model: Option<String>,
         #[arg(long, value_name = "PATH_OR_URL", env = "MAGICKLALA_DB")]
         db: Option<String>,
+        #[arg(long, value_name = "RECORD_ID")]
+        spell_id: Option<uuid::Uuid>,
     },
     Validate {
         file: PathBuf,
@@ -246,25 +248,47 @@ fn load(file: &Path) -> Result<SpellGraph, Box<dyn std::error::Error>> {
     Ok(serde_json::from_str(&text).map_err(|error| format!("{} is not a spell: {error}", file.display()))?)
 }
 
-async fn stored_spell(store: &SqliteStore, graph: &SpellGraph) -> StoreResult<Option<(ProjectId, SubgraphKey)>> {
-    for project in store.list_projects().await? {
-        if let Some(record) = store.list_spells(project.id).await?.into_iter().find(|spell| spell.graph.id == graph.id) {
-            return Ok(Some((project.id, (SpellId(record.id.0), None))));
-        }
-    }
-    Ok(None)
+fn draft_root((project, record): &(ProjectId, SpellRecord)) -> (ProjectId, SubgraphKey) {
+    (*project, (SpellId(record.id.0), None))
 }
 
-async fn stored_subgraphs(db: &str, graph: &SpellGraph, registry: &NodeRegistry) -> Result<(ProjectSubgraphResolver, SubgraphKey), Box<dyn std::error::Error>> {
+async fn stored_spell(
+    store: &SqliteStore,
+    db: &str,
+    graph: &SpellGraph,
+    spell_id: Option<uuid::Uuid>,
+) -> Result<(ProjectId, SubgraphKey), Box<dyn std::error::Error>> {
+    let mut saved = Vec::new();
+    for project in store.list_projects().await? {
+        saved.extend(store.list_spells(project.id).await?.into_iter().map(|record| (project.id, record)));
+    }
+    if let Some(id) = spell_id {
+        return Ok(saved.iter().find(|(_, record)| record.id.0 == id).map(draft_root).ok_or_else(|| format!("spell record {id} was not found in {db}"))?);
+    }
+    let matching: Vec<&(ProjectId, SpellRecord)> = saved.iter().filter(|(_, record)| record.graph.id == graph.id).collect();
+    match matching.as_slice() {
+        [] => Err(format!("spell {} is not stored in {db}; save it there through the server or Studio, or run without --db", graph.id.0).into()),
+        [only] => Ok(draft_root(only)),
+        many => {
+            let records: Vec<String> = many.iter().map(|(_, record)| format!("{} ({})", record.id.0, record.name)).collect();
+            Err(format!("multiple saved spells share graph id {} in {db}: {}; pass --spell-id <record-id> to pick one", graph.id.0, records.join(", ")).into())
+        }
+    }
+}
+
+async fn stored_subgraphs(
+    db: &str,
+    graph: &SpellGraph,
+    spell_id: Option<uuid::Uuid>,
+    registry: &NodeRegistry,
+) -> Result<(ProjectSubgraphResolver, SubgraphKey), Box<dyn std::error::Error>> {
     let url = database_url_or_default(Some(db.to_owned()));
     if !is_in_memory_database_url(&url) && !studio_db_path(Path::new(db)).exists() {
         return Err(format!("database {db} does not exist; pass the SQLite file magicklala serve uses").into());
     }
     let store = SqliteStore::connect(&url).await?;
     store.migrate().await?;
-    let (project, root_key) = stored_spell(&store, graph)
-        .await?
-        .ok_or_else(|| format!("spell {} is not stored in {db}; save it there through the server or Studio, or run without --db", graph.id.0))?;
+    let (project, root_key) = stored_spell(&store, db, graph, spell_id).await?;
     let resolver = ProjectSubgraphResolver::load(&store, project, graph).await?;
     resolver.verify_from(graph, root_key, &SpellValidator::new(registry.specs()))?;
     Ok((resolver, root_key))
@@ -306,11 +330,11 @@ fn spell(command: SpellCommand) -> CliResult {
                 Err(errors) => Err(errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n").into()),
             }
         }
-        SpellCommand::Run { file, stream, trace, input, llm_base_url, model, db } => {
+        SpellCommand::Run { file, stream, trace, input, llm_base_url, model, db, spell_id } => {
             let mut graph = load(&file)?;
             let runtime = tokio::runtime::Runtime::new()?;
             let resolver = match db.as_deref().map(str::trim).filter(|db| !db.is_empty()) {
-                Some(db) => Some(runtime.block_on(stored_subgraphs(db, &graph, &registry))?),
+                Some(db) => Some(runtime.block_on(stored_subgraphs(db, &graph, spell_id, &registry))?),
                 None => None,
             };
             if let Some(model) = model.as_deref().filter(|model| !model.is_empty()) {
