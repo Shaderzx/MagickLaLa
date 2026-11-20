@@ -1,3 +1,14 @@
+mod discord;
+mod http;
+mod plugin;
+mod rejection;
+mod signature;
+mod slack;
+mod state;
+mod studio;
+mod tick;
+mod webhook;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -7,6 +18,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use uuid::Uuid;
+
+pub use discord::{DISCORD_DEFAULT_BASE_URL, DISCORD_MESSAGE_LIMIT, DiscordConnector, DiscordInbound};
+pub use plugin::{ExternalPluginSpec, JsonRpcRequest, PluginCapability, PluginRegistry, PluginTransport};
+pub use rejection::InboundRejection;
+pub use signature::{sign_hmac_sha256, verify_hmac_sha256};
+pub use slack::{SLACK_DEFAULT_BASE_URL, SLACK_MAX_CLOCK_SKEW_SECONDS, SlackConnector, SlackInbound};
+pub use studio::{StudioChatConnector, StudioReply};
+pub use tick::{MIN_TICK_INTERVAL_MS, TickConnector};
+pub use webhook::{MAX_WEBHOOK_BODY_BYTES, WEBHOOK_SIGNATURE_HEADER, WebhookConnector};
 
 #[derive(Debug, Error)]
 pub enum ConnectorError {
