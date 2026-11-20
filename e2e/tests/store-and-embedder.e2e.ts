@@ -208,3 +208,77 @@ test('memory search returns the agent memory closest to the query first and neve
     expect(scores).toEqual([...scores].sort((a: number, b: number) => b - a));
   });
 });
+
+test('webhook paths are stored trimmed of slashes, found with or without them, and empty or traversal paths are refused', async () => {
+  await withDatabase(async (db) => {
+    const masterKey = randomBytes(32).toString('hex');
+    const lookups = ['/hooks/shop', 'hooks/shop', '/hooks/shop/', 'hooks/shop/'];
+    const refused = ['/', '   ', '//', 'hooks/../admin'];
+
+    const outcome = await probeJson('webhooks', { db, create: '/hooks/shop', lookups, refused }, masterKey);
+
+    expect(outcome.created.path).toBe('hooks/shop');
+    expect(outcome.found.map((hit: any) => hit.lookup)).toEqual(lookups);
+    expect(outcome.found.map((hit: any) => hit.id)).toEqual(lookups.map(() => outcome.created.id));
+    expect(outcome.refused.map((miss: any) => miss.path)).toEqual(refused);
+    expect(outcome.refused.slice(0, 3).map((miss: any) => miss.error)).toEqual(refused.slice(0, 3).map(() => 'invalid input: webhook path cannot be empty'));
+    expect(outcome.refused[3].error).toBe('invalid input: webhook path cannot contain ".." segments');
+  });
+});
+
+function flatePdf(streams: Buffer[]): Buffer {
+  const objects = streams.map((stream, index) => Buffer.concat([Buffer.from(`${index + 1} 0 obj << /Length ${stream.length} /Filter /FlateDecode >>\nstream\n`), stream, Buffer.from('\nendstream\nendobj\n')]));
+  return Buffer.concat([Buffer.from('%PDF-1.4\n'), ...objects, Buffer.from('%%EOF\n')]);
+}
+
+test('PDF extraction refuses a FlateDecode stream that inflates past 4 MiB and a document whose streams inflate past 16 MiB in total', async () => {
+  const masterKey = randomBytes(32).toString('hex');
+  const mebibyte = 1024 * 1024;
+  const readableStream = deflateSync(Buffer.from(`BT /F1 12 Tf 72 690 Td (${compressedPdfLine}) Tj ET`));
+  const singleBombStream = deflateSync(Buffer.alloc(5 * mebibyte));
+  const nearLimitStream = deflateSync(Buffer.alloc(3.5 * mebibyte));
+  const singleBomb = flatePdf([readableStream, singleBombStream]);
+  const spreadBomb = flatePdf([readableStream, ...Array.from({ length: 5 }, () => nearLimitStream)]);
+  expect(singleBomb.length).toBeLessThan(64 * 1024);
+  expect(spreadBomb.length).toBeLessThan(64 * 1024);
+
+  const single = await probe('extract', { kind: 'pdf', base64: singleBomb.toString('base64') }, masterKey);
+  const spread = await probe('extract', { kind: 'pdf', base64: spreadBomb.toString('base64') }, masterKey);
+  const underLimit = await probeJson('extract', { kind: 'pdf', base64: flatePdf([readableStream, nearLimitStream]).toString('base64') }, masterKey);
+
+  expect(single.ok).toBe(false);
+  expect(single.ok ? '' : single.stderr).toContain('pdf stream exceeds decompression limit');
+  expect(spread.ok).toBe(false);
+  expect(spread.ok ? '' : spread.stderr).toContain('pdf stream exceeds decompression limit');
+  expect(underLimit.text).toBe(compressedPdfLine);
+});
+
+test('two concurrent agent patches to different fields both land, the rename and the disable', async () => {
+  await withDatabase(async (db) => {
+    const masterKey = randomBytes(32).toString('hex');
+    const rounds = 24;
+
+    const outcome = await probeJson('concurrent-update', { db, rounds, renamePrefix: 'renamed-agent' }, masterKey);
+
+    expect(outcome.agents).toHaveLength(rounds);
+    expect(outcome.agents.map((agent: any) => agent.name)).toEqual(Array.from({ length: rounds }, (_, index) => `renamed-agent-${index}`));
+    expect(outcome.agents.map((agent: any) => agent.enabled)).toEqual(Array.from({ length: rounds }, () => false));
+    expect(outcome.agents.map((agent: any) => agent.description)).toEqual(Array.from({ length: rounds }, () => 'original description'));
+  });
+});
+
+test('a release created from an explicit graph snapshot pins that snapshot even while the draft spell is edited at the same time', async () => {
+  await withDatabase(async (db) => {
+    const masterKey = randomBytes(32).toString('hex');
+    const spec = { db, draft: 'draft before release', snapshot: 'validated snapshot', edit: 'edited during release', rounds: 12 };
+
+    const outcome = await probeJson('pinned-release', spec, masterKey);
+
+    expect(outcome.releases).toHaveLength(spec.rounds);
+    expect(outcome.releases.map((release: any) => release.description)).toEqual(Array.from({ length: spec.rounds }, (_, index) => `${spec.snapshot} ${index}`));
+    expect(outcome.releases.map((release: any) => release.version)).toEqual(Array.from({ length: spec.rounds }, (_, index) => index + 1));
+    expect(outcome.releases.map((release: any) => release.contentHash)).toEqual(outcome.releases.map((release: any) => release.snapshotHash));
+    expect(outcome.draftDescription).toMatch(new RegExp(`^${spec.edit} \\d+$`));
+    expect(outcome.foreignGraphError).toBe('invalid input: release graph belongs to a different spell');
+  });
+});

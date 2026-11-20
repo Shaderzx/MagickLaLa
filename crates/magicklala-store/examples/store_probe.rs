@@ -7,7 +7,7 @@ use magicklala_embedder::{ChunkConfig, DocumentInput, DocumentKind, Embedder, Ht
 use magicklala_graph::SpellGraph;
 use magicklala_store::{
     AesGcmVault, AgentId, CredentialId, KnowledgeChunk, KnowledgeDocId, NewAgent, NewCredential, NewKnowledgeDoc, NewMemory, NewProject, NewSpell,
-    NewSpellRelease, ProjectId, Repository, SqliteStore, UpdateAgent,
+    NewSpellRelease, NewWebhook, ProjectId, Repository, SqliteStore, UpdateAgent,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -28,6 +28,9 @@ async fn main() -> ProbeResult<()> {
         "knowledge" => knowledge(&spec).await?,
         "memories" => memories(&spec).await?,
         "extract" => extract(&spec)?,
+        "webhooks" => webhooks(&spec).await?,
+        "concurrent-update" => concurrent_update(&spec).await?,
+        "pinned-release" => pinned_release(&spec).await?,
         other => return Err(format!("unknown command {other}").into()),
     };
     println!("{}", serde_json::to_string(&output)?);
@@ -238,4 +241,93 @@ async fn memories(spec: &Value) -> ProbeResult<Value> {
 fn extract(spec: &Value) -> ProbeResult<Value> {
     let kind = document_kind(text(spec, "kind")?)?;
     Ok(json!({ "text": extract_text(kind, &document_bytes(spec)?)? }))
+}
+
+fn strings<'a>(spec: &'a Value, key: &str) -> ProbeResult<Vec<&'a str>> {
+    list(spec, key)?.iter().map(|value| value.as_str().ok_or_else(|| format!("{key} must hold strings").into())).collect()
+}
+
+fn count(spec: &Value, key: &str) -> ProbeResult<usize> {
+    let raw = spec.get(key).and_then(Value::as_u64).ok_or_else(|| format!("spec is missing number field {key}"))?;
+    Ok(usize::try_from(raw)?)
+}
+
+async fn webhooks(spec: &Value) -> ProbeResult<Value> {
+    let store = open(spec).await?;
+    let (_, agents) = project_with_agents(&store, "webhooks").await?;
+    let agent_id = agent_for(&agents, "primary")?;
+    let created = store.create_webhook(NewWebhook { agent_id, path: text(spec, "create")?.to_owned(), secret_credential_id: None }).await?;
+    let mut found = Vec::new();
+    for lookup in strings(spec, "lookups")? {
+        found.push(json!({ "lookup": lookup, "id": store.find_webhook(lookup).await?.id }));
+    }
+    let mut refused = Vec::new();
+    for path in strings(spec, "refused")? {
+        let error = match store.create_webhook(NewWebhook { agent_id, path: path.to_owned(), secret_credential_id: None }).await {
+            Ok(webhook) => return Err(format!("webhook path {path:?} was accepted as {}", webhook.path).into()),
+            Err(error) => error.to_string(),
+        };
+        refused.push(json!({ "path": path, "error": error }));
+    }
+    Ok(json!({ "created": { "id": created.id, "path": created.path }, "found": found, "refused": refused }))
+}
+
+async fn concurrent_update(spec: &Value) -> ProbeResult<Value> {
+    let store = open(spec).await?;
+    let project = store.create_project(NewProject { name: "concurrent".to_owned(), description: String::new() }).await?;
+    let prefix = text(spec, "renamePrefix")?;
+    let mut agents = Vec::new();
+    for round in 0..count(spec, "rounds")? {
+        let agent = store
+            .create_agent(NewAgent {
+                project_id: project.id,
+                name: format!("agent-{round}"),
+                description: "original description".to_owned(),
+                settings: json!({}),
+            })
+            .await?;
+        let rename = UpdateAgent { name: Some(format!("{prefix}-{round}")), ..UpdateAgent::default() };
+        let disable = UpdateAgent { enabled: Some(false), ..UpdateAgent::default() };
+        let (renamed, disabled) = tokio::join!(store.update_agent(agent.id, rename), store.update_agent(agent.id, disable));
+        renamed?;
+        disabled?;
+        let stored = store.get_agent(agent.id).await?;
+        agents.push(json!({ "name": stored.name, "enabled": stored.enabled, "description": stored.description }));
+    }
+    Ok(json!({ "agents": agents }))
+}
+
+async fn pinned_release(spec: &Value) -> ProbeResult<Value> {
+    let store = open(spec).await?;
+    let project = store.create_project(NewProject { name: "releases".to_owned(), description: String::new() }).await?;
+    let mut draft = SpellGraph::new("pinned");
+    draft.description = text(spec, "draft")?.to_owned();
+    let spell = store.create_spell(NewSpell { project_id: project.id, name: "pinned".to_owned(), graph: draft.clone() }).await?;
+    let mut snapshot_hashes = Vec::new();
+    for round in 0..count(spec, "rounds")? {
+        let mut snapshot = draft.clone();
+        snapshot.description = format!("{} {round}", text(spec, "snapshot")?);
+        let mut edited = draft.clone();
+        edited.description = format!("{} {round}", text(spec, "edit")?);
+        snapshot_hashes.push(hex::encode(Sha256::digest(serde_json::to_string(&snapshot)?.as_bytes())));
+        let release = NewSpellRelease { spell_id: spell.id, notes: format!("round {round}") };
+        let (saved, released) = tokio::join!(store.save_spell_graph(spell.id, edited), store.create_release_with_graph(release, Some(snapshot)));
+        saved?;
+        released?;
+    }
+    let releases: Vec<Value> = store
+        .list_releases(spell.id)
+        .await?
+        .iter()
+        .zip(&snapshot_hashes)
+        .map(|(release, snapshot_hash)| {
+            json!({ "version": release.version, "description": release.graph.description, "contentHash": release.content_hash, "snapshotHash": snapshot_hash })
+        })
+        .collect();
+    let foreign = store
+        .create_release_with_graph(NewSpellRelease { spell_id: spell.id, notes: "foreign".to_owned() }, Some(SpellGraph::new("someone else")))
+        .await
+        .err()
+        .map(|error| error.to_string());
+    Ok(json!({ "releases": releases, "draftDescription": store.get_spell(spell.id).await?.graph.description, "foreignGraphError": foreign }))
 }
