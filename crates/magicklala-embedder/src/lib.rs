@@ -1,6 +1,16 @@
+mod chunker;
+mod extract;
+mod http;
+mod local;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub use chunker::{TextSpan, chunk_text};
+pub use extract::{extract_text, tidy};
+pub use http::HttpEmbedder;
+pub use local::LocalHashEmbedder;
 
 #[derive(Debug, Error)]
 pub enum EmbedderError {
@@ -12,6 +22,8 @@ pub enum EmbedderError {
     Provider(String),
     #[error("invalid chunk config: {0}")]
     Config(String),
+    #[error("text extraction failed: {0}")]
+    Extraction(String),
 }
 
 #[async_trait]
@@ -80,43 +92,33 @@ impl<E: Embedder> KnowledgePipeline<E> {
         &self.embedder
     }
 
+    pub fn extract(&self, document: &DocumentInput) -> Result<String, EmbedderError> {
+        extract_text(document.kind, &document.bytes)
+    }
+
     pub async fn ingest(&self, document: &DocumentInput) -> Result<Vec<IngestedChunk>, EmbedderError> {
-        match document.kind {
-            DocumentKind::Text | DocumentKind::Markdown => {}
-            other => return Err(EmbedderError::Unsupported(other)),
+        let text = self.extract(document)?;
+        let spans = chunk_text(&text, self.config);
+        if spans.is_empty() {
+            return Ok(Vec::new());
         }
-        let text = std::str::from_utf8(&document.bytes).map_err(|_| EmbedderError::Encoding)?;
-        let spans = self.split(text);
-        let texts: Vec<String> = spans.iter().map(|(start, end)| text.chars().skip(*start).take(end - start).collect()).collect();
+        let texts: Vec<String> = spans.iter().map(|span| text[span.byte_start..span.byte_end].to_owned()).collect();
         let vectors = self.embedder.embed(&texts).await?;
+        if vectors.len() != texts.len() {
+            return Err(EmbedderError::Provider(format!("embedder returned {} vectors for {} chunks", vectors.len(), texts.len())));
+        }
         Ok(spans
             .into_iter()
             .zip(texts)
             .zip(vectors)
             .enumerate()
-            .map(|(index, (((char_start, char_end), text), embedding))| IngestedChunk {
+            .map(|(index, ((span, text), embedding))| IngestedChunk {
                 index: u32::try_from(index).unwrap_or(u32::MAX),
                 text,
-                char_start,
-                char_end,
+                char_start: span.char_start,
+                char_end: span.char_end,
                 embedding,
             })
             .collect())
-    }
-
-    fn split(&self, text: &str) -> Vec<(usize, usize)> {
-        let total = text.chars().count();
-        let step = self.config.max_chars - self.config.overlap_chars;
-        let mut spans = Vec::new();
-        let mut start = 0;
-        while start < total {
-            let end = (start + self.config.max_chars).min(total);
-            spans.push((start, end));
-            if end == total {
-                break;
-            }
-            start += step;
-        }
-        spans
     }
 }
