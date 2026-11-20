@@ -44,10 +44,6 @@ pub fn graph_hash(graph: &SpellGraph) -> StoreResult<String> {
     Ok(content_hash(&serde_json::to_vec(graph)?))
 }
 
-pub fn normalize_webhook_path(path: &str) -> String {
-    path.trim_matches('/').to_owned()
-}
-
 fn secret_hint(secret: &str) -> String {
     let tail: String = secret.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
     format!("…{tail}")
@@ -118,17 +114,22 @@ impl Repository for InMemoryRepository {
 
     async fn update_agent(&self, id: AgentId, input: UpdateAgent) -> StoreResult<Agent> {
         let mut tables = self.tables.write().await;
-        if let Some(Some(spell)) = input.default_spell_id {
-            tables.spell(spell)?;
+        let mut agent = tables.agent(id)?.clone();
+        if let Some(name) = &input.name {
+            require_name(name, "agent")?;
         }
-        if let Some(Some(release)) = input.pinned_release_id
-            && !tables.releases.contains_key(&release)
+        if let Some(Some(spell)) = input.default_spell_id
+            && tables.spell(spell)?.project_id != agent.project_id
         {
-            return Err(StoreError::NotFound(format!("release {}", release.0)));
+            return Err(StoreError::Invalid("default spell belongs to another project".to_owned()));
         }
-        let agent = tables.agents.get_mut(&id).ok_or_else(|| StoreError::NotFound(format!("agent {}", id.0)))?;
+        if let Some(Some(release)) = input.pinned_release_id {
+            let pinned = tables.releases.get(&release).ok_or_else(|| StoreError::NotFound(format!("release {}", release.0)))?;
+            if tables.spell(pinned.spell_id)?.project_id != agent.project_id {
+                return Err(StoreError::Invalid("pinned release belongs to another project".to_owned()));
+            }
+        }
         if let Some(name) = input.name {
-            require_name(&name, "agent")?;
             agent.name = name;
         }
         if let Some(description) = input.description {
@@ -147,7 +148,8 @@ impl Repository for InMemoryRepository {
             agent.settings = settings;
         }
         agent.updated_at = Utc::now();
-        Ok(agent.clone())
+        tables.agents.insert(id, agent.clone());
+        Ok(agent)
     }
 
     async fn get_agent(&self, id: AgentId) -> StoreResult<Agent> {
@@ -209,18 +211,23 @@ impl Repository for InMemoryRepository {
     }
 
     async fn create_release(&self, input: NewSpellRelease) -> StoreResult<SpellRelease> {
+        self.create_release_with_graph(input, None).await
+    }
+
+    async fn create_release_with_graph(&self, input: NewSpellRelease, graph: Option<SpellGraph>) -> StoreResult<SpellRelease> {
         let mut tables = self.tables.write().await;
         let spell = tables.spell(input.spell_id)?.clone();
-        let previous = tables.releases.values().filter(|release| release.spell_id == input.spell_id).map(|release| release.version).max().unwrap_or(0);
-        let release = SpellRelease {
-            id: ReleaseId::new(),
-            spell_id: spell.id,
-            version: previous + 1,
-            notes: input.notes,
-            graph: spell.graph,
-            content_hash: spell.content_hash,
-            created_at: Utc::now(),
+        let (graph, content_hash) = match graph {
+            Some(snapshot) if snapshot.id != spell.graph.id => return Err(StoreError::Invalid("release graph belongs to a different spell".to_owned())),
+            Some(snapshot) => {
+                let hash = graph_hash(&snapshot)?;
+                (snapshot, hash)
+            }
+            None => (spell.graph, spell.content_hash),
         };
+        let previous = tables.releases.values().filter(|release| release.spell_id == input.spell_id).map(|release| release.version).max().unwrap_or(0);
+        let release =
+            SpellRelease { id: ReleaseId::new(), spell_id: spell.id, version: previous + 1, notes: input.notes, graph, content_hash, created_at: Utc::now() };
         tables.releases.insert(release.id, release.clone());
         Ok(release)
     }
@@ -362,10 +369,7 @@ impl Repository for InMemoryRepository {
     }
 
     async fn create_webhook(&self, input: NewWebhook) -> StoreResult<WebhookRecord> {
-        let path = normalize_webhook_path(&input.path);
-        if path.is_empty() {
-            return Err(StoreError::Invalid("webhook path must not be empty".to_owned()));
-        }
+        let path = normalize_webhook_path(&input.path)?;
         let mut tables = self.tables.write().await;
         tables.agent(input.agent_id)?;
         if tables.webhooks.values().any(|webhook| webhook.path == path) {
@@ -384,7 +388,7 @@ impl Repository for InMemoryRepository {
     }
 
     async fn find_webhook(&self, path: &str) -> StoreResult<WebhookRecord> {
-        let path = normalize_webhook_path(path);
+        let path = normalize_webhook_path(path)?;
         let tables = self.tables.read().await;
         tables.webhooks.values().find(|webhook| webhook.path == path).cloned().ok_or_else(|| StoreError::NotFound(format!("webhook {path}")))
     }

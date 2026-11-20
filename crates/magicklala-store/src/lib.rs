@@ -60,6 +60,7 @@ pub trait Repository: Send + Sync {
     async fn get_spell(&self, id: SpellRecordId) -> StoreResult<SpellRecord>;
     async fn list_spells(&self, project: ProjectId) -> StoreResult<Vec<SpellRecord>>;
     async fn create_release(&self, input: NewSpellRelease) -> StoreResult<SpellRelease>;
+    async fn create_release_with_graph(&self, input: NewSpellRelease, graph: Option<magicklala_graph::SpellGraph>) -> StoreResult<SpellRelease>;
     async fn list_releases(&self, spell: SpellRecordId) -> StoreResult<Vec<SpellRelease>>;
     async fn put_credential(&self, input: NewCredential, vault: &dyn CryptoVault) -> StoreResult<CredentialMeta>;
     async fn reveal_credential(&self, id: CredentialId, vault: &dyn CryptoVault) -> StoreResult<String>;

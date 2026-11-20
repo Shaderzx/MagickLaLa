@@ -66,16 +66,16 @@ fn runtime() -> Result<&'static tokio::runtime::Runtime, StudioError> {
         .ok_or_else(|| StudioError::Store("tokio runtime could not start".to_owned()))
 }
 
-fn block<F>(future: F) -> Result<F::Output, StudioError>
+fn block<F>(make: impl FnOnce() -> F + Send) -> Result<F::Output, StudioError>
 where
-    F: Future + Send,
+    F: Future,
     F::Output: Send,
 {
     let runtime = runtime()?;
     if tokio::runtime::Handle::try_current().is_err() {
-        return Ok(runtime.block_on(future));
+        return Ok(runtime.block_on(make()));
     }
-    std::thread::scope(|scope| scope.spawn(|| runtime.block_on(future)).join()).map_err(|_| StudioError::Store("studio worker panicked".to_owned()))
+    std::thread::scope(|scope| scope.spawn(|| runtime.block_on(make())).join()).map_err(|_| StudioError::Store("studio worker panicked".to_owned()))
 }
 
 pub struct StudioStore {
@@ -87,7 +87,7 @@ impl StudioStore {
     pub fn open(db_path: Option<&Path>) -> Result<Self, StudioError> {
         let url = db_path.map_or_else(|| "sqlite::memory:".to_owned(), |path| format!("sqlite://{}", path.display()));
         let target = url.clone();
-        let repository = block(async move {
+        let repository = block(move || async move {
             let store = SqliteStore::connect(&target).await?;
             store.migrate().await?;
             Ok::<_, magicklala_store::StoreError>(store)
@@ -99,7 +99,7 @@ impl StudioStore {
     fn spell_record(&self, spell: &SpellGraph) -> Result<SpellRecordId, StudioError> {
         let repository = self.repository.clone();
         let spell = spell.clone();
-        block(async move {
+        block(move || async move {
             let project = match repository.list_projects().await?.into_iter().find(|project| project.name == STUDIO_PROJECT) {
                 Some(project) => project,
                 None => {
@@ -120,7 +120,7 @@ impl StudioStore {
         let id = self.spell_record(spell)?;
         let repository = self.repository.clone();
         let graph = spell.clone();
-        block(async move {
+        block(move || async move {
             repository.save_spell_graph(id, graph).await?;
             repository.create_release(NewSpellRelease { spell_id: id, notes: "Published from Studio".to_owned() }).await
         })?
@@ -129,7 +129,7 @@ impl StudioStore {
 
     pub fn latest_release(&self) -> Result<Option<(SpellGraph, Vec<SpellRelease>)>, StudioError> {
         let repository = self.repository.clone();
-        block(async move {
+        block(move || async move {
             let Some(project) = repository.list_projects().await?.into_iter().find(|project| project.name == STUDIO_PROJECT) else {
                 return Ok(None);
             };
@@ -509,7 +509,7 @@ impl StudioApp {
         let collector = Arc::new(TraceCollector::default());
         let emitter: Arc<dyn EventEmitter> = collector.clone();
         let graph = self.spell.clone();
-        let outcome = block(async move { engine.run(&graph, trigger, emitter).await.map_err(|error| error.to_string()) });
+        let outcome = block(move || async move { engine.run(&graph, trigger, emitter).await.map_err(|error| error.to_string()) });
         self.pending_trace = collector.take().into();
         while self.step_trace() {}
         let finished = self.trace_events.iter().rev().find_map(|event| match event {

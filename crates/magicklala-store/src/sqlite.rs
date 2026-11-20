@@ -587,7 +587,11 @@ impl Repository for SqliteStore {
     }
 
     async fn create_release(&self, input: NewSpellRelease) -> StoreResult<SpellRelease> {
-        self.create_release_with_graph(input, None).await
+        SqliteStore::create_release_with_graph(self, input, None).await
+    }
+
+    async fn create_release_with_graph(&self, input: NewSpellRelease, graph: Option<SpellGraph>) -> StoreResult<SpellRelease> {
+        SqliteStore::create_release_with_graph(self, input, graph).await
     }
 
     async fn list_releases(&self, spell: SpellRecordId) -> StoreResult<Vec<SpellRelease>> {

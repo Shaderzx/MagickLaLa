@@ -6,10 +6,10 @@ use chrono::{DateTime, Utc};
 use magicklala_connectors::{ConnectorKind, InboundEvent, OutboundAction};
 use magicklala_embedder::Embedder;
 use magicklala_graph::{
-    EngineServices, EventEmitter, LlmGateway, NodeCatalog, NodeId, NodeInstance, RunId, RunStatus, RunSummary, RunTrigger, SPELL_SCHEMA_VERSION, SpellEngine,
-    SpellError, SpellGraph, SubgraphResolver, TraceEvent, ValidationError, Value,
+    EngineServices, EventEmitter, LlmGateway, NodeCatalog, NodeId, NodeInstance, RunBinding, RunId, RunStatus, RunSummary, RunTrigger, SPELL_SCHEMA_VERSION,
+    SpellEngine, SpellError, SpellGraph, SubgraphResolver, TraceEvent, ValidationError, Value,
 };
-use magicklala_store::{AgentId, ReleaseId, Repository, SpellRecordId};
+use magicklala_store::{AgentId, ProjectId, ReleaseId, Repository, SpellRecordId};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -231,6 +231,8 @@ pub fn trigger_payload(event: &InboundEvent) -> Value {
     }
 }
 
+pub type ProjectLlmFactory = Arc<dyn Fn(ProjectId) -> Arc<dyn LlmGateway> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct StoreScope {
     pub repository: Arc<dyn Repository>,
@@ -243,17 +245,28 @@ struct ScopedEngine {
     base: EngineServices,
     store: StoreScope,
     subgraphs: Option<Arc<dyn SubgraphResolver>>,
+    project_llm: Option<ProjectLlmFactory>,
 }
 
 impl ScopedEngine {
-    fn services(&self, agent_id: Uuid, run_id: RunId) -> EngineServices {
+    async fn agent_llm(&self, agent: AgentId) -> Option<Arc<dyn LlmGateway>> {
+        let factory = self.project_llm.as_ref()?;
+        let project = self.store.repository.get_agent(agent).await.ok()?.project_id;
+        Some(factory(project))
+    }
+
+    async fn services(&self, agent_id: Uuid, run_id: RunId) -> EngineServices {
         let agent = AgentId(agent_id);
         let repository = &self.store.repository;
-        let llm = self.store.llm.as_ref().map_or_else(
+        let upstream = match self.agent_llm(agent).await {
+            Some(llm) => Some(llm),
+            None => self.store.llm.clone(),
+        };
+        let llm = upstream.map_or_else(
             || self.base.llm.clone(),
             |llm| {
                 let scope = LlmCallScope { agent_id: Some(agent), run_id: Some(run_id.0) };
-                let metered: Arc<dyn LlmGateway> = Arc::new(MeteredLlmGateway::new(Arc::clone(llm), Arc::clone(repository)).scoped(scope));
+                let metered: Arc<dyn LlmGateway> = Arc::new(MeteredLlmGateway::new(llm, Arc::clone(repository)).scoped(scope));
                 Some(metered)
             },
         );
@@ -270,8 +283,9 @@ impl ScopedEngine {
         EngineServices { llm, memory, knowledge }
     }
 
-    fn engine(&self, agent_id: Uuid, run_id: RunId, step_limit: u64) -> SpellEngine {
-        let engine = SpellEngine::new(Arc::clone(&self.catalog), self.services(agent_id, run_id)).with_step_limit(step_limit);
+    async fn engine(&self, agent_id: Uuid, run_id: RunId, step_limit: u64) -> SpellEngine {
+        let engine =
+            SpellEngine::new(Arc::clone(&self.catalog), self.services(agent_id, run_id).await).with_step_limit(step_limit).with_agent_id(agent_id.to_string());
         match &self.subgraphs {
             Some(resolver) => engine.with_subgraph_resolver(Arc::clone(resolver)),
             None => engine,
@@ -313,16 +327,29 @@ pub fn ordered_replies(summary: &RunSummary, finish_order: &[NodeId]) -> Vec<Str
 pub struct EngineReleaseRunner {
     engine: Arc<SpellEngine>,
     scoped: Option<ScopedEngine>,
+    allow_private_http: Option<bool>,
 }
 
 impl EngineReleaseRunner {
     pub fn new(engine: Arc<SpellEngine>) -> Self {
-        Self { engine, scoped: None }
+        Self { engine, scoped: None, allow_private_http: None }
     }
 
     pub fn scoped(catalog: Arc<dyn NodeCatalog>, base: EngineServices, store: StoreScope) -> Self {
         let engine = Arc::new(SpellEngine::new(Arc::clone(&catalog), base.clone()));
-        Self { engine, scoped: Some(ScopedEngine { catalog, base, store, subgraphs: None }) }
+        Self { engine, scoped: Some(ScopedEngine { catalog, base, store, subgraphs: None, project_llm: None }), allow_private_http: None }
+    }
+
+    pub fn with_project_llm(mut self, factory: ProjectLlmFactory) -> Self {
+        if let Some(scoped) = &mut self.scoped {
+            scoped.project_llm = Some(factory);
+        }
+        self
+    }
+
+    pub fn with_private_http(mut self, allowed: bool) -> Self {
+        self.allow_private_http = Some(allowed);
+        self
     }
 
     pub fn with_subgraph_resolver(mut self, resolver: Arc<dyn SubgraphResolver>) -> Self {
@@ -372,12 +399,13 @@ impl ReleaseRunner for EngineReleaseRunner {
         let trigger = self.trigger(&release.graph, event)?;
         let order = Arc::new(FinishOrder { inner: events, finished: Mutex::new(Vec::new()) });
         let emitter: Arc<dyn EventEmitter> = Arc::clone(&order) as Arc<dyn EventEmitter>;
+        let binding = RunBinding { agent_id: Some(release.agent_id.to_string()), allow_private_http: self.allow_private_http };
         let summary = match &self.scoped {
             Some(scoped) => {
-                let engine = scoped.engine(release.agent_id, scope.run_id, self.engine.step_limit());
-                engine.run_with_cancellation(&release.graph, trigger, emitter, scope.cancellation).await?
+                let engine = scoped.engine(release.agent_id, scope.run_id, self.engine.step_limit()).await;
+                engine.run_bound(&release.graph, trigger, emitter, scope.cancellation, binding).await?
             }
-            None => self.engine.run_with_cancellation(&release.graph, trigger, emitter, scope.cancellation).await?,
+            None => self.engine.run_bound(&release.graph, trigger, emitter, scope.cancellation, binding).await?,
         };
         if summary.status != RunStatus::Succeeded {
             return Err(SpellError::Internal(summary.error.unwrap_or_else(|| format!("run ended {:?}", summary.status))));
