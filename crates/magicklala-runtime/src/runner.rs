@@ -1,15 +1,27 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use magicklala_connectors::{InboundEvent, OutboundAction};
+use magicklala_connectors::{ConnectorKind, InboundEvent, OutboundAction};
+use magicklala_embedder::Embedder;
 use magicklala_graph::{
-    EventEmitter, NodeId, RunId, RunStatus, RunSummary, RunTrigger, SPELL_SCHEMA_VERSION, SpellEngine, SpellError, SpellGraph, TraceEvent, ValidationError,
-    Value,
+    EngineServices, EventEmitter, LlmGateway, NodeCatalog, NodeId, NodeInstance, RunId, RunStatus, RunSummary, RunTrigger, SPELL_SCHEMA_VERSION, SpellEngine,
+    SpellError, SpellGraph, SubgraphResolver, TraceEvent, ValidationError, Value,
 };
+use magicklala_store::{AgentId, ReleaseId, Repository, SpellRecordId};
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+use crate::bridges::{StoreKnowledgeBridge, StoreMemoryBridge};
+use crate::metered::{LlmCallScope, MeteredLlmGateway};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseOrigin {
+    pub spell_id: SpellRecordId,
+    pub release_id: Option<ReleaseId>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentRelease {
@@ -17,12 +29,48 @@ pub struct AgentRelease {
     pub version: u32,
     pub graph: SpellGraph,
     pub deployed_at: DateTime<Utc>,
+    #[serde(default)]
+    pub origin: Option<ReleaseOrigin>,
+}
+
+impl AgentRelease {
+    pub fn spell_record_id(&self) -> SpellRecordId {
+        self.origin.map_or(SpellRecordId(self.graph.id.0), |origin| origin.spell_id)
+    }
+
+    pub fn release_record_id(&self) -> Option<ReleaseId> {
+        self.origin.and_then(|origin| origin.release_id)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RunScope {
+    pub run_id: RunId,
+    pub cancellation: CancellationToken,
+}
+
+impl RunScope {
+    pub fn new() -> Self {
+        Self { run_id: RunId::new(), cancellation: CancellationToken::new() }
+    }
+}
+
+impl Default for RunScope {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]
 pub trait ReleaseRunner: Send + Sync {
     fn validate(&self, graph: &SpellGraph) -> Result<(), Vec<ValidationError>>;
-    async fn run(&self, release: &AgentRelease, event: &InboundEvent, events: Arc<dyn EventEmitter>) -> Result<Vec<OutboundAction>, SpellError>;
+    async fn run(
+        &self,
+        release: &AgentRelease,
+        event: &InboundEvent,
+        events: Arc<dyn EventEmitter>,
+        scope: RunScope,
+    ) -> Result<Vec<OutboundAction>, SpellError>;
 }
 
 pub fn inbound_payload(event: &InboundEvent) -> Value {
@@ -73,8 +121,14 @@ impl ReleaseRunner for TemplateReplyRunner {
         if errors.is_empty() { Ok(()) } else { Err(errors) }
     }
 
-    async fn run(&self, release: &AgentRelease, event: &InboundEvent, events: Arc<dyn EventEmitter>) -> Result<Vec<OutboundAction>, SpellError> {
-        let run_id = RunId::new();
+    async fn run(
+        &self,
+        release: &AgentRelease,
+        event: &InboundEvent,
+        events: Arc<dyn EventEmitter>,
+        scope: RunScope,
+    ) -> Result<Vec<OutboundAction>, SpellError> {
+        let run_id = scope.run_id;
         let started_at = Utc::now();
         events.emit(TraceEvent::RunStarted { run_id, spell_id: release.graph.id, at: started_at });
         let mut actions = Vec::new();
@@ -128,27 +182,177 @@ pub fn structural_errors(graph: &SpellGraph) -> Vec<ValidationError> {
     errors
 }
 
-const SENT_OUTPUT_SUFFIX: &str = ".sent";
+const REPLY_OUTPUT_SUFFIXES: [&str; 2] = [".sent", ".reply"];
+const MESSAGE_TRIGGER_KINDS: [&str; 2] = ["event/on_message", "core/on_message"];
+const START_TRIGGER_KIND: &str = "event/on_start";
+
+pub fn trigger_kinds(kind: ConnectorKind) -> &'static [&'static str] {
+    match kind {
+        ConnectorKind::Webhook => &["event/on_webhook"],
+        ConnectorKind::Tick => &["event/on_tick"],
+        ConnectorKind::Studio | ConnectorKind::Rest | ConnectorKind::Discord | ConnectorKind::Slack => &MESSAGE_TRIGGER_KINDS,
+    }
+}
+
+fn webhook_envelope(event: &InboundEvent) -> serde_json::Value {
+    let payload = &event.payload;
+    let is_envelope = payload.as_object().is_some_and(|fields| fields.contains_key("method") || fields.contains_key("path"));
+    let part = |key: &str, fallback: serde_json::Value| if is_envelope { payload.get(key).cloned().unwrap_or(fallback) } else { fallback };
+    let body = if is_envelope { payload.get("body").cloned().unwrap_or(serde_json::Value::Null) } else { payload.clone() };
+    serde_json::json!({
+        "method": part("method", serde_json::Value::String("POST".to_owned())),
+        "path": part("path", serde_json::Value::String(event.channel.clone())),
+        "headers": part("headers", serde_json::json!({})),
+        "query": part("query", serde_json::json!({})),
+        "body": body,
+        "channel": event.channel,
+        "sender": event.sender,
+        "content": event.content,
+        CORRELATION_ID_KEY: correlation_id(payload),
+    })
+}
+
+fn tick_envelope(event: &InboundEvent) -> serde_json::Value {
+    let sequence = event.payload.get("tick").or_else(|| event.payload.get("sequence")).cloned().unwrap_or(serde_json::Value::from(0));
+    serde_json::json!({
+        "tick": sequence,
+        "at": event.received_at.to_rfc3339(),
+        "channel": event.channel,
+        "payload": event.payload,
+        CORRELATION_ID_KEY: correlation_id(&event.payload),
+    })
+}
+
+pub fn trigger_payload(event: &InboundEvent) -> Value {
+    match event.kind {
+        ConnectorKind::Webhook => Value::Json(webhook_envelope(event)),
+        ConnectorKind::Tick => Value::Json(tick_envelope(event)),
+        ConnectorKind::Studio | ConnectorKind::Rest | ConnectorKind::Discord | ConnectorKind::Slack => inbound_payload(event),
+    }
+}
+
+#[derive(Clone)]
+pub struct StoreScope {
+    pub repository: Arc<dyn Repository>,
+    pub llm: Option<Arc<dyn LlmGateway>>,
+    pub embedder: Option<Arc<dyn Embedder>>,
+}
+
+struct ScopedEngine {
+    catalog: Arc<dyn NodeCatalog>,
+    base: EngineServices,
+    store: StoreScope,
+    subgraphs: Option<Arc<dyn SubgraphResolver>>,
+}
+
+impl ScopedEngine {
+    fn services(&self, agent_id: Uuid, run_id: RunId) -> EngineServices {
+        let agent = AgentId(agent_id);
+        let repository = &self.store.repository;
+        let llm = self.store.llm.as_ref().map_or_else(
+            || self.base.llm.clone(),
+            |llm| {
+                let scope = LlmCallScope { agent_id: Some(agent), run_id: Some(run_id.0) };
+                let metered: Arc<dyn LlmGateway> = Arc::new(MeteredLlmGateway::new(Arc::clone(llm), Arc::clone(repository)).scoped(scope));
+                Some(metered)
+            },
+        );
+        let (memory, knowledge) = match &self.store.embedder {
+            Some(embedder) => (
+                Some(
+                    Arc::new(StoreMemoryBridge::new(Arc::clone(repository), Arc::clone(embedder)).pinned_to(agent)) as Arc<dyn magicklala_graph::MemoryService>
+                ),
+                Some(Arc::new(StoreKnowledgeBridge::new(Arc::clone(repository), Arc::clone(embedder)).pinned_to(agent))
+                    as Arc<dyn magicklala_graph::KnowledgeService>),
+            ),
+            None => (self.base.memory.clone(), self.base.knowledge.clone()),
+        };
+        EngineServices { llm, memory, knowledge }
+    }
+
+    fn engine(&self, agent_id: Uuid, run_id: RunId, step_limit: u64) -> SpellEngine {
+        let engine = SpellEngine::new(Arc::clone(&self.catalog), self.services(agent_id, run_id)).with_step_limit(step_limit);
+        match &self.subgraphs {
+            Some(resolver) => engine.with_subgraph_resolver(Arc::clone(resolver)),
+            None => engine,
+        }
+    }
+}
+
+struct FinishOrder {
+    inner: Arc<dyn EventEmitter>,
+    finished: Mutex<Vec<NodeId>>,
+}
+
+impl FinishOrder {
+    fn nodes(&self) -> Vec<NodeId> {
+        self.finished.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
+
+impl EventEmitter for FinishOrder {
+    fn emit(&self, event: TraceEvent) {
+        if let TraceEvent::NodeFinished { node_id, .. } = &event {
+            let mut finished = self.finished.lock().unwrap_or_else(PoisonError::into_inner);
+            if !finished.contains(node_id) {
+                finished.push(node_id.clone());
+            }
+        }
+        self.inner.emit(event);
+    }
+}
+
+pub fn ordered_replies(summary: &RunSummary, finish_order: &[NodeId]) -> Vec<String> {
+    finish_order
+        .iter()
+        .flat_map(|node| REPLY_OUTPUT_SUFFIXES.iter().filter_map(move |suffix| summary.outputs.get(&format!("{}{suffix}", node.0))))
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect()
+}
 
 pub struct EngineReleaseRunner {
     engine: Arc<SpellEngine>,
-    reply_outputs: Vec<String>,
+    scoped: Option<ScopedEngine>,
 }
 
 impl EngineReleaseRunner {
     pub fn new(engine: Arc<SpellEngine>) -> Self {
-        Self { engine, reply_outputs: vec!["reply".to_owned(), "content".to_owned()] }
+        Self { engine, scoped: None }
+    }
+
+    pub fn scoped(catalog: Arc<dyn NodeCatalog>, base: EngineServices, store: StoreScope) -> Self {
+        let engine = Arc::new(SpellEngine::new(Arc::clone(&catalog), base.clone()));
+        Self { engine, scoped: Some(ScopedEngine { catalog, base, store, subgraphs: None }) }
+    }
+
+    pub fn with_subgraph_resolver(mut self, resolver: Arc<dyn SubgraphResolver>) -> Self {
+        if let Some(scoped) = &mut self.scoped {
+            scoped.subgraphs = Some(resolver);
+        }
+        self
+    }
+
+    pub fn is_scoped(&self) -> bool {
+        self.scoped.is_some()
+    }
+
+    fn trigger_node<'graph>(&self, graph: &'graph SpellGraph, kind: ConnectorKind) -> Option<&'graph NodeInstance> {
+        let validator = self.engine.validator();
+        let triggers: Vec<&NodeInstance> = graph.nodes.iter().filter(|node| validator.spec(&node.kind).is_some_and(|spec| spec.is_trigger)).collect();
+        let wanted = trigger_kinds(kind);
+        triggers
+            .iter()
+            .find(|node| wanted.contains(&node.kind.as_str()))
+            .or_else(|| triggers.iter().find(|node| node.kind == START_TRIGGER_KIND))
+            .or_else(|| triggers.first())
+            .copied()
     }
 
     fn trigger(&self, graph: &SpellGraph, event: &InboundEvent) -> Result<RunTrigger, SpellError> {
-        let validator = self.engine.validator();
-        let node = graph
-            .nodes
-            .iter()
-            .find(|node| validator.spec(&node.kind).is_some_and(|spec| spec.is_trigger))
-            .ok_or(SpellError::Validation(vec![ValidationError::NoTrigger]))?;
-        let socket = validator.spec(&node.kind).and_then(|spec| spec.outputs.first()).map_or_else(|| "out".to_owned(), |socket| socket.name.clone());
-        Ok(RunTrigger { node: node.id.clone(), socket, payload: inbound_payload(event) })
+        let node = self.trigger_node(graph, event.kind).ok_or(SpellError::Validation(vec![ValidationError::NoTrigger]))?;
+        let socket =
+            self.engine.validator().spec(&node.kind).and_then(|spec| spec.outputs.first()).map_or_else(|| "out".to_owned(), |socket| socket.name.clone());
+        Ok(RunTrigger { node: node.id.clone(), socket, payload: trigger_payload(event) })
     }
 }
 
@@ -158,19 +362,26 @@ impl ReleaseRunner for EngineReleaseRunner {
         self.engine.validator().validate(graph)
     }
 
-    async fn run(&self, release: &AgentRelease, event: &InboundEvent, events: Arc<dyn EventEmitter>) -> Result<Vec<OutboundAction>, SpellError> {
+    async fn run(
+        &self,
+        release: &AgentRelease,
+        event: &InboundEvent,
+        events: Arc<dyn EventEmitter>,
+        scope: RunScope,
+    ) -> Result<Vec<OutboundAction>, SpellError> {
         let trigger = self.trigger(&release.graph, event)?;
-        let summary = self.engine.run(&release.graph, trigger, events).await?;
+        let order = Arc::new(FinishOrder { inner: events, finished: Mutex::new(Vec::new()) });
+        let emitter: Arc<dyn EventEmitter> = Arc::clone(&order) as Arc<dyn EventEmitter>;
+        let summary = match &self.scoped {
+            Some(scoped) => {
+                let engine = scoped.engine(release.agent_id, scope.run_id, self.engine.step_limit());
+                engine.run_with_cancellation(&release.graph, trigger, emitter, scope.cancellation).await?
+            }
+            None => self.engine.run_with_cancellation(&release.graph, trigger, emitter, scope.cancellation).await?,
+        };
         if summary.status != RunStatus::Succeeded {
             return Err(SpellError::Internal(summary.error.unwrap_or_else(|| format!("run ended {:?}", summary.status))));
         }
-        Ok(self
-            .reply_outputs
-            .iter()
-            .filter_map(|key| summary.outputs.get(key))
-            .chain(summary.outputs.iter().filter(|(name, _)| name.ends_with(SENT_OUTPUT_SUFFIX)).map(|(_, value)| value))
-            .filter_map(|value| value.as_str().map(str::to_owned))
-            .map(|content| reply_action(event, content))
-            .collect())
+        Ok(ordered_replies(&summary, &order.nodes()).into_iter().map(|content| reply_action(event, content)).collect())
     }
 }

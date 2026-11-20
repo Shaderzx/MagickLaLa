@@ -163,7 +163,7 @@ test('AgentSupervisor correlates a failed and a succeeded overlapping run to the
   const [failed] = completion(result.failing_correlation);
   expect(failed.status).toBe('failed');
   expect(failed.reply).toBeNull();
-  expect(failed.error).toContain('content');
+  expect(failed.error).toContain('boom requested');
   expect(result.outbound).toEqual([{ channel: 'ok-lane', content: 'hello there', correlation_id: result.ok_correlation }]);
   const recorded = result.recorded_runs.map((run: any) => ({ run_id: run.run_id, agent_id: run.agent_id, spell_id: run.spell_id, status: run.status, trigger: run.trigger, finished: run.finished_at !== null }));
   expect(recorded.sort((left: any, right: any) => left.status.localeCompare(right.status))).toEqual([
@@ -177,7 +177,7 @@ test('AgentSupervisor correlates a failed and a succeeded overlapping run to the
 test('A webhook inbound event fires the event/on_webhook trigger with top-level method, path and body fields', { timeout: 900_000 }, async () => {
   const correlation = `hook-${randomUUID()}`;
   const body = { amount: 42, order: 'A-7' };
-  const result = await probe(['webhook-run', '--correlation', correlation], JSON.stringify({ method: 'POST', path: '/hooks/orders', headers: { 'x-shop': 'demo' }, query: { live: 'yes' }, body }));
+  const result = await probe(['webhook-run', '--correlation', correlation], JSON.stringify({ method: 'POST', path: '/hooks/orders', headers: { shop: 'demo' }, query: { live: 'yes' }, body }));
   expect(result.completed).toEqual([
     { type: 'run_completed', agent_id: result.agent_id, run_id: expect.any(String), correlation_id: correlation, status: 'succeeded', reply: 'POST /hooks/orders amount=42 order=A-7 shop=demo live=yes', error: null },
   ]);

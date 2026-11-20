@@ -2378,6 +2378,7 @@ dependencies = [
  "magicklala-connectors",
  "magicklala-embedder",
  "magicklala-graph",
+ "magicklala-nodes",
  "magicklala-store",
  "serde",
  "serde_json",

@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use magicklala_connectors::{ConnectorRegistry, InboundEvent, OutboundAction};
-use magicklala_graph::{SpellGraph, TraceEvent};
+use magicklala_graph::{RunId, RunStatus, SpellGraph, TraceEvent};
+use magicklala_store::Repository;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{RwLock, broadcast};
@@ -20,7 +21,8 @@ pub use bridges::{SharedEmbedder, StoreKnowledgeBridge, StoreMemoryBridge};
 pub use copilot::{CopilotEngine, CopilotError, CopilotRequest, CopilotSuggestion, GraphPatchOp, PatchRejection};
 pub use metered::{LlmCallScope, MeteredLlmGateway};
 pub use runner::{
-    AgentRelease, CORRELATION_ID_KEY, EngineReleaseRunner, ReleaseRunner, TemplateReplyRunner, correlation_id, inbound_payload, structural_errors,
+    AgentRelease, CORRELATION_ID_KEY, EngineReleaseRunner, ReleaseOrigin, ReleaseRunner, RunScope, StoreScope, TemplateReplyRunner, correlation_id,
+    inbound_payload, ordered_replies, structural_errors, trigger_kinds, trigger_payload,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -47,6 +49,7 @@ pub enum RuntimeEvent {
     Inbound { event: InboundEvent },
     Outbound { action: OutboundAction },
     Trace { agent_id: Option<Uuid>, event: TraceEvent },
+    RunCompleted { agent_id: Uuid, run_id: RunId, correlation_id: Option<String>, status: RunStatus, reply: Option<String>, error: Option<String> },
 }
 
 pub trait EventBus: Send + Sync {
@@ -88,8 +91,9 @@ pub struct AgentSupervisor {
     connectors: Option<ConnectorRegistry>,
     run_timeout: Duration,
     releases: RwLock<HashMap<Uuid, Arc<AgentRelease>>>,
-    actors: tokio::sync::Mutex<HashMap<Uuid, actor::ActorHandle>>,
+    actors: RwLock<HashMap<Uuid, actor::ActorHandle>>,
     stats: Arc<Mutex<HashMap<Uuid, AgentRunStats>>>,
+    repository: Option<Arc<dyn Repository>>,
 }
 
 impl AgentSupervisor {
@@ -105,8 +109,9 @@ impl AgentSupervisor {
             connectors: None,
             run_timeout: DEFAULT_RUN_TIMEOUT,
             releases: RwLock::new(HashMap::new()),
-            actors: tokio::sync::Mutex::new(HashMap::new()),
+            actors: RwLock::new(HashMap::new()),
             stats: Arc::new(Mutex::new(HashMap::new())),
+            repository: None,
         }
     }
 
@@ -120,14 +125,31 @@ impl AgentSupervisor {
         self
     }
 
+    pub fn with_repository(mut self, repository: Arc<dyn Repository>) -> Self {
+        self.set_repository(repository);
+        self
+    }
+
+    pub fn set_repository(&mut self, repository: Arc<dyn Repository>) {
+        self.repository = Some(repository);
+    }
+
     pub async fn deploy_release(&self, agent_id: Uuid, graph: SpellGraph) -> Result<u32, DispatchError> {
+        self.deploy(agent_id, graph, None).await
+    }
+
+    pub async fn deploy_release_from(&self, agent_id: Uuid, graph: SpellGraph, origin: ReleaseOrigin) -> Result<u32, DispatchError> {
+        self.deploy(agent_id, graph, Some(origin)).await
+    }
+
+    async fn deploy(&self, agent_id: Uuid, graph: SpellGraph, origin: Option<ReleaseOrigin>) -> Result<u32, DispatchError> {
         if self.status(agent_id).await.is_none() {
             return Err(RuntimeError::UnknownAgent(agent_id).into());
         }
         self.runner.validate(&graph).map_err(|errors| DispatchError::InvalidRelease(errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")))?;
         let mut releases = self.releases.write().await;
         let version = releases.get(&agent_id).map_or(1, |release| release.version.saturating_add(1));
-        releases.insert(agent_id, Arc::new(actor::new_release(agent_id, version, graph)));
+        releases.insert(agent_id, Arc::new(actor::new_release(agent_id, version, graph, origin)));
         Ok(version)
     }
 
@@ -144,9 +166,11 @@ impl AgentSupervisor {
         }
         let release = self.release(agent_id).await.ok_or(DispatchError::NoRelease(agent_id))?;
         self.bus.publish(RuntimeEvent::Inbound { event: event.clone() });
-        let actors = self.actors.lock().await;
-        let handle = actors.get(&agent_id).ok_or(DispatchError::NotRunning(agent_id))?;
-        handle.enqueue(agent_id, event, release).await
+        let mailbox = self.actors.read().await.get(&agent_id).map(actor::ActorHandle::mailbox).ok_or(DispatchError::NotRunning(agent_id))?;
+        mailbox.try_send(actor::QueuedEvent::new(event, release)).map_err(|error| match error {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => DispatchError::Busy(agent_id),
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => DispatchError::NotRunning(agent_id),
+        })
     }
 
     pub fn run_stats(&self, agent_id: Uuid) -> AgentRunStats {
@@ -162,7 +186,7 @@ impl AgentSupervisor {
     }
 
     pub async fn start(&self, agent_id: Uuid) -> Result<(), RuntimeError> {
-        let mut actors = self.actors.lock().await;
+        let mut actors = self.actors.write().await;
         self.transition(agent_id, AgentStatus::Running, |current| match current {
             AgentStatus::Running | AgentStatus::Starting => Err(RuntimeError::AlreadyRunning(agent_id)),
             _ => Ok(()),
@@ -175,20 +199,39 @@ impl AgentSupervisor {
             connectors: self.connectors.clone(),
             stats: Arc::clone(&self.stats),
             run_timeout: self.run_timeout,
+            repository: self.repository.clone(),
         };
-        if let Some(previous) = actors.insert(agent_id, actor::spawn_actor(Arc::new(context))) {
+        let previous = actors.insert(agent_id, actor::spawn_actor(Arc::new(context)));
+        drop(actors);
+        if let Some(previous) = previous {
             previous.shutdown().await;
         }
         Ok(())
     }
 
     pub async fn stop(&self, agent_id: Uuid) -> Result<(), RuntimeError> {
-        let mut actors = self.actors.lock().await;
-        self.transition(agent_id, AgentStatus::Stopped, |_| Ok(())).await?;
-        if let Some(handle) = actors.remove(&agent_id) {
+        let handle = {
+            let mut actors = self.actors.write().await;
+            self.transition(agent_id, AgentStatus::Stopped, |_| Ok(())).await?;
+            actors.remove(&agent_id)
+        };
+        if let Some(handle) = handle {
             handle.shutdown().await;
         }
         Ok(())
+    }
+
+    pub async fn forget(&self, agent_id: Uuid) {
+        let handle = self.actors.write().await.remove(&agent_id);
+        if let Some(handle) = handle {
+            handle.shutdown().await;
+        }
+        let known = self.agents.write().await.remove(&agent_id).is_some();
+        self.releases.write().await.remove(&agent_id);
+        self.stats.lock().unwrap_or_else(PoisonError::into_inner).remove(&agent_id);
+        if known {
+            self.bus.publish(RuntimeEvent::AgentStatusChanged { agent_id, status: AgentStatus::Stopped });
+        }
     }
 
     pub async fn status(&self, agent_id: Uuid) -> Option<AgentStatus> {
