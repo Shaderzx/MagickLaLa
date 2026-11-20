@@ -797,7 +797,7 @@ test('A run whose node outputs pass 1 MiB saves a trace of at most 65536 bytes a
   const stack = await launchStack(llm.baseUrl);
   try {
     const project = await stack.api('/api/v1/projects', { name: 'Huge outputs' });
-    const { spell, agent } = await runningLlmAgent(stack.api, project.body.id, 'growing', growingLoopGraph(10_000, 110));
+    const { spell, agent } = await runningLlmAgent(stack.api, project.body.id, 'growing', growingLoopGraph(20_000, 55));
     const direct = await stack.api(`/api/v1/spells/${spell.id}/run`, { input: 'grow', agent_id: agent.id });
     expect(direct.status).toBe(200);
     expect(Buffer.byteLength(JSON.stringify(direct.body.summary.outputs))).toBeGreaterThan(1024 * 1024);

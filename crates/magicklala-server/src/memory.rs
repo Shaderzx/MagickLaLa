@@ -20,6 +20,7 @@ struct Tables {
     knowledge_docs: BTreeMap<KnowledgeDocId, KnowledgeDoc>,
     knowledge_chunks: Vec<(AgentId, KnowledgeChunk)>,
     webhooks: BTreeMap<WebhookId, WebhookRecord>,
+    webhook_deliveries: BTreeMap<(WebhookId, String), i64>,
     runs: Vec<ExecutionRun>,
     llm_logs: Vec<LlmRequestLog>,
     plugin_states: BTreeMap<(AgentId, String), PluginStateRecord>,
@@ -104,6 +105,7 @@ impl Repository for InMemoryRepository {
             default_spell_id: None,
             pinned_release_id: None,
             enabled: true,
+            autostart: false,
             settings: input.settings,
             created_at: now,
             updated_at: now,
@@ -144,6 +146,9 @@ impl Repository for InMemoryRepository {
         if let Some(enabled) = input.enabled {
             agent.enabled = enabled;
         }
+        if let Some(autostart) = input.autostart {
+            agent.autostart = autostart;
+        }
         if let Some(settings) = input.settings {
             agent.settings = settings;
         }
@@ -166,6 +171,8 @@ impl Repository for InMemoryRepository {
         let mut tables = self.tables.write().await;
         tables.agents.remove(&id).ok_or_else(|| StoreError::NotFound(format!("agent {}", id.0)))?;
         tables.webhooks.retain(|_, webhook| webhook.agent_id != id);
+        let webhooks: Vec<WebhookId> = tables.webhooks.keys().copied().collect();
+        tables.webhook_deliveries.retain(|(webhook, _), _| webhooks.contains(webhook));
         tables.memories.retain(|memory| memory.agent_id != id);
         tables.knowledge_chunks.retain(|(agent, _)| *agent != id);
         tables.knowledge_docs.retain(|_, doc| doc.agent_id != id);
@@ -277,7 +284,7 @@ impl Repository for InMemoryRepository {
     async fn delete_credential(&self, id: CredentialId) -> StoreResult<()> {
         let mut tables = self.tables.write().await;
         let signing: Vec<String> =
-            tables.webhooks.values().filter(|webhook| webhook.secret_credential_id == Some(id)).map(|webhook| webhook.path.clone()).collect();
+            tables.webhooks.values().filter(|webhook| webhook.secret_credential_id == Some(id)).map(|webhook| webhook.id.0.to_string()).collect();
         if !signing.is_empty() {
             return Err(StoreError::Conflict(format!("credential {} signs webhook {}; delete those webhooks first", id.0, signing.join(", "))));
         }
@@ -286,6 +293,7 @@ impl Repository for InMemoryRepository {
 
     async fn delete_webhook(&self, id: WebhookId) -> StoreResult<()> {
         let mut tables = self.tables.write().await;
+        tables.webhook_deliveries.retain(|(webhook, _), _| *webhook != id);
         tables.webhooks.remove(&id).map(|_| ()).ok_or_else(|| StoreError::NotFound(format!("webhook {}", id.0)))
     }
 
@@ -408,6 +416,34 @@ impl Repository for InMemoryRepository {
         let path = normalize_webhook_path(path)?;
         let tables = self.tables.read().await;
         tables.webhooks.values().find(|webhook| webhook.path == path).cloned().ok_or_else(|| StoreError::NotFound(format!("webhook {path}")))
+    }
+
+    async fn list_webhooks(&self, agent: Option<AgentId>) -> StoreResult<Vec<WebhookRecord>> {
+        let tables = self.tables.read().await;
+        let mut webhooks: Vec<WebhookRecord> =
+            tables.webhooks.values().filter(|webhook| agent.is_none_or(|agent| webhook.agent_id == agent)).cloned().collect();
+        webhooks.sort_by(|left, right| left.created_at.cmp(&right.created_at).then_with(|| left.path.cmp(&right.path)));
+        Ok(webhooks)
+    }
+
+    async fn record_webhook_delivery(&self, webhook: WebhookId, delivery_key: &str, received_at: i64, prune_before: i64) -> StoreResult<bool> {
+        require_name(delivery_key, "webhook delivery")?;
+        let mut tables = self.tables.write().await;
+        if !tables.webhooks.contains_key(&webhook) {
+            return Err(StoreError::Invalid(format!("webhook {} delivery references a missing record", webhook.0)));
+        }
+        tables.webhook_deliveries.retain(|_, received| *received >= prune_before);
+        let key = (webhook, delivery_key.to_owned());
+        if tables.webhook_deliveries.contains_key(&key) {
+            return Ok(false);
+        }
+        tables.webhook_deliveries.insert(key, received_at);
+        Ok(true)
+    }
+
+    async fn forget_webhook_delivery(&self, webhook: WebhookId, delivery_key: &str) -> StoreResult<()> {
+        self.tables.write().await.webhook_deliveries.remove(&(webhook, delivery_key.to_owned()));
+        Ok(())
     }
 
     async fn record_run(&self, run: ExecutionRun) -> StoreResult<()> {

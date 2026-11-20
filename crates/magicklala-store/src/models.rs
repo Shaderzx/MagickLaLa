@@ -52,6 +52,8 @@ pub struct Agent {
     pub default_spell_id: Option<SpellRecordId>,
     pub pinned_release_id: Option<ReleaseId>,
     pub enabled: bool,
+    #[serde(default)]
+    pub autostart: bool,
     pub settings: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -72,6 +74,7 @@ pub struct UpdateAgent {
     pub default_spell_id: Option<Option<SpellRecordId>>,
     pub pinned_release_id: Option<Option<ReleaseId>>,
     pub enabled: Option<bool>,
+    pub autostart: Option<bool>,
     pub settings: Option<serde_json::Value>,
 }
 

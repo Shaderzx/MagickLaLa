@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, SubsecRound, Utc};
 use magicklala_graph::{RunStatus, SpellGraph};
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::SqliteRow;
@@ -14,8 +14,11 @@ use crate::{
     SpellRelease, SqliteStore, StoreError, StoreResult, UpdateAgent, WebhookId, WebhookRecord, normalize_webhook_path,
 };
 
-const SQLITE_MIGRATIONS: &[(i64, &str)] =
-    &[(1, include_str!("../migrations/0001_initial.sql")), (2, include_str!("../migrations/0002_protect_webhook_secrets.sql"))];
+const SQLITE_MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../migrations/0001_initial.sql")),
+    (2, include_str!("../migrations/0002_protect_webhook_secrets.sql")),
+    (3, include_str!("../migrations/0003_webhook_deliveries_and_autostart.sql")),
+];
 const CREDENTIAL_SIGNS_WEBHOOK: &str = "credential is referenced by a webhook";
 pub const POSTGRES_SCHEMA: &str = include_str!("../migrations_pg/0001_initial.sql");
 const KEYWORD_WEIGHT: f32 = 0.5;
@@ -24,7 +27,8 @@ const KEYWORD_CANDIDATES_PER_RESULT: i64 = 10;
 const MAX_KEYWORD_CANDIDATES: i64 = 200;
 const VECTOR_CANDIDATE_LIMIT: i64 = 2000;
 
-const AGENT_COLUMNS: &str = "id, project_id, name, description, default_spell_id, pinned_release_id, enabled, settings, created_at, updated_at";
+const AGENT_COLUMNS: &str = "id, project_id, name, description, default_spell_id, pinned_release_id, enabled, autostart, settings, created_at, updated_at";
+const WEBHOOK_COLUMNS: &str = "id, agent_id, path, secret_credential_id, enabled, created_at";
 const SPELL_COLUMNS: &str = "id, project_id, name, graph, content_hash, created_at, updated_at";
 const RELEASE_COLUMNS: &str = "id, spell_id, version, notes, graph, content_hash, created_at";
 const CREDENTIAL_COLUMNS: &str = "id, project_id, name, provider, hint, created_at, rotated_at";
@@ -217,6 +221,10 @@ fn protected_credential(error: sqlx::Error) -> StoreError {
     }
 }
 
+pub(crate) fn signing_conflict(credential: CredentialId, webhooks: &[String]) -> StoreError {
+    StoreError::Conflict(format!("credential {} signs webhook {}; delete those webhooks first", credential.0, webhooks.join(", ")))
+}
+
 fn require_text(value: &str, field: &str) -> StoreResult<()> {
     if value.trim().is_empty() {
         return Err(StoreError::Invalid(format!("{field} must not be empty")));
@@ -311,6 +319,7 @@ fn agent_from(row: &SqliteRow) -> StoreResult<Agent> {
         default_spell_id: optional_uuid_column(row, "default_spell_id")?.map(SpellRecordId),
         pinned_release_id: optional_uuid_column(row, "pinned_release_id")?.map(ReleaseId),
         enabled: row.try_get::<i64, _>("enabled")? != 0,
+        autostart: row.try_get::<i64, _>("autostart")? != 0,
         settings: json_column(row, "settings")?,
         created_at: time_column(row, "created_at")?,
         updated_at: time_column(row, "updated_at")?,
@@ -464,11 +473,12 @@ impl Repository for SqliteStore {
             default_spell_id: None,
             pinned_release_id: None,
             enabled: true,
+            autostart: false,
             settings: input.settings,
             created_at: now,
             updated_at: now,
         };
-        sqlx::query(&format!("INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?, ?, ?, ?, NULL, NULL, 1, ?, ?, ?)"))
+        sqlx::query(&format!("INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?, ?, ?, ?, NULL, NULL, 1, 0, ?, ?, ?)"))
             .bind(agent.id.0.to_string())
             .bind(agent.project_id.0.to_string())
             .bind(&agent.name)
@@ -514,6 +524,9 @@ impl Repository for SqliteStore {
         }
         if let Some(enabled) = input.enabled {
             update.push(", enabled = ").push_bind(i64::from(enabled));
+        }
+        if let Some(autostart) = input.autostart {
+            update.push(", autostart = ").push_bind(i64::from(autostart));
         }
         if let Some(settings) = input.settings {
             update.push(", settings = ").push_bind(serde_json::to_string(&settings)?);
@@ -649,6 +662,13 @@ impl Repository for SqliteStore {
     }
 
     async fn delete_credential(&self, id: CredentialId) -> StoreResult<()> {
+        let signing: Vec<String> = sqlx::query_scalar("SELECT id FROM webhooks WHERE secret_credential_id = ? ORDER BY created_at, path")
+            .bind(id.0.to_string())
+            .fetch_all(&self.pool)
+            .await?;
+        if !signing.is_empty() {
+            return Err(signing_conflict(id, &signing));
+        }
         let result = sqlx::query("DELETE FROM credentials WHERE id = ?").bind(id.0.to_string()).execute(&self.pool).await.map_err(protected_credential)?;
         ensure_found(result.rows_affected(), format!("credential {}", id.0))
     }
@@ -872,9 +892,9 @@ impl Repository for SqliteStore {
             path: normalize_webhook_path(&input.path)?,
             secret_credential_id: input.secret_credential_id,
             enabled: true,
-            created_at: Utc::now(),
+            created_at: Utc::now().trunc_subsecs(6),
         };
-        sqlx::query("INSERT INTO webhooks (id, agent_id, path, secret_credential_id, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)")
+        sqlx::query(&format!("INSERT INTO webhooks ({WEBHOOK_COLUMNS}) VALUES (?, ?, ?, ?, 1, ?)"))
             .bind(webhook.id.0.to_string())
             .bind(webhook.agent_id.0.to_string())
             .bind(&webhook.path)
@@ -888,11 +908,43 @@ impl Repository for SqliteStore {
 
     async fn find_webhook(&self, path: &str) -> StoreResult<WebhookRecord> {
         let path = normalize_webhook_path(path)?;
-        let row = sqlx::query("SELECT id, agent_id, path, secret_credential_id, enabled, created_at FROM webhooks WHERE path = ?")
-            .bind(&path)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query(&format!("SELECT {WEBHOOK_COLUMNS} FROM webhooks WHERE path = ?")).bind(&path).fetch_optional(&self.pool).await?;
         row.map(|row| webhook_from(&row)).ok_or_else(|| StoreError::NotFound(format!("webhook {path}")))?
+    }
+
+    async fn list_webhooks(&self, agent: Option<AgentId>) -> StoreResult<Vec<WebhookRecord>> {
+        let rows = match agent {
+            Some(agent) => {
+                sqlx::query(&format!("SELECT {WEBHOOK_COLUMNS} FROM webhooks WHERE agent_id = ? ORDER BY created_at, path"))
+                    .bind(agent.0.to_string())
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+            None => sqlx::query(&format!("SELECT {WEBHOOK_COLUMNS} FROM webhooks ORDER BY created_at, path")).fetch_all(&self.pool).await?,
+        };
+        rows.iter().map(webhook_from).collect()
+    }
+
+    async fn record_webhook_delivery(&self, webhook: WebhookId, delivery_key: &str, received_at: i64, prune_before: i64) -> StoreResult<bool> {
+        require_text(delivery_key, "webhook delivery id")?;
+        sqlx::query("DELETE FROM webhook_deliveries WHERE received_at < ?").bind(prune_before).execute(&self.pool).await?;
+        let inserted = sqlx::query("INSERT OR IGNORE INTO webhook_deliveries (webhook_id, delivery_key, received_at) VALUES (?, ?, ?)")
+            .bind(webhook.0.to_string())
+            .bind(delivery_key)
+            .bind(received_at)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| classify(error, &format!("webhook {} delivery", webhook.0)))?;
+        Ok(inserted.rows_affected() == 1)
+    }
+
+    async fn forget_webhook_delivery(&self, webhook: WebhookId, delivery_key: &str) -> StoreResult<()> {
+        sqlx::query("DELETE FROM webhook_deliveries WHERE webhook_id = ? AND delivery_key = ?")
+            .bind(webhook.0.to_string())
+            .bind(delivery_key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     async fn record_run(&self, run: ExecutionRun) -> StoreResult<()> {

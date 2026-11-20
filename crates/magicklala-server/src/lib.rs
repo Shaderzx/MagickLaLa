@@ -107,7 +107,10 @@ impl AgentLocks {
     }
 
     pub fn forget(&self, agent_id: Uuid) {
-        self.locks.lock().unwrap_or_else(PoisonError::into_inner).remove(&agent_id);
+        let mut locks = self.locks.lock().unwrap_or_else(PoisonError::into_inner);
+        if locks.get(&agent_id).is_some_and(|lock| Arc::strong_count(lock) == 1) {
+            locks.remove(&agent_id);
+        }
     }
 }
 
@@ -115,6 +118,7 @@ impl AgentLocks {
 pub struct BootReport {
     pub started: Vec<Uuid>,
     pub failed: Vec<(Uuid, String)>,
+    pub refused_unsigned_webhooks: Vec<(Uuid, String)>,
 }
 
 #[derive(Clone)]
@@ -235,12 +239,28 @@ impl AppState {
         }
     }
 
+    async fn refused_unsigned_webhooks(&self) -> Vec<(Uuid, String)> {
+        if !self.access.requires_token() {
+            return Vec::new();
+        }
+        let webhooks = self.store.list_webhooks(None).await.unwrap_or_default();
+        let refused: Vec<(Uuid, String)> = webhooks
+            .into_iter()
+            .filter(|webhook| webhook.enabled && webhook.secret_credential_id.is_none())
+            .map(|webhook| (webhook.id.0, webhook.path))
+            .collect();
+        for (id, path) in &refused {
+            tracing::warn!(webhook_id = %id, %path, "unsigned webhook is refused while {API_TOKEN_ENV} is set");
+        }
+        refused
+    }
+
     pub async fn boot_enabled_agents(&self) -> BootReport {
-        let mut report = BootReport::default();
+        let mut report = BootReport { refused_unsigned_webhooks: self.refused_unsigned_webhooks().await, ..BootReport::default() };
         let Ok(projects) = self.store.list_projects().await else { return report };
         for project in projects {
             let Ok(agents) = self.store.list_agents(project.id).await else { continue };
-            for agent in agents.into_iter().filter(|agent| agent.enabled && agent.pinned_release_id.is_some()) {
+            for agent in agents.into_iter().filter(|agent| agent.enabled && agent.autostart && agent.pinned_release_id.is_some()) {
                 let id = agent.id.0;
                 match api::boot_agent(self, agent).await {
                     Ok(()) => report.started.push(id),
@@ -288,7 +308,7 @@ fn guarded_v1() -> Router<AppState> {
         .route("/agents/{id}/runs", get(api::list_runs))
         .route("/credentials", post(api::create_credential).get(api::list_credentials))
         .route("/credentials/{id}", axum::routing::delete(api::delete_credential))
-        .route("/webhooks", post(api::create_webhook))
+        .route("/webhooks", post(api::create_webhook).get(api::list_webhooks))
         .route("/ws-ticket", post(api::create_ws_ticket))
         .route("/copilot/suggest", post(api::copilot_suggest))
 }
@@ -313,6 +333,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(protected)
         .fallback(api::route_not_found)
         .layer(trace)
+        .layer(middleware::from_fn_with_state(state.clone(), access::reject_foreign_origin))
         .layer(cors)
         .layer(middleware::from_fn_with_state(state.clone(), access::require_known_host))
         .with_state(state)

@@ -88,6 +88,9 @@ pub trait Repository: Send + Sync {
     async fn search_knowledge(&self, agent: AgentId, query: &str, embedding: &[f32], limit: u32) -> StoreResult<Vec<SearchHit<KnowledgeChunk>>>;
     async fn create_webhook(&self, input: NewWebhook) -> StoreResult<WebhookRecord>;
     async fn find_webhook(&self, path: &str) -> StoreResult<WebhookRecord>;
+    async fn list_webhooks(&self, agent: Option<AgentId>) -> StoreResult<Vec<WebhookRecord>>;
+    async fn record_webhook_delivery(&self, webhook: WebhookId, delivery_key: &str, received_at: i64, prune_before: i64) -> StoreResult<bool>;
+    async fn forget_webhook_delivery(&self, webhook: WebhookId, delivery_key: &str) -> StoreResult<()>;
     async fn record_run(&self, run: ExecutionRun) -> StoreResult<()>;
     async fn list_runs(&self, agent: AgentId, limit: u32) -> StoreResult<Vec<ExecutionRun>>;
     async fn find_run_by_correlation(&self, _agent: AgentId, _correlation_id: &str) -> StoreResult<Option<ExecutionRun>> {

@@ -100,7 +100,13 @@ impl StoreSubgraphLoader {
 
 #[async_trait]
 impl SubgraphLoader for StoreSubgraphLoader {
-    async fn load(&self, project: ProjectId, graph: &SpellGraph) -> Arc<dyn SubgraphResolver> {
-        Arc::new(ProjectSubgraphResolver::load(self.store.as_ref(), project, graph).await.unwrap_or_default())
+    async fn load(&self, project: ProjectId, graph: &SpellGraph) -> Result<Arc<dyn SubgraphResolver>, String> {
+        match ProjectSubgraphResolver::load(self.store.as_ref(), project, graph).await {
+            Ok(resolver) => Ok(Arc::new(resolver)),
+            Err(error) => {
+                tracing::warn!(project_id = %project.0, spell_id = %graph.id.0, %error, "subgraph resolver could not load the spell's subgraphs from the store");
+                Err(error.to_string())
+            }
+        }
     }
 }
