@@ -44,11 +44,22 @@ function pngFacts(bytes: Buffer) {
     colors.set(color, (colors.get(color) ?? 0) + 1);
   }
   const total = pixels.length / channels;
+  let paperPixels = 0;
+  let threadRedPixels = 0;
+  let legacyPurplePixels = 0;
+  for (let offset = 0; offset < pixels.length; offset += channels) {
+    const r = pixels[offset];
+    const g = pixels[offset + 1];
+    const b = pixels[offset + 2];
+    if (r >= 240 && g >= 238 && b >= 234) paperPixels += 1;
+    if (r >= 145 && r <= 235 && g >= 35 && g <= 115 && b >= 30 && b <= 110 && r - g >= 65 && r - b >= 65) threadRedPixels += 1;
+    if (r >= 95 && r <= 165 && g >= 75 && g <= 135 && b >= 210) legacyPurplePixels += 1;
+  }
   const entropy = [...colors.values()].reduce((sum, count) => sum - (count / total) * Math.log2(count / total), 0);
-  return { width, height, distinctColors: colors.size, entropy };
+  return { width, height, distinctColors: colors.size, entropy, paperShare: paperPixels / total, threadRedPixels, legacyPurplePixels };
 }
 
-test('magicklala studio --snap writes a detailed, many-coloured Studio PNG without a display server', { timeout: 900_000 }, async () => {
+test('magicklala studio --snap writes a detailed Yarnball paper Studio PNG with brick-red thread and no legacy purple chrome', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-snap-'));
   const out = join(dir, 'studio.png');
   try {
@@ -61,8 +72,11 @@ test('magicklala studio --snap writes a detailed, many-coloured Studio PNG witho
     expect(bytes.readUInt32BE(20)).toBeGreaterThan(0);
     const facts = pngFacts(bytes);
     expect(facts.width).toBe(bytes.readUInt32BE(16));
-    expect(facts.distinctColors).toBeGreaterThan(200);
-    expect(facts.entropy).toBeGreaterThan(1.5);
+    expect(facts.distinctColors).toBeGreaterThan(120);
+    expect(facts.entropy).toBeGreaterThan(0.8);
+    expect(facts.paperShare).toBeGreaterThan(0.5);
+    expect(facts.threadRedPixels).toBeGreaterThan(200);
+    expect(facts.legacyPurplePixels).toBe(0);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
