@@ -40,6 +40,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1 libxkbcommon-dev libwayland-dev
       - run: npm ci
         working-directory: e2e
+      - run: cargo build --workspace --bins --examples
       - run: npx e2e run
         working-directory: e2e
   landmines:
