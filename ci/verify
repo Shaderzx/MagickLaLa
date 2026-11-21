@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+mode="${1:---fast}"
+base="${CI_VERIFY_BASE:-origin/main}"
+stage=""
+trap 'status=$?; if [ "$status" -ne 0 ]; then echo "ci/verify $mode: FAILED at stage: $stage (exit $status)" >&2; fi' EXIT
+run_stage() {
+  stage="$1"
+  shift
+  echo "ci/verify: $stage"
+  "$@"
+}
+run_stage fmt cargo fmt -- --check
+run_stage clippy cargo clippy --workspace --all-targets -- -D warnings
+run_stage check cargo check --workspace
+if [ "$mode" = "--full" ]; then
+  run_stage build cargo build -p magicklala-cli
+  run_stage landmines node ci/landmines/landmines.mjs --base "$base"
+  run_stage e2e bash -c 'cd e2e && npx e2e run'
+fi
+stage=""
+echo "ci/verify $mode: ok"

@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "id": "019a3f10-0000-7000-8000-000000000001",
+  "name": "Hello LLM",
+  "description": "Answers every incoming message with one language model reply.",
+  "variables": [],
+  "nodes": [
+    {
+      "id": "message",
+      "kind": "event/on_message",
+      "position": [
+        0,
+        0
+      ],
+      "config": {}
+    },
+    {
+      "id": "reply",
+      "kind": "ai/generate_text",
+      "position": [
+        280,
+        0
+      ],
+      "config": {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "system": "You are a friendly assistant. Answer in one short paragraph."
+      }
+    },
+    {
+      "id": "send",
+      "kind": "io/send_message",
+      "position": [
+        560,
+        0
+      ],
+      "config": {}
+    }
+  ],
+  "wires": [
+    {
+      "id": "w_message_out_reply_in",
+      "from_node": "message",
+      "from_socket": "out",
+      "to_node": "reply",
+      "to_socket": "in"
+    },
+    {
+      "id": "w_message_content_reply_prompt",
+      "from_node": "message",
+      "from_socket": "content",
+      "to_node": "reply",
+      "to_socket": "prompt"
+    },
+    {
+      "id": "w_reply_out_send_in",
+      "from_node": "reply",
+      "from_socket": "out",
+      "to_node": "send",
+      "to_socket": "in"
+    },
+    {
+      "id": "w_reply_text_send_content",
+      "from_node": "reply",
+      "from_socket": "text",
+      "to_node": "send",
+      "to_socket": "content"
+    }
+  ],
+  "subgraphs": []
+}

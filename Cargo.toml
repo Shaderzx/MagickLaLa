@@ -1,0 +1,71 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["third_party"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.99"
+
+[workspace.dependencies]
+magicklala-graph = { path = "crates/magicklala-graph" }
+magicklala-nodes = { path = "crates/magicklala-nodes" }
+magicklala-store = { path = "crates/magicklala-store" }
+magicklala-runtime = { path = "crates/magicklala-runtime" }
+magicklala-embedder = { path = "crates/magicklala-embedder" }
+magicklala-connectors = { path = "crates/magicklala-connectors" }
+magicklala-server = { path = "crates/magicklala-server" }
+magicklala-canvas = { path = "crates/magicklala-canvas" }
+magicklala-studio = { path = "crates/magicklala-studio" }
+rune = { path = "third_party/rune/crates/rune", default-features = false }
+rune-core = { path = "third_party/rune/crates/rune-core" }
+rune-kit = { path = "third_party/rune/crates/rune-kit", default-features = false }
+rune-edit = { path = "third_party/rune/crates/rune-edit" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+axum = "0.8"
+sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio", "macros", "chrono", "uuid", "json", "migrate"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+rhai = { version = "1", features = ["sync", "serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+aes-gcm = "0.10"
+rand = "0.9"
+base64 = "0.22"
+hex = "0.4"
+sha2 = "0.10"
+regex = "1"
+futures = "0.3"
+tokio-util = "0.7"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+utoipa = { version = "5", features = ["uuid", "chrono"] }
+
+[patch.crates-io]
+wgpu-hal = { path = "third_party/rune/vendor/wgpu-hal" }
+winit = { path = "third_party/rune/vendor/winit" }
+sctk-adwaita = { path = "third_party/rune/vendor/sctk-adwaita" }
+parley_engine = { path = "third_party/rune/vendor/parley_engine" }
+accesskit_windows = { path = "third_party/rune/vendor/accesskit_windows" }
+accesskit_macos = { path = "third_party/rune/vendor/accesskit_macos" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+await_holding_lock = "deny"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

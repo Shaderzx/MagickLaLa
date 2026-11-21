@@ -1,0 +1,222 @@
+{
+  "schema_version": 1,
+  "id": "019a3f10-0000-7000-8000-000000000002",
+  "name": "Parallel Research",
+  "description": "Researches two angles of a topic at the same time, waits for both, then streams one combined summary.",
+  "variables": [],
+  "nodes": [
+    {
+      "id": "message",
+      "kind": "event/on_message",
+      "position": [
+        0,
+        0
+      ],
+      "config": {}
+    },
+    {
+      "id": "split",
+      "kind": "flow/split",
+      "position": [
+        240,
+        0
+      ],
+      "config": {}
+    },
+    {
+      "id": "angle_performance",
+      "kind": "text/template",
+      "position": [
+        240,
+        -200
+      ],
+      "config": {
+        "template": "Research the performance trade-offs of {{content}}"
+      }
+    },
+    {
+      "id": "angle_ecosystem",
+      "kind": "text/template",
+      "position": [
+        240,
+        200
+      ],
+      "config": {
+        "template": "Research the ecosystem maturity of {{content}}"
+      }
+    },
+    {
+      "id": "research_performance",
+      "kind": "ai/generate_text",
+      "position": [
+        520,
+        -120
+      ],
+      "config": {
+        "provider": "openai",
+        "model": "gpt-4o-mini"
+      }
+    },
+    {
+      "id": "research_ecosystem",
+      "kind": "ai/generate_text",
+      "position": [
+        520,
+        120
+      ],
+      "config": {
+        "provider": "openai",
+        "model": "gpt-4o-mini"
+      }
+    },
+    {
+      "id": "join",
+      "kind": "flow/wait_for_all",
+      "position": [
+        800,
+        0
+      ],
+      "config": {}
+    },
+    {
+      "id": "summary_prompt",
+      "kind": "text/template",
+      "position": [
+        800,
+        200
+      ],
+      "config": {
+        "template": "Combine these two findings into one sentence:\n{{performance}}\n{{ecosystem}}"
+      }
+    },
+    {
+      "id": "summarize",
+      "kind": "ai/stream_text",
+      "position": [
+        1080,
+        0
+      ],
+      "config": {
+        "provider": "openai",
+        "model": "gpt-4o-mini"
+      }
+    },
+    {
+      "id": "send",
+      "kind": "io/send_message",
+      "position": [
+        1360,
+        0
+      ],
+      "config": {}
+    }
+  ],
+  "wires": [
+    {
+      "id": "w_message_out_split_in",
+      "from_node": "message",
+      "from_socket": "out",
+      "to_node": "split",
+      "to_socket": "in"
+    },
+    {
+      "id": "w_message_content_angle_performance_content",
+      "from_node": "message",
+      "from_socket": "content",
+      "to_node": "angle_performance",
+      "to_socket": "content"
+    },
+    {
+      "id": "w_message_content_angle_ecosystem_content",
+      "from_node": "message",
+      "from_socket": "content",
+      "to_node": "angle_ecosystem",
+      "to_socket": "content"
+    },
+    {
+      "id": "w_split_out_0_research_performance_in",
+      "from_node": "split",
+      "from_socket": "out_0",
+      "to_node": "research_performance",
+      "to_socket": "in"
+    },
+    {
+      "id": "w_split_out_1_research_ecosystem_in",
+      "from_node": "split",
+      "from_socket": "out_1",
+      "to_node": "research_ecosystem",
+      "to_socket": "in"
+    },
+    {
+      "id": "w_angle_performance_text_research_performance_prompt",
+      "from_node": "angle_performance",
+      "from_socket": "text",
+      "to_node": "research_performance",
+      "to_socket": "prompt"
+    },
+    {
+      "id": "w_angle_ecosystem_text_research_ecosystem_prompt",
+      "from_node": "angle_ecosystem",
+      "from_socket": "text",
+      "to_node": "research_ecosystem",
+      "to_socket": "prompt"
+    },
+    {
+      "id": "w_research_performance_out_join_in",
+      "from_node": "research_performance",
+      "from_socket": "out",
+      "to_node": "join",
+      "to_socket": "in"
+    },
+    {
+      "id": "w_research_ecosystem_out_join_in",
+      "from_node": "research_ecosystem",
+      "from_socket": "out",
+      "to_node": "join",
+      "to_socket": "in"
+    },
+    {
+      "id": "w_research_performance_text_summary_prompt_performance",
+      "from_node": "research_performance",
+      "from_socket": "text",
+      "to_node": "summary_prompt",
+      "to_socket": "performance"
+    },
+    {
+      "id": "w_research_ecosystem_text_summary_prompt_ecosystem",
+      "from_node": "research_ecosystem",
+      "from_socket": "text",
+      "to_node": "summary_prompt",
+      "to_socket": "ecosystem"
+    },
+    {
+      "id": "w_join_out_summarize_in",
+      "from_node": "join",
+      "from_socket": "out",
+      "to_node": "summarize",
+      "to_socket": "in"
+    },
+    {
+      "id": "w_summary_prompt_text_summarize_prompt",
+      "from_node": "summary_prompt",
+      "from_socket": "text",
+      "to_node": "summarize",
+      "to_socket": "prompt"
+    },
+    {
+      "id": "w_summarize_out_send_in",
+      "from_node": "summarize",
+      "from_socket": "out",
+      "to_node": "send",
+      "to_socket": "in"
+    },
+    {
+      "id": "w_summarize_text_send_content",
+      "from_node": "summarize",
+      "from_socket": "text",
+      "to_node": "send",
+      "to_socket": "content"
+    }
+  ],
+  "subgraphs": []
+}

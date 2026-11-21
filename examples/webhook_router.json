@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "id": "019a3f10-0000-7000-8000-000000000003",
+  "name": "Webhook Router",
+  "description": "Classifies each webhook with a sandboxed Rhai script and routes it to the matching reply.",
+  "variables": [],
+  "nodes": [
+    {
+      "id": "hook",
+      "kind": "event/on_webhook",
+      "position": [
+        0,
+        0
+      ],
+      "config": {}
+    },
+    {
+      "id": "classify",
+      "kind": "code/rhai_script",
+      "position": [
+        260,
+        0
+      ],
+      "config": {
+        "inputs": [
+          "body"
+        ],
+        "script": "let kind = body[\"type\"];\nif kind == \"order\" {\n    #{ route: \"orders\", message: \"Order \" + body[\"id\"] + \" received\" }\n} else if kind == \"support\" {\n    #{ route: \"support\", message: \"Support ticket \" + body[\"id\"] + \" opened\" }\n} else {\n    #{ route: \"ignored\", message: \"No route for \" + kind }\n}",
+        "max_operations": 100000
+      }
+    },
+    {
+      "id": "route",
+      "kind": "flow/switch",
+      "position": [
+        520,
+        0
+      ],
+      "config": {
+        "cases": [
+          "orders",
+          "support"
+        ]
+      }
+    },
+    {
+      "id": "order_reply",
+      "kind": "io/send_message",
+      "position": [
+        800,
+        -160
+      ],
+      "config": {}
+    },
+    {
+      "id": "support_reply",
+      "kind": "io/send_message",
+      "position": [
+        800,
+        0
+      ],
+      "config": {}
+    },
+    {
+      "id": "ignored_text",
+      "kind": "text/template",
+      "position": [
+        800,
+        260
+      ],
+      "config": {
+        "template": "Ignored webhook: {{reason}}"
+      }
+    },
+    {
+      "id": "ignored_reply",
+      "kind": "io/send_message",
+      "position": [
+        1080,
+        160
+      ],
+      "config": {}
+    }
+  ],
+  "wires": [
+    {
+      "id": "w_hook_out_classify_in",
+      "from_node": "hook",
+      "from_socket": "out",
+      "to_node": "classify",
+      "to_socket": "in"
+    },
+    {
+      "id": "w_hook_body_classify_body",
+      "from_node": "hook",
+      "from_socket": "body",
+      "to_node": "classify",
+      "to_socket": "body"
+    },
+    {
+      "id": "w_classify_out_route_in",
+      "from_node": "classify",
+      "from_socket": "out",
+      "to_node": "route",
+      "to_socket": "in"
+    },
+    {
+      "id": "w_classify_route_route_value",
+      "from_node": "classify",
+      "from_socket": "route",
+      "to_node": "route",
+      "to_socket": "value"
+    },
+    {
+      "id": "w_route_orders_order_reply_in",
+      "from_node": "route",
+      "from_socket": "orders",
+      "to_node": "order_reply",
+      "to_socket": "in"
+    },
+    {
+      "id": "w_classify_message_order_reply_content",
+      "from_node": "classify",
+      "from_socket": "message",
+      "to_node": "order_reply",
+      "to_socket": "content"
+    },
+    {
+      "id": "w_route_support_support_reply_in",
+      "from_node": "route",
+      "from_socket": "support",
+      "to_node": "support_reply",
+      "to_socket": "in"
+    },
+    {
+      "id": "w_classify_message_support_reply_content",
+      "from_node": "classify",
+      "from_socket": "message",
+      "to_node": "support_reply",
+      "to_socket": "content"
+    },
+    {
+      "id": "w_route_default_ignored_reply_in",
+      "from_node": "route",
+      "from_socket": "default",
+      "to_node": "ignored_reply",
+      "to_socket": "in"
+    },
+    {
+      "id": "w_classify_message_ignored_text_reason",
+      "from_node": "classify",
+      "from_socket": "message",
+      "to_node": "ignored_text",
+      "to_socket": "reason"
+    },
+    {
+      "id": "w_ignored_text_text_ignored_reply_content",
+      "from_node": "ignored_text",
+      "from_socket": "text",
+      "to_node": "ignored_reply",
+      "to_socket": "content"
+    }
+  ],
+  "subgraphs": []
+}
