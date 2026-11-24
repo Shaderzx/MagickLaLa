@@ -3013,7 +3013,7 @@ fn fit_and_wording(db_path: &Path) -> Result<serde_json::Value, String> {
         let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
         for card in rt.state.canvas.nodes.iter().filter(|card| plan.card(&card.id).is_some_and(|placed| placed.role != magicklala_canvas::BrewRole::Bottle)) {
             let Some((_, rect)) = text_lines_under(&rt, &format!("node-{}", card.id.0)).into_iter().find(|(line, _)| line == &card.kind) else { continue };
-            let (natural, _) = measure.measure(&card.kind, rune::TextStyle::new(11.5, 500.0).mono(), 1.0);
+            let (natural, _) = measure.measure(&card.kind, rune::TextStyle::new((11.2 / plan.scale).clamp(11.5, 13.0), 500.0).mono(), 1.0);
             if natural * plan.scale > rect[2] + 1.0 {
                 formulas_cut.push(card.kind.clone());
             }
