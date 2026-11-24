@@ -2604,7 +2604,8 @@ fn carbon_r4() -> Result<serde_json::Value, String> {
     let mut rail = compact(demo.clone());
     click(&mut rail, "expand-nodes")?;
     let opened = rail.state.left_rail_pinned;
-    let collapsed = click(&mut rail, "collapse-left-rail").is_ok() && !rail.state.left_rail_pinned;
+    rail.frame(2.0);
+    let collapsed = click_at(&mut rail, "collapse-left-rail", 2.5).is_ok() && !rail.state.left_rail_pinned;
 
     let mut grim = headless(StudioApp::from_registry());
     click(&mut grim, "run-spell")?;
