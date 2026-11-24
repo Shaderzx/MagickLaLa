@@ -1242,12 +1242,7 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
 fn node_diagnostics(app: &StudioApp, card: &magicklala_canvas::NodeCardModel) -> Vec<String> {
     let mut found = Vec::new();
     if matches!(app.validation, ValidationState::Invalid(_)) {
-        found.extend(
-            app.hex_findings
-                .iter()
-                .filter(|finding| finding.node.as_ref() == Some(&card.id))
-                .map(|finding| finding.message.replace(&format!("node {:?}", card.id.0), &card.title).replace(&format!("{:?}", card.id), &card.title)),
-        );
+        found.extend(app.hex_findings.iter().filter(|finding| finding.node.as_ref() == Some(&card.id)).map(|finding| finding.readable.clone()));
     }
     if found.is_empty() && card.status == ExecutionStatus::Failed {
         found.push(format!("{} fizzled during brewing.", card.title));
@@ -1469,8 +1464,23 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         );
     let mut column = col().key("inspector-card").gap(if compact { 6.0 } else { 9.0 }).pt(if compact { 8.0 } else { 10.0 }).child(card_header);
     if has_error {
-        let primary_err =
-            diagnostics.first().map(|msg| if msg.contains("prompt") { format!("{} needs a prompt", card.title) } else { msg.clone() }).unwrap_or_default();
+        let flagged_socket = card.inputs.iter().find(|socket| socket.flagged).map(|socket| socket.name.clone());
+        let headline = match &flagged_socket {
+            Some(socket) => format!("{} needs \"{socket}\"", card.title),
+            None => diagnostics.first().cloned().unwrap_or_default(),
+        };
+        let mend = app.hex_mend_source(&card.id);
+        let fix_button = match (&mend, flagged_socket.as_deref()) {
+            (Some((_, caption)), _) => Some(button_el("inspector-fix", caption, ButtonKind::Primary, 9.0, t, StudioApp::mend_selected_hex)),
+            (None, Some("prompt")) => {
+                Some(button_el("inspector-fix", "Use default prompt", ButtonKind::Primary, 9.0, t, StudioApp::fill_default_prompt_for_selected))
+            }
+            _ => None,
+        };
+        let mut actions = row().pt(2.0).gap(8.0).items_center();
+        if let Some(button) = fix_button {
+            actions = actions.child(button);
+        }
         column = column.child(
             col()
                 .key("inspector-error")
@@ -1481,16 +1491,8 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                 .continuous_corners()
                 .fill(t.hex_tint)
                 .border(1.4, t.hex)
-                .child(label(primary_err, 12.0, 750.0, t.hex).wrap())
-                .child(label("Use the default prompt or connect a text input in Grimoire.", 11.0, 450.0, t.ink_2).wrap())
-                .child(
-                    row()
-                        .pt(2.0)
-                        .gap(8.0)
-                        .items_center()
-                        .child(button_el("inspector-fix", "Use default prompt", ButtonKind::Primary, 9.0, t, StudioApp::fill_default_prompt_for_selected))
-                        .child(button_el("inspector-open-grimoire", "Wire in Grimoire", ButtonKind::Secondary, 8.0, t, StudioApp::open_grimoire)),
-                ),
+                .child(label(headline, 12.0, 750.0, t.hex).wrap())
+                .child(actions.child(button_el("inspector-open-grimoire", "Grimoire", ButtonKind::Secondary, 8.0, t, StudioApp::open_grimoire))),
         );
     }
     let mut column = column.child(inspector_section_heading("Essences", t)).child(sockets);

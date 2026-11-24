@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use magicklala_canvas::{CanvasState, ExecutionStatus, NodeCardModel, WireModel, WorkbenchMode};
+use magicklala_canvas::{CanvasState, ExecutionStatus, NodeCardModel, SocketRef, WireModel, WorkbenchMode};
 use magicklala_graph::{
     EngineServices, EventEmitter, NodeCatalog, NodeId, NodeInstance, NodeSpec, RunStatus, RunSummary, RunTrigger, SUBGRAPH_KIND, SocketType, SpellEngine,
     SpellGraph, SpellId, SpellValidator, SubgraphKey, SubgraphRef, SubgraphResolver, TraceEvent, ValidationError, Value, VariableDef, Wire, WireId,
@@ -583,15 +583,27 @@ pub struct HexFinding {
     pub node: Option<NodeId>,
     pub socket: Option<String>,
     pub message: String,
+    pub readable: String,
 }
 
 impl HexFinding {
     fn loose(message: String) -> Self {
-        Self { node: None, socket: None, message }
+        Self { node: None, socket: None, readable: message.clone(), message }
     }
 
-    fn from_validation(error: &ValidationError, spell: &SpellGraph) -> Self {
+    fn from_validation(error: &ValidationError, spell: &SpellGraph, title_of: &dyn Fn(&NodeId) -> String) -> Self {
         let message = error.to_string();
+        let readable = match error {
+            ValidationError::MissingRequiredInput { node, socket } => format!("{}: missing required input \"{socket}\"", title_of(node)),
+            ValidationError::MultipleValueInputs { node, socket } => format!("{}: input \"{socket}\" has more than one wire", title_of(node)),
+            ValidationError::MissingSocket { node, socket, .. } => format!("{}: has no socket \"{socket}\"", title_of(node)),
+            ValidationError::UnknownNodeKind { node, kind } => format!("{}: unknown kind {kind}", title_of(node)),
+            ValidationError::TypeMismatch { wire, from, to } => match spell.wires.iter().find(|candidate| &candidate.id == wire) {
+                Some(found) => format!("{}: input \"{}\" needs {to:?} but gets {from:?}", title_of(&found.to_node), found.to_socket),
+                None => message.clone(),
+            },
+            _ => spell.nodes.iter().fold(message.clone(), |text, node| text.replace(&format!("{:?}", node.id), &title_of(&node.id))),
+        };
         let (node, socket) = match error {
             ValidationError::MissingRequiredInput { node, socket }
             | ValidationError::MultipleValueInputs { node, socket }
@@ -612,7 +624,7 @@ impl HexFinding {
             ValidationError::ValueCycle(nodes) => (nodes.first().cloned(), None),
             _ => (None, None),
         };
-        Self { node, socket, message }
+        Self { node, socket, message, readable }
     }
 }
 
@@ -858,6 +870,45 @@ impl StudioApp {
         self.left_rail_pinned = !self.left_rail_pinned;
         let viewport = self.canvas_size();
         self.canvas.fit(viewport);
+    }
+
+    pub fn hex_mend_source(&self, card_id: &NodeId) -> Option<(SocketRef, String)> {
+        let card = self.canvas.card(card_id)?;
+        let socket_name = self.missing_socket_of(card_id)?;
+        let socket = card.inputs.iter().find(|socket| socket.name == socket_name)?;
+        let mut downstream: Vec<NodeId> = vec![card_id.clone()];
+        let mut cursor = 0;
+        while let Some(node) = downstream.get(cursor).cloned() {
+            for wire in self.canvas.wires.iter().filter(|wire| wire.from_node == node) {
+                if !downstream.contains(&wire.to_node) {
+                    downstream.push(wire.to_node.clone());
+                }
+            }
+            cursor += 1;
+        }
+        let mut ranked: Vec<&NodeCardModel> = self.canvas.nodes.iter().filter(|other| !downstream.contains(&other.id)).collect();
+        ranked.sort_by_key(|other| if other.category == "events" { 0 } else { 1 });
+        ranked.into_iter().find_map(|other| {
+            other
+                .outputs
+                .iter()
+                .find(|output| output.ty == socket.ty && !output.ty.is_flow())
+                .map(|output| (SocketRef::new(other.id.clone(), output.name.clone()), format!("Pour {} · {}", other.title, output.name)))
+        })
+    }
+
+    fn missing_socket_of(&self, card_id: &NodeId) -> Option<String> {
+        self.hex_findings.iter().filter(|finding| finding.node.as_ref() == Some(card_id)).find_map(|finding| finding.socket.clone())
+    }
+
+    pub fn mend_selected_hex(&mut self) {
+        let Some(card) = self.canvas.selected_card().cloned() else { return };
+        let Some(socket) = self.missing_socket_of(&card.id) else { return };
+        let Some((source, _)) = self.hex_mend_source(&card.id) else { return };
+        if self.canvas.connect_sockets(&source, &SocketRef::new(card.id.clone(), socket)).is_ok() {
+            self.sync_spell();
+            self.validate();
+        }
     }
 
     pub fn fill_default_prompt_for_selected(&mut self) {
@@ -1435,10 +1486,9 @@ impl StudioApp {
             .iter()
             .filter(|node| node.kind == SUBGRAPH_KIND)
             .filter_map(|node| {
-                configured_release_version(node).err().map(|error| HexFinding {
-                    node: Some(node.id.clone()),
-                    socket: None,
-                    message: format!("node {:?}: {error}", node.id.0),
+                configured_release_version(node).err().map(|error| {
+                    let message = format!("node {:?}: {error}", node.id.0);
+                    HexFinding { node: Some(node.id.clone()), socket: None, readable: message.clone(), message }
                 })
             })
             .collect();
@@ -1447,7 +1497,8 @@ impl StudioApp {
         }
         let validator = SpellValidator::new(self.specs.clone());
         if let Err(errors) = validator.validate(&self.spell) {
-            return errors.iter().map(|error| HexFinding::from_validation(error, &self.spell)).collect();
+            let title_of = |id: &NodeId| self.canvas.card(id).map_or_else(|| id.0.clone(), |card| card.title.clone());
+            return errors.iter().map(|error| HexFinding::from_validation(error, &self.spell, &title_of)).collect();
         }
         if self.spell.subgraphs.is_empty() {
             return Vec::new();
@@ -1508,7 +1559,7 @@ impl StudioApp {
                     rejected.push(TraceLine {
                         at_ms: 0,
                         kind: "RunRejected",
-                        detail: finding.message.clone(),
+                        detail: finding.readable.clone(),
                         status: ExecutionStatus::Failed,
                         node: finding.node.clone(),
                     });

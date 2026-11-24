@@ -1605,14 +1605,20 @@ fn hex_mend(spell: SpellGraph, broken: &NodeId) -> Result<serde_json::Value, Str
     let mut rt = headless(StudioApp::with_spell(spell.clone(), registry_specs()));
     click(&mut rt, "validate")?;
     rt.update(|app, _| app.canvas.select(Some(broken.clone())));
-    rt.frame(0.0);
-    click(&mut rt, "inspector-fix")?;
+    click_at(&mut rt, "inspector-fix", 1.0)?;
     let added: Vec<serde_json::Value> = rt
         .state
         .spell
         .wires
         .iter()
-        .filter(|wire| !spell.wires.iter().any(|before| before.from_node == wire.from_node && before.from_socket == wire.from_socket && before.to_node == wire.to_node && before.to_socket == wire.to_socket))
+        .filter(|wire| {
+            !spell.wires.iter().any(|before| {
+                before.from_node == wire.from_node
+                    && before.from_socket == wire.from_socket
+                    && before.to_node == wire.to_node
+                    && before.to_socket == wire.to_socket
+            })
+        })
         .map(|wire| json!({ "from_node": wire.from_node.0, "from_socket": wire.from_socket, "to_node": wire.to_node.0, "to_socket": wire.to_socket }))
         .collect();
     Ok(json!({ "validation": rt.state.validation.label(), "added": added }))
@@ -1623,7 +1629,10 @@ fn hex_pinpoint() -> Result<serde_json::Value, String> {
     let mut missing_query = demo.clone();
     let cut = missing_query.wires.iter().position(|wire| wire.to_socket == "query").ok_or("demo spell has no query wire")?;
     let removed = missing_query.wires.remove(cut);
-    let broken_title = registry_specs().iter().find(|spec| missing_query.nodes.iter().any(|node| node.id == removed.to_node && node.kind == spec.kind)).map(|spec| spec.title.clone());
+    let broken_title = registry_specs()
+        .iter()
+        .find(|spec| missing_query.nodes.iter().any(|node| node.id == removed.to_node && node.kind == spec.kind))
+        .map(|spec| spec.title.clone());
     let mend = hex_mend(missing_query.clone(), &removed.to_node)?;
     let mut twin_ids = demo.clone();
     let reply = twin_ids.nodes.iter().find(|node| node.kind == "io/send_message").ok_or("demo spell has no reply")?.clone();
