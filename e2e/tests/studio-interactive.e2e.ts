@@ -827,3 +827,20 @@ test('The hex fix button on a node missing a required input pours the matching u
   expect(mend.added).toEqual([{ from_node: removed.from_node, from_socket: removed.from_socket, to_node: removed.node, to_socket: removed.socket }]);
   expect(mend.validation).toBe('valid');
 });
+
+test('The cauldron shows every ingredient and bottle of the support, webhook router, parallel research and twelve-step spells at 1280x800 and 960x640 with the pantry open or closed, with no two cards overlapping, and zooming all the way out and in never crashes', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['pot-layout']);
+  const parallel = JSON.parse(await readFile(join(repoRoot, 'examples', 'parallel_research.json'), 'utf8')) as ExampleSpell;
+
+  expect(report.cases.map((entry: { spell: string }) => entry.spell)).toEqual(expect.arrayContaining(['support_agent', 'webhook_router', 'parallel_research', 'dozen_ingredients']));
+  expect(report.cases.find((entry: { spell: string }) => entry.spell === 'parallel_research').nodes).toEqual(parallel.nodes.map((node) => node.id));
+  for (const entry of report.cases) {
+    const where = `${entry.spell} at ${entry.size.join('x')} pantry ${entry.pantryOpen ? 'open' : 'closed'}`;
+    expect(entry.opened.missing, where).toEqual([]);
+    expect(entry.opened.outside, where).toEqual([]);
+    for (const shot of entry.zooms) {
+      expect(shot.panicked, `${where} zoom ${shot.zoom}`).toBe(false);
+      expect(shot.overlaps, `${where} zoom ${shot.zoom}`).toEqual([]);
+    }
+  }
+});

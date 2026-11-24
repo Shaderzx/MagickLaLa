@@ -1655,10 +1655,141 @@ fn hex_pinpoint() -> Result<serde_json::Value, String> {
     }))
 }
 
+fn dozen_ingredient_spell() -> SpellGraph {
+    let specs = registry_specs();
+    let flow_in = |spec: &magicklala_graph::NodeSpec| spec.inputs.iter().find(|socket| socket.ty == SocketType::Flow).map(|socket| socket.name.clone());
+    let flow_out = |spec: &magicklala_graph::NodeSpec| spec.outputs.iter().find(|socket| socket.ty == SocketType::Flow).map(|socket| socket.name.clone());
+    let mut spell = SpellGraph::new("Dozen Ingredients");
+    spell.nodes.push(NodeInstance { id: NodeId::from("start"), kind: "event/on_message".to_owned(), position: [0.0, 0.0], config: serde_json::Value::Null });
+    let mut previous = (NodeId::from("start"), "out".to_owned());
+    let chain: Vec<&magicklala_graph::NodeSpec> = specs
+        .iter()
+        .filter(|spec| !spec.is_trigger && !spec.kind.starts_with("io/") && spec.kind != "flow/subgraph" && flow_in(spec).is_some() && flow_out(spec).is_some())
+        .take(11)
+        .collect();
+    for (index, spec) in chain.iter().enumerate() {
+        let id = NodeId::from(format!("step_{index}").as_str());
+        spell.nodes.push(NodeInstance {
+            id: id.clone(),
+            kind: spec.kind.clone(),
+            position: [220.0 * (index + 1) as f32, 0.0],
+            config: serde_json::Value::Null,
+        });
+        spell.wires.push(Wire {
+            id: WireId::from(format!("chain_{index}").as_str()),
+            from_node: previous.0.clone(),
+            from_socket: previous.1.clone(),
+            to_node: id.clone(),
+            to_socket: flow_in(spec).unwrap_or_default(),
+        });
+        previous = (id, flow_out(spec).unwrap_or_default());
+    }
+    spell.nodes.push(NodeInstance { id: NodeId::from("finish"), kind: "io/send_message".to_owned(), position: [2800.0, 0.0], config: serde_json::Value::Null });
+    spell.wires.push(Wire {
+        id: WireId::from("chain_end"),
+        from_node: previous.0,
+        from_socket: previous.1,
+        to_node: NodeId::from("finish"),
+        to_socket: "in".to_owned(),
+    });
+    spell
+}
+
+fn rects_overlap(a: [f32; 4], b: [f32; 4]) -> bool {
+    a[0] < b[0] + b[2] - 0.5 && b[0] < a[0] + a[2] - 0.5 && a[1] < b[1] + b[3] - 0.5 && b[1] < a[1] + a[3] - 0.5
+}
+
+fn pot_measure(rt: &Runtime<StudioApp>, ids: &[String]) -> serde_json::Value {
+    let canvas = rt.presented("canvas").map(|(rect, _)| rect);
+    let placed: Vec<(String, [f32; 4])> = ids.iter().filter_map(|id| rt.presented(&format!("node-{id}")).map(|(rect, _)| (id.clone(), rect))).collect();
+    let missing: Vec<&String> = ids.iter().filter(|id| !placed.iter().any(|(placed_id, _)| placed_id == *id)).collect();
+    let mut overlaps = Vec::new();
+    for (index, (a_id, a)) in placed.iter().enumerate() {
+        for (b_id, b) in placed.iter().skip(index + 1) {
+            if rects_overlap(*a, *b) {
+                overlaps.push(json!([a_id, b_id]));
+            }
+        }
+    }
+    let outside: Vec<&String> = placed
+        .iter()
+        .filter(|(_, rect)| {
+            canvas
+                .is_some_and(|c| rect[0] < c[0] - 0.5 || rect[1] < c[1] - 0.5 || rect[0] + rect[2] > c[0] + c[2] + 0.5 || rect[1] + rect[3] > c[1] + c[3] + 0.5)
+        })
+        .map(|(id, _)| id)
+        .collect();
+    json!({ "zoom": rt.state.canvas.camera.zoom, "missing": missing, "overlaps": overlaps, "outside": outside })
+}
+
+fn pot_layout() -> Result<serde_json::Value, String> {
+    let spells = vec![
+        ("support_agent", StudioApp::from_registry().spell.clone()),
+        ("webhook_router", example("webhook_router.json")?),
+        ("parallel_research", example("parallel_research.json")?),
+        ("dozen_ingredients", dozen_ingredient_spell()),
+    ];
+    let mut cases = Vec::new();
+    for (name, spell) in spells {
+        let ids: Vec<String> = spell.nodes.iter().map(|node| node.id.0.clone()).collect();
+        for size in [(1280.0_f32, 800.0_f32), (960.0, 640.0)] {
+            for pantry_open in [false, true] {
+                let mut app = StudioApp::with_spell(spell.clone(), registry_specs());
+                app.size = size;
+                app.left_tab = LeftTab::Palette;
+                app.left_rail_pinned = pantry_open;
+                let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+                let mut clock = 0.0;
+                let mut step = |rt: &mut Runtime<StudioApp>, key: Option<&str>| -> Result<serde_json::Value, String> {
+                    clock += 0.5;
+                    let at = clock;
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match key {
+                        Some(key) => click_at(rt, key, at).map(|_| ()),
+                        None => {
+                            rt.frame(at);
+                            Ok(())
+                        }
+                    }));
+                    Ok(match outcome {
+                        Ok(Ok(())) => {
+                            let mut measured = pot_measure(rt, &ids);
+                            measured["panicked"] = json!(false);
+                            measured
+                        }
+                        Ok(Err(error)) => return Err(error),
+                        Err(_) => json!({ "panicked": true }),
+                    })
+                };
+                let opened = step(&mut rt, None)?;
+                let mut zooms = vec![opened.clone()];
+                for _ in 0..8 {
+                    let shot = step(&mut rt, Some("zoom-out"))?;
+                    let stop = shot["panicked"] == json!(true);
+                    zooms.push(shot);
+                    if stop {
+                        break;
+                    }
+                }
+                for _ in 0..12 {
+                    let shot = step(&mut rt, Some("zoom-in"))?;
+                    let stop = shot["panicked"] == json!(true);
+                    zooms.push(shot);
+                    if stop {
+                        break;
+                    }
+                }
+                cases.push(json!({ "spell": name, "size": [size.0, size.1], "pantryOpen": pantry_open, "nodes": ids, "opened": opened, "zooms": zooms }));
+            }
+        }
+    }
+    Ok(json!({ "cases": cases }))
+}
+
 fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
         Some("surfaces") => capture_surfaces(Path::new(args.get(1).ok_or("missing output directory")?)),
         Some("hex-pinpoint") => hex_pinpoint(),
+        Some("pot-layout") => pot_layout(),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-ref-edit") => subgraph_ref_edit(Path::new(args.get(1).ok_or("missing database path")?)),
