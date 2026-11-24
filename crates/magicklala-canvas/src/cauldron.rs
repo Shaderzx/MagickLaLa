@@ -353,6 +353,16 @@ fn lane_stream(shape: Shape, points: &[[f32; 2]], style: StreamStyle, p: &Hearth
     } else {
         style.color
     };
+    if style.hexed {
+        let cut = &points[..(points.len() * 46 / 100).max(2).min(points.len())];
+        let end = cut[cut.len() - 1];
+        let shape = crate::hearth::dashed_polyline(shape, cut, 7.0, 5.0, 2.4, ink, None);
+        let shape = shape.line([end[0] - 5.0, end[1] - 5.0], [end[0] + 5.0, end[1] + 5.0], 2.2, rune::LineCap::Round, ink);
+        return shape.line([end[0] - 5.0, end[1] + 5.0], [end[0] + 5.0, end[1] - 5.0], 2.2, rune::LineCap::Round, ink);
+    }
+    if style.untaken || style.blocked {
+        return crate::hearth::dashed_polyline(shape, points, 6.5, 5.2, 2.0, ink, None);
+    }
     let core = if style.active { 2.6 } else { 2.0 };
     let shape = if style.active { shape.stroke_path(&path, core + 3.0, rune::LineCap::Round, with_alpha(style.glow, 0.32)) } else { shape };
     shape.stroke_path(&path, core, rune::LineCap::Round, ink)

@@ -1159,7 +1159,7 @@ fn sample_cubic(p0: [f32; 2], c1: [f32; 2], c2: [f32; 2], p3: [f32; 2], steps: u
     (0..=steps).map(|i| cubic_point(p0, c1, c2, p3, (i as f32 / steps as f32) * max_t)).collect()
 }
 
-fn dashed_polyline(mut shape: Shape, pts: &[[f32; 2]], dash_px: f32, gap_px: f32, width: f32, color: Color, halo: Option<(f32, Color)>) -> Shape {
+pub(crate) fn dashed_polyline(mut shape: Shape, pts: &[[f32; 2]], dash_px: f32, gap_px: f32, width: f32, color: Color, halo: Option<(f32, Color)>) -> Shape {
     if pts.len() < 2 {
         return shape;
     }
