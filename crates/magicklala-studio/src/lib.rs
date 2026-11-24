@@ -748,6 +748,7 @@ pub struct StudioApp {
     pub left_tab: LeftTab,
     pub right_tab: RightTab,
     pub left_rail_pinned: bool,
+    pub frozen_edit: TextEdit,
     pub trace_expanded: bool,
     pub model_menu_open: bool,
     pub open_var_type: Option<String>,
@@ -866,6 +867,7 @@ impl StudioApp {
             left_tab: LeftTab::Palette,
             right_tab: RightTab::Inspector,
             left_rail_pinned: false,
+            frozen_edit: TextEdit::new(""),
             trace_expanded: false,
             model_menu_open: false,
             open_var_type: None,
@@ -1404,6 +1406,9 @@ impl StudioApp {
     }
 
     pub fn confirm_restore_to_draft(&mut self) {
+        if self.is_running() {
+            return;
+        }
         let Some(version) = self.pending_restore_version.take() else { return };
         let graph = self
             .store
@@ -2729,6 +2734,9 @@ impl StudioApp {
     }
 
     pub fn save_draft(&mut self) -> Result<SpellRecordId, StudioError> {
+        if self.is_running() {
+            return Err(self.refuse("Save waits until the brew ends".to_owned()));
+        }
         self.sync_spell();
         self.draft_status = None;
         self.publish_status = None;

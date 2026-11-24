@@ -606,7 +606,13 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
     }
     for placed in &bottles {
         let Some(card) = state.card(&placed.id) else { continue };
-        let step = if has_run { card.step_order } else { placed.recipe_step };
+        let step = if has_run {
+            card.step_order
+        } else if multi {
+            None
+        } else {
+            placed.recipe_step
+        };
         let natural = if multi { MULTI_BOTTLE_SIZE } else { SINGLE_BOTTLE_SIZE };
         let origin = card_frame(placed.rect, natural, plan.scale, [0.0, 0.0]);
         let view = if multi {

@@ -383,8 +383,10 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     lens: fn(&mut S) -> &mut CanvasState,
 ) -> El {
     let [pos_x, pos_y, width] = frame;
-    let taken = card.status == ExecutionStatus::Succeeded || card.status == ExecutionStatus::Running;
-    let untaken = has_run && !taken;
+    let taken = card.status == ExecutionStatus::Succeeded;
+    let simmering = card.status == ExecutionStatus::Running;
+    let untaken = has_run && !taken && !simmering;
+    let sealed = state.release_badge.is_some() && !has_run;
     let bottle_mood = if taken {
         CauldronMood::Brewed
     } else if untaken {
@@ -396,9 +398,9 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     let route = crate::cauldron::route_label(state, &card.id);
     let title = state.display_title(&card.id);
     let route_key = route.as_ref().map(|_| format!("route-{}", card.id.0));
-    let bottle_art = canvas(potion_bottle_shape(bottle_mood, state.light, width, bottle_h, false, tint)).size(width, bottle_h);
     let hex_pill = bottle_hex_pill(card, p);
     let hexed = hex_pill.is_some();
+    let bottle_art = canvas(potion_bottle_shape(bottle_mood, state.light, width, bottle_h, sealed && !hexed, tint)).size(width, bottle_h);
     let pill = if let Some(hex_pill) = hex_pill {
         hex_pill
     } else if taken {
@@ -414,6 +416,8 @@ pub(crate) fn branch_bottle_view<S: 'static>(
                 .child(crate::hearth::check_mark(if state.light { p.broth_deep } else { p.broth_foam }, 10.0))
                 .child(text(ms_text).font(TextStyle::new(11.0, 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam })),
         )
+    } else if simmering {
+        row().px(6.0).py(1.5).radius(7.0).fill(p.card).border(1.0, p.gold).child(text("Simmering").font(TextStyle::new(11.0, 750.0)).color(p.simmer_ink()))
     } else if untaken {
         row()
             .px(5.5)
@@ -422,6 +426,8 @@ pub(crate) fn branch_bottle_view<S: 'static>(
             .fill(p.untaken_pill_fill())
             .border(1.0, p.untaken_border())
             .child(text("Untaken").font(TextStyle::new(11.0, 700.0)).color(p.untaken_title()))
+    } else if let Some(vintage) = state.release_badge.as_ref().filter(|_| sealed) {
+        row().px(5.0).py(1.0).radius(5.5).fill(p.primary_bg).child(text(vintage).font(TextStyle::new(11.0, 700.0).features("'tnum' 1")).color(p.primary_ink))
     } else {
         row().px(5.5).py(1.5).radius(7.0).fill(p.wash_2).border(1.0, p.rule_2).child(text("Branch").font(TextStyle::new(11.0, 650.0)).color(p.ink_2))
     };
@@ -465,7 +471,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
             .radius(8.5)
             .items_center()
             .justify_center()
-            .fill(p.primary_bg)
+            .fill(if hexed { p.hex } else { p.primary_bg })
             .child(text(num.to_string()).font(TextStyle::new(11.0, 750.0).features("'tnum' 1")).color(p.primary_ink));
         tag_wrap = tag_wrap.child(el().absolute(-6.0, -7.0).child(step_badge));
     }
@@ -943,6 +949,9 @@ fn grimoire_card_view<S: 'static>(
         .on_drag(move |s: &mut S, drag, tx| {
             tx.instant();
             let canvas = lens(s);
+            if canvas.running_brew {
+                return;
+            }
             match drag.phase {
                 Phase::Down => {
                     canvas.select(Some(node_id.clone()));
@@ -1089,6 +1098,9 @@ fn socket_port<S: 'static>(
     port.on_drag(move |s: &mut S, drag, tx| {
         tx.instant();
         let canvas = lens(s);
+        if canvas.running_brew {
+            return;
+        }
         match drag.phase {
             Phase::Down => {
                 let anchor = canvas.card(&from.node).and_then(|card| card.socket_world(&from.socket, true)).map_or(anchor, |(point, _)| point);

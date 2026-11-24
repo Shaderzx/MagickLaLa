@@ -411,7 +411,7 @@ fn toolbar(app: &StudioApp, t: &HearthPalette) -> El {
     let check_kind = if empty_graph { ButtonKind::Disabled } else { ButtonKind::Secondary };
     let brew_kind = if empty_graph || hexed { ButtonKind::Disabled } else { ButtonKind::Primary };
     let bottle_kind = if empty_graph || hexed || published_unchanged || app.is_running() { ButtonKind::Disabled } else { ButtonKind::Secondary };
-    let save_kind = if empty_graph { ButtonKind::Disabled } else { ButtonKind::Secondary };
+    let save_kind = if empty_graph || app.is_running() { ButtonKind::Disabled } else { ButtonKind::Secondary };
     let theme_caption = if app.theme == Theme::Dark { "Midnight" } else { "Sunlit" };
     let theme_a11y = if app.theme == Theme::Dark { "Switch to Sunlit" } else { "Switch to Midnight" };
     let theme_btn = if compact {
@@ -1168,6 +1168,9 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
                 .h(18.0)
                 .color(t.ink)
                 .on_edit(move |app: &mut StudioApp| {
+                    if app.is_running() {
+                        return &mut app.frozen_edit;
+                    }
                     while app.var_name_edits.len() <= idx {
                         app.var_name_edits.push(TextEdit::new(""));
                     }
@@ -1232,6 +1235,9 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
                     .h(18.0)
                     .color(t.ink)
                     .on_edit(move |app: &mut StudioApp| {
+                        if app.is_running() {
+                            return &mut app.frozen_edit;
+                        }
                         while app.var_default_edits.len() <= idx {
                             app.var_default_edits.push(TextEdit::new(""));
                         }
@@ -1538,12 +1544,9 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             ))
     });
     let editor = field.filter(|_| wired_editor.is_none()).and_then(|field| app.prompts.get(&card.id).map(|edit| (field, edit))).map(|(field, edit)| {
-        let input = text_input(edit, prompt_font())
-            .key("prompt-field")
-            .label(format!("{} {field}", card.title))
-            .w_full()
-            .color(t.ink)
-            .on_edit(move |app: &mut StudioApp| app.prompts.entry(id.clone()).or_insert_with(|| TextEdit::new("")));
+        let input = text_input(edit, prompt_font()).key("prompt-field").label(format!("{} {field}", card.title)).w_full().color(t.ink).on_edit(
+            move |app: &mut StudioApp| if app.is_running() { &mut app.frozen_edit } else { app.prompts.entry(id.clone()).or_insert_with(|| TextEdit::new("")) },
+        );
         let mut box_el = col()
             .key("prompt-editor")
             .w_full()
@@ -1753,7 +1756,11 @@ fn release_version_editor(app: &StudioApp, card: &magicklala_canvas::NodeCardMod
             .fill(t.card)
             .border(1.2, t.rule_2)
             .color(t.ink)
-            .on_edit(move |app: &mut StudioApp| app.versions.entry(id.clone()).or_insert_with(|| TextEdit::new(""))),
+            .on_edit(
+                move |app: &mut StudioApp| {
+                    if app.is_running() { &mut app.frozen_edit } else { app.versions.entry(id.clone()).or_insert_with(|| TextEdit::new("")) }
+                },
+            ),
     )
 }
 
@@ -1917,6 +1924,30 @@ fn status_badge(app: &StudioApp, t: &HearthPalette) -> Option<El> {
     )
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum ChipShape {
+    Full,
+    Dot,
+    More(usize),
+}
+
+fn log_chips<'a>(lines: &[&'a TraceLine], compact: bool) -> Vec<(&'a TraceLine, ChipShape)> {
+    let steps = lines.iter().filter(|line| line.kind == "NodeFinished").count();
+    let last_step = lines.iter().rposition(|line| line.kind == "NodeFinished");
+    let issues: Vec<usize> = lines.iter().enumerate().filter(|(_, line)| matches!(line.kind, "NodeFailed" | "RunRejected")).map(|(index, _)| index).collect();
+    let mut chips = Vec::with_capacity(lines.len());
+    for (index, line) in lines.iter().enumerate() {
+        let issue_rank = issues.iter().position(|issue| *issue == index);
+        match issue_rank {
+            Some(1) if compact && issues.len() > 2 => chips.push((*line, ChipShape::More(issues.len() - 1))),
+            Some(rank) if compact && issues.len() > 2 && rank > 1 => {}
+            _ if compact && steps > 5 && line.kind == "NodeFinished" && Some(index) != last_step => chips.push((*line, ChipShape::Dot)),
+            _ => chips.push((*line, ChipShape::Full)),
+        }
+    }
+    chips
+}
+
 fn plural(count: usize, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
@@ -2047,9 +2078,52 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
         header = header.child(el().grow(1.0).min_w(0.0)).child(badge);
     }
     let run_done = !app.is_running();
-    let total = milestones.len();
+    let chips = log_chips(&milestones, !app.trace_expanded);
+    let total = chips.len();
     let mut step_num = 0usize;
-    let body = milestones.iter().enumerate().fold(row().gap(0.0).items_center(), |list, (index, line)| {
+    let body = chips.iter().enumerate().fold(row().gap(0.0).items_center(), |list, (index, (line, shape))| {
+        let line = *line;
+        let link = |chip: El| {
+            if index + 1 < total {
+                row().items_center().child(chip).child(canvas(sparkle_connector_h(10.0, 6.0, light)).size(10.0, 6.0))
+            } else {
+                row().items_center().child(chip)
+            }
+        };
+        match shape {
+            ChipShape::Dot => {
+                step_num += 1;
+                let mut dot = row()
+                    .key(format!("log-step-{step_num}"))
+                    .label(line.detail.clone())
+                    .size(22.0, 22.0)
+                    .radius(7.5)
+                    .continuous_corners()
+                    .items_center()
+                    .justify_center()
+                    .fill(t.primary_bg)
+                    .child(figure(step_num.to_string(), 9.5, 750.0, t.primary_ink));
+                if let Some(target_node) = line.node.clone() {
+                    dot = dot.on_press(move |app: &mut StudioApp| app.canvas.select(Some(target_node.clone())));
+                }
+                return list.child(link(dot));
+            }
+            ChipShape::More(more) => {
+                let chip = row()
+                    .key("log-more-issues")
+                    .h(29.0)
+                    .px(9.0)
+                    .radius(10.0)
+                    .continuous_corners()
+                    .items_center()
+                    .fill(t.hex_tint)
+                    .border(1.0, t.hex)
+                    .child(label(plural(*more, "more issue", "more issues"), 11.5, 700.0, t.hex))
+                    .on_press(|app: &mut StudioApp| app.right_tab = RightTab::Trace);
+                return list.child(link(chip));
+            }
+            ChipShape::Full => {}
+        }
         let dot_color = match line.status {
             ExecutionStatus::Failed => t.hex,
             ExecutionStatus::Running if !run_done => t.gold,
