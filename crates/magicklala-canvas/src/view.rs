@@ -156,10 +156,10 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     let tone = category_tone(&card.category, state.light);
     let hexed = card.status == ExecutionStatus::Failed || card.inputs.iter().any(|s| s.flagged);
     let dimmed = state.has_run() && card.status == ExecutionStatus::Idle && !card.selected && !hexed;
-    let untaken_bg = if state.light { hex(0xF1EFF6) } else { hex(0x1E192D) };
-    let untaken_border = if state.light { hex(0x9890AA) } else { hex(0x5E547D) };
-    let untaken_title = if state.light { hex(0x3A3248) } else { hex(0xDFD9F0) };
-    let untaken_sub = if state.light { hex(0x524963) } else { hex(0xC2B9D9) };
+    let untaken_bg = p.untaken_fill();
+    let untaken_border = p.untaken_border();
+    let untaken_title = p.untaken_title();
+    let untaken_sub = p.untaken_sub();
     let border_col = if hexed {
         p.hex
     } else if card.selected {
@@ -249,7 +249,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
                 .child(text(ms_text).font(TextStyle::new(9.5, 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam })),
         )
     } else if card.status == ExecutionStatus::Running {
-        Some(row().px(6.0).py(1.5).radius(7.0).fill(p.card).border(1.0, p.gold).child(text("Simmering").font(TextStyle::new(9.2, 750.0)).color(p.gold)))
+        Some(row().px(6.0).py(1.5).radius(7.0).fill(p.card).border(1.0, p.gold).child(text("Simmering").font(TextStyle::new(9.2, 750.0)).color(p.simmer_ink())))
     } else if dimmed {
         let untaken_label = state
             .wires
@@ -262,9 +262,9 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
                 .px(5.5)
                 .py(1.5)
                 .radius(7.0)
-                .fill(if state.light { hex(0xF5F2FA) } else { hex(0x2B243F) })
-                .border(1.0, if state.light { hex(0x9890AA) } else { hex(0x5E547D) })
-                .child(text(untaken_label).font(TextStyle::new(9.2, 700.0)).color(if state.light { hex(0x322A42) } else { hex(0xDFD8F2) })),
+                .fill(p.untaken_pill_fill())
+                .border(1.0, p.untaken_border())
+                .child(text(untaken_label).font(TextStyle::new(9.2, 700.0)).color(p.untaken_pill_ink())),
         )
     } else {
         None
@@ -381,22 +381,22 @@ pub(crate) fn branch_bottle_view<S: 'static>(
             .px(5.5)
             .py(1.5)
             .radius(7.0)
-            .fill(if state.light { hex(0xF6F4FA) } else { hex(0x2B243F) })
-            .border(1.0, if state.light { hex(0x9890AA) } else { hex(0x5E547D) })
-            .child(text("Untaken").font(TextStyle::new(9.2, 700.0)).color(if state.light { hex(0x3A3248) } else { hex(0xDFD9F0) }))
+            .fill(p.untaken_pill_fill())
+            .border(1.0, p.untaken_border())
+            .child(text("Untaken").font(TextStyle::new(9.2, 700.0)).color(p.untaken_title()))
     } else {
         row().px(5.5).py(1.5).radius(7.0).fill(p.wash_2).border(1.0, p.rule_2).child(text("Branch").font(TextStyle::new(9.2, 650.0)).color(p.ink_2))
     };
-    let card_bg = if untaken { if state.light { hex(0xF1EFF6) } else { hex(0x1E192D) } } else { p.card };
+    let card_bg = if untaken { p.untaken_fill() } else { p.card };
     let card_border = if card.selected || taken {
         p.broth_mid
     } else if untaken {
-        if state.light { hex(0x9890AA) } else { hex(0x5E547D) }
+        p.untaken_border()
     } else {
         p.rule_2
     };
-    let title_col = if untaken { if state.light { hex(0x3A3248) } else { hex(0xDFD9F0) } } else { p.ink };
-    let sub_col = if untaken { if state.light { hex(0x524963) } else { hex(0xC2B9D9) } } else { p.mute };
+    let title_col = if untaken { p.untaken_title() } else { p.ink };
+    let sub_col = if untaken { p.untaken_sub() } else { p.mute };
     let tag_inner = col()
         .w_full()
         .px(10.0)
@@ -473,7 +473,7 @@ pub(crate) fn potion_stand_view<S: 'static>(
                 .px(5.0)
                 .py(1.0)
                 .radius(5.5)
-                .fill(if state.light { hex(0xE6F6EF) } else { with_alpha(p.broth_mid, 0.24) })
+                .fill(p.route_taken_fill())
                 .border(1.0, p.broth_mid)
                 .child(text("Test").font(TextStyle::new(9.2, 700.0)).color(if state.light { p.broth_deep } else { p.broth_foam })),
         );
@@ -826,8 +826,8 @@ fn grimoire_card_view<S: 'static>(
         );
     let perched_badge = status_box(card.status, card.duration_ms, p, zoom).or_else(|| {
         dimmed.then(|| {
-            let badge_bg = if state.light { hex(0xF5F2FA) } else { hex(0x2B243F) };
-            let badge_ink = if state.light { hex(0x322A42) } else { hex(0xDFD8F2) };
+            let badge_bg = p.untaken_pill_fill();
+            let badge_ink = p.untaken_pill_ink();
             row()
                 .px((6.0 * zoom).max(5.5))
                 .py((1.8 * zoom).max(1.5))

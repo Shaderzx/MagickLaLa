@@ -224,6 +224,14 @@ impl HearthPalette {
         if self.light { hex(0x524963) } else { hex(0xC2B9D9) }
     }
 
+    pub fn untaken_pill_fill(&self) -> Color {
+        if self.light { hex(0xF5F2FA) } else { hex(0x2B243F) }
+    }
+
+    pub fn untaken_pill_ink(&self) -> Color {
+        if self.light { hex(0x322A42) } else { hex(0xDFD8F2) }
+    }
+
     pub fn simmer_ink(&self) -> Color {
         if self.light { hex(0x7A4E0C) } else { self.gold_hi }
     }
@@ -407,10 +415,10 @@ fn broth_colors(mood: CauldronMood, p: &HearthPalette) -> (Color, Color, Color, 
             hex(0xCFC7E2),
         ),
         CauldronMood::Ready => (
-            hex(if p.light { 0x454B63 } else { 0x262B42 }),
-            hex(if p.light { 0x626A87 } else { 0x3C4466 }),
-            hex(if p.light { 0xA4ACC4 } else { 0x6F79A1 }),
-            hex(0xE8ECF7),
+            hex(if p.light { 0x7A4E16 } else { 0x5E3A10 }),
+            hex(if p.light { 0xC08A35 } else { 0xA8762A }),
+            hex(if p.light { 0xF4D28A } else { 0xE6BF6E }),
+            p.gold_hi,
         ),
         CauldronMood::Simmering => (p.broth_deep, hex(0x28C99B), hex(0x88FFCF), p.gold_hi),
         CauldronMood::Brewed => (hex(0x118A6E), hex(0x24D4A0), hex(0x82FFD6), p.gold_hi),
@@ -741,7 +749,7 @@ pub fn hero_cauldron_shape(mood: CauldronMood, light: bool, width: f32, height: 
     s = fill_ellipse(s, cx, shadow_y, 82.0 * u, 16.0 * u, with_alpha(p.shadow_soft, if light { 0.22 } else { 0.55 }));
     let ember_alpha = match mood {
         CauldronMood::Empty => 0.0,
-        CauldronMood::Ready => 0.18,
+        CauldronMood::Ready => 0.62,
         CauldronMood::Hexed => 0.32,
         CauldronMood::Simmering | CauldronMood::Brewed => 0.96,
     };
@@ -764,7 +772,8 @@ pub fn hero_cauldron_shape(mood: CauldronMood, light: bool, width: f32, height: 
         shape.fill_path(&path, color)
     };
     let flame_scale = match mood {
-        CauldronMood::Empty | CauldronMood::Ready => 0.0,
+        CauldronMood::Empty => 0.0,
+        CauldronMood::Ready => 0.62,
         CauldronMood::Hexed => 0.32,
         CauldronMood::Simmering | CauldronMood::Brewed => 1.18,
     };

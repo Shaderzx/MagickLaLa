@@ -42,13 +42,8 @@ fn figure(content: impl Into<String>, size: f32, weight: f32, color: Color) -> E
 
 fn category_title(category: &str) -> String {
     match category.to_ascii_lowercase().as_str() {
-        "events" => "Sparks & Events".to_owned(),
-        "flow" => "Whisk & Flow".to_owned(),
-        "ai" => "Arcane AI".to_owned(),
-        "memory" => "Memory Jars".to_owned(),
-        "knowledge" => "Herb Lore".to_owned(),
-        "io" => "Potion Bottles".to_owned(),
-        "code" => "Rhai Runes".to_owned(),
+        "ai" => "AI".to_owned(),
+        "io" => "Outputs".to_owned(),
         "json" => "JSON".to_owned(),
         other => {
             let mut chars = other.chars();
@@ -892,7 +887,7 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                     ),
             );
     }
-    let mut column = column.child(section_bar("Bottled vintages"));
+    let mut column = column.child(section_bar("Releases"));
     if let Some(error) = &app.store_error {
         column = column.child(
             col()
@@ -917,13 +912,7 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             .items_center()
             .gap(8.0)
             .child(canvas(empty_bottle_mark(light, 44.0)).key("releases-bobbin").size(44.0, 44.0))
-            .child(heading("No vintages yet", 14.5, 800.0, t.ink))
-            .child(col().items_center().gap(1.0).child(label("Publish a versioned", 12.0, 450.0, t.mute)).child(label(
-                "release you can pin.",
-                12.0,
-                450.0,
-                t.mute,
-            )))
+            .child(heading("No releases yet", 14.5, 800.0, t.ink))
             .child(row().pt(2.0).child(button_el(
                 "empty-publish",
                 "Publish",
@@ -1058,7 +1047,7 @@ fn inspector(app: &StudioApp, t: &HearthPalette) -> El {
         .border_sides([0.0, 0.0, 1.0, 0.0], t.rule)
         .child(tab_sized("tab-inspector", "Recipe", app.right_tab == RightTab::Inspector, compact, light, t, |app| app.right_tab = RightTab::Inspector))
         .child(trace_tab)
-        .child(tab_sized("tab-variables", "Spices", app.right_tab == RightTab::Variables, compact, light, t, |app| app.right_tab = RightTab::Variables))
+        .child(tab_sized("tab-variables", "Variables", app.right_tab == RightTab::Variables, compact, light, t, |app| app.right_tab = RightTab::Variables))
         .child(tab_sized("tab-playground", "Tasting", app.right_tab == RightTab::Playground, compact, light, t, |app| app.right_tab = RightTab::Playground));
     let mut panel = col().key("inspector").w(panel_w).h_full().min_h(0.0).fill(t.shelf).border_sides([0.0, 0.0, 0.0, 1.0], t.rule).child(tabs);
     match app.right_tab {
@@ -1108,18 +1097,18 @@ fn inspector(app: &StudioApp, t: &HearthPalette) -> El {
 
 fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
     let count = app.spell.variables.len();
-    let count_word = if count == 1 { "1 spice" } else { &format!("{count} spices") };
+    let count_word = if count == 1 { "1 variable" } else { &format!("{count} variables") };
     let top_bar = row()
         .w_full()
         .pt(12.0)
         .pb(10.0)
         .items_center()
         .justify_between()
-        .child(col().gap(1.0).child(heading("Potion spices", 14.5, 800.0, t.ink)).child(label(count_word, 11.0, 500.0, t.mute)))
+        .child(col().gap(1.0).child(heading("Variables", 14.5, 800.0, t.ink)).child(label(count_word, 11.0, 500.0, t.mute)))
         .child(button_el("add-variable", "+ Add", ButtonKind::Secondary, 10.0, t, StudioApp::add_variable));
     let list = col().gap(8.0).child(top_bar);
     if app.spell.variables.is_empty() {
-        return list.child(col().w_full().py(24.0).items_center().gap(6.0).child(label("No spices measured yet.", 12.5, 500.0, t.mute)));
+        return list.child(col().w_full().py(24.0).items_center().gap(6.0).child(label("No variables yet", 12.5, 500.0, t.mute)));
     }
     app.spell.variables.iter().enumerate().fold(list, |list, (idx, variable)| {
         let remove_name = variable.name.clone();
@@ -1317,8 +1306,7 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
             .items_center()
             .gap(10.0)
             .child(canvas(empty_bottle_mark(app.theme == Theme::Light, 42.0)).size(42.0, 42.0))
-            .child(heading("No brews yet", 15.5, 800.0, t.ink))
-            .child(label("Press Brew potion to inspect the execution trace.", 12.0, 450.0, t.mute).wrap());
+            .child(heading("No brews yet", 15.5, 800.0, t.ink));
     }
     let finished: Vec<&TraceLine> = app.trace.iter().filter(|line| line.kind == "NodeFinished" || line.kind == "NodeFailed").collect();
     let total_ms = app.trace.last().map_or(0, |line| line.at_ms);
@@ -1381,7 +1369,6 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
         }
         list.child(item)
     });
-    let noun = if app.canvas.mode == WorkbenchMode::Grimoire { "node" } else { "ingredient vial" };
     col()
         .key("inspector-trace")
         .gap(10.0)
@@ -1389,7 +1376,6 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
         .child(header)
         .child(inspector_section_heading("Brewing sequence", t))
         .child(steps)
-        .child(label(format!("Click any step or {noun} to inspect its recipe."), 11.5, 450.0, t.mute).wrap())
 }
 
 fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
@@ -1457,11 +1443,11 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     };
     let mut sockets = col().gap(0.0);
     if !card.inputs.is_empty() {
-        sockets = sockets.child(row().w_full().pt(2.0).pb(2.0).child(label("Pours in", 10.5, 650.0, t.mute)));
+        sockets = sockets.child(row().w_full().pt(2.0).pb(2.0).child(label("Inputs", 10.5, 650.0, t.mute)));
         sockets = card.inputs.iter().fold(sockets, |list, socket| list.child(socket_row_el(socket, true)));
     }
     if !card.outputs.is_empty() {
-        sockets = sockets.child(row().w_full().pt(if compact { 4.0 } else { 6.0 }).pb(2.0).child(label("Distills out", 10.5, 650.0, t.mute)));
+        sockets = sockets.child(row().w_full().pt(if compact { 4.0 } else { 6.0 }).pb(2.0).child(label("Outputs", 10.5, 650.0, t.mute)));
         sockets = card.outputs.iter().fold(sockets, |list, socket| list.child(socket_row_el(socket, false)));
     }
     let id = card.id.clone();
@@ -1548,7 +1534,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                 .child(actions.child(button_el("inspector-open-grimoire", "Grimoire", ButtonKind::Secondary, 8.0, t, StudioApp::open_grimoire))),
         );
     }
-    let mut column = column.child(inspector_section_heading("Essences", t)).child(sockets);
+    let mut column = column.child(inspector_section_heading("Sockets", t)).child(sockets);
     if card.kind == "ai/generate_text" {
         let temp_value = app.selected_temperature().to_string();
         let model_name = app.selected_model_name();
@@ -1695,7 +1681,7 @@ fn editor_caption(field: &str) -> &'static str {
         "script" => "Rhai rune",
         "template" => "Template",
         SUBGRAPH_SPELL_FIELD => "Spell ID",
-        _ => "Prompt · Incantation",
+        _ => "Prompt",
     }
 }
 
@@ -1709,7 +1695,7 @@ fn playground_panel(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     let mut panel = col().key("playground-panel").w_full().grow(1.0).min_h(0.0);
     if has_conversation {
         let turn_count = transcript.iter().filter(|m| m.from_user).count();
-        let turn_label = if turn_count == 1 { "1 sip".to_owned() } else { format!("{turn_count} sips") };
+        let turn_label = if turn_count == 1 { "1 message".to_owned() } else { format!("{turn_count} messages") };
         let header_caption = format!("Draft test · {turn_label}");
         panel = panel.child(
             row()
@@ -1741,8 +1727,7 @@ fn playground_panel(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             .items_center()
             .gap(10.0)
             .child(canvas(empty_bottle_mark(light, 42.0)).size(42.0, 42.0))
-            .child(heading("Taste this potion", 15.0, 800.0, t.ink))
-            .child(label("Send a prompt below to brew the cauldron and taste its reply.", 12.5, 450.0, t.mute).wrap())
+            .child(heading("No messages yet", 15.0, 800.0, t.ink))
     } else {
         transcript.iter().enumerate().fold(col().gap(2.0).pt(8.0).pb(12.0), |mut list, (index, message)| {
             if message.from_user && index > 0 {
@@ -1785,7 +1770,7 @@ fn playground_panel(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     let input_el = text_input(&app.chat_input, font(13.0, 450.0))
         .single_line()
         .key("chat-input")
-        .label("Taste this potion")
+        .label("Message")
         .w_full()
         .h(20.0)
         .fill(t.card)
@@ -1794,7 +1779,7 @@ fn playground_panel(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         .on_submit(|app: &mut StudioApp, _| app.send_chat());
     let mut input_slot = row().grow(1.0).min_w(0.0).h(32.0).px(8.0).items_center().child(input_el);
     if app.chat_input.text.is_empty() {
-        input_slot = input_slot.child(row().h(32.0).px(8.0).items_center().absolute(0.0, 0.0).child(label("Taste this potion…", 12.5, 450.0, t.placeholder)));
+        input_slot = input_slot.child(row().h(32.0).px(8.0).items_center().absolute(0.0, 0.0).child(label("Message…", 12.5, 450.0, t.placeholder)));
     }
     let composer_box = row()
         .w_full()
@@ -1870,11 +1855,9 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
         let run_hint = if app.canvas.nodes.is_empty() {
             "Idle · no brews yet.".to_owned()
         } else if let Some(v) = app.active_release_version {
-            format!("Published v{v} · Press Brew potion to test.")
-        } else if app.compact_toolbar() {
-            "Ready. Press Brew to run.".to_owned()
+            format!("Published v{v} · not brewed yet")
         } else {
-            "Ready. Press Brew potion to run.".to_owned()
+            "Not brewed yet".to_owned()
         };
         let mut bar = row()
             .key("trace-strip")

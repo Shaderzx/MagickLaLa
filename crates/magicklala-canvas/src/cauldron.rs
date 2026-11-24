@@ -59,7 +59,6 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
     let ingredients: Vec<&BrewCard> = plan.with_role(BrewRole::Ingredient).collect();
     let bottles: Vec<&BrewCard> = plan.with_role(BrewRole::Bottle).collect();
     let multi = bottles.len() > 1;
-    let pot_bottom = plan.pot[1] + plan.pot[3] * 0.98;
     let spread = ingredients.len().max(2) as f32 - 1.0;
     for (index, placed) in ingredients.iter().enumerate() {
         let Some(card) = state.card(&placed.id) else { continue };
@@ -70,7 +69,7 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
         shape = match target {
             Some(bottle) => {
                 let to = [bottle.rect[0], bottle.rect[1] + bottle.rect[3] * 0.62];
-                bypass_stream(shape, from, to, pot_bottom + 26.0 * plan.scale, style)
+                bypass_stream(shape, from, to, plan.plaque_top + 46.0 * plan.scale, style)
             }
             None => pouring_stream_shape(shape, from, rim_point(plan, index as f32 / spread.max(1.0)), style),
         };
@@ -107,7 +106,7 @@ fn route_label(state: &CanvasState, bottle: &NodeId) -> Option<String> {
         .filter(|socket| socket != "out")
 }
 
-fn route_pill(state: &CanvasState, placed: &BrewCard, multi: bool, p: &HearthPalette) -> Option<El> {
+fn route_pill(state: &CanvasState, placed: &BrewCard, multi: bool, scale: f32, p: &HearthPalette) -> Option<El> {
     if !multi {
         return None;
     }
@@ -123,7 +122,7 @@ fn route_pill(state: &CanvasState, placed: &BrewCard, multi: bool, p: &HearthPal
         .fill(if taken { p.route_taken_fill() } else { p.card })
         .border(1.0, if taken { p.broth_mid } else { p.rule_2 })
         .child(text(label).font(TextStyle::new(11.0, if taken { 700.0 } else { 600.0 }).mono()).color(if taken { p.broth_ink() } else { p.ink_2 }));
-    Some(row().w(120.0).justify_end().absolute(neck[0] - placed.rect[2] * 0.5 - 128.0, neck[1] - 10.0).child(pill))
+    Some(row().absolute(neck[0] + 30.0 * scale, neck[1] - 10.0).child(pill))
 }
 
 fn bubbles(mood: CauldronMood, plan: &BrewPlan, p: &HearthPalette) -> Vec<El> {
@@ -177,7 +176,10 @@ fn plaque_text(state: &CanvasState, mood: CauldronMood, plan: &BrewPlan) -> Stri
         CauldronMood::Simmering => format!("Brewing · {ingredients} {word}"),
         CauldronMood::Brewed => {
             let ms: u64 = state.nodes.iter().filter_map(|card| card.duration_ms).sum();
-            if ms == 0 { "Brewed · <1ms".to_owned() } else { format!("Brewed · {ms}ms") }
+            let time = if ms == 0 { "<1ms".to_owned() } else { format!("{ms}ms") };
+            let bottles: Vec<&BrewCard> = plan.with_role(BrewRole::Bottle).collect();
+            let filled = bottles.iter().filter(|placed| state.card(&placed.id).is_some_and(|card| card.status == ExecutionStatus::Succeeded)).count();
+            if bottles.len() > 1 { format!("Brewed · {time} · {filled} of {} bottles", bottles.len()) } else { format!("Brewed · {time}") }
         }
         CauldronMood::Ready => match &state.release_badge {
             Some(badge) => format!("Published {badge} · {ingredients} {word}{aside_part}"),
@@ -387,7 +389,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         };
         board =
             board.child(el().key(format!("node-{}", placed.id.0)).size(natural[0], natural[1]).absolute(origin[0], origin[1]).child(view).scale(plan.scale));
-        if let Some(pill) = route_pill(state, placed, multi, &p) {
+        if let Some(pill) = route_pill(state, placed, multi, plan.scale, &p) {
             board = board.child(pill);
         }
     }
