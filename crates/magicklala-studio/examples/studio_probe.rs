@@ -2841,11 +2841,11 @@ fn sol_r4(db_path: &Path) -> Result<serde_json::Value, String> {
     click(&mut pub_rt, "validate")?;
     let spare_check = pub_rt.state.validation.label();
     let spare_role = role_of(&pub_rt.state, "spare_reply");
+    click(&mut pub_rt, "save")?;
     click(&mut pub_rt, "publish")?;
     let release = pub_rt.state.last_published.as_ref().map(|release| release.graph.clone()).ok_or("nothing published")?;
     let release_valid = SpellValidator::new(registry_specs()).validate(&release).is_ok();
     let release_has_spare = release.nodes.iter().any(|node| node.id.0 == "spare_reply");
-    click(&mut pub_rt, "save")?;
     let draft_keeps_spare = pub_rt.state.spell.nodes.iter().any(|node| node.id.0 == "spare_reply");
 
     pub_rt.update(|app, _| {
