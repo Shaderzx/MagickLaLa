@@ -1,10 +1,10 @@
 use magicklala_graph::NodeId;
-use rune::{Beat, Color, El, LineCap, LoopSpec, Path, Phase, Sequence, Shape, TextStyle, canvas, el, row, text};
+use rune::{Beat, Color, El, LoopSpec, Phase, Sequence, Shape, TextStyle, canvas, el, row, text};
 
 use crate::brew::{BrewCard, BrewPlan, BrewRole, MULTI_BOTTLE_SIZE, SINGLE_BOTTLE_SIZE, brew_plan};
 use crate::hearth::{
-    CauldronMood, HearthPalette, StreamStyle, category_tone, distillation_ribbon_shape, ghost_potion_bottle_shape, hero_cauldron_shape, pouring_stream_shape,
-    stream_ink, with_alpha,
+    CauldronMood, HearthPalette, StreamStyle, brew_tint, category_tone, distillation_ribbon_shape, ghost_potion_bottle_shape, hero_cauldron_shape, pour_point,
+    pouring_stream_shape, stream_ink, with_alpha,
 };
 use crate::view::{apothecary_dots, branch_bottle_view, cauldron_mood, ingredient_vial_card, mode_switcher, potion_stand_view};
 use crate::{CanvasState, DragState, ExecutionStatus, NodeCardModel, WireModel};
@@ -16,6 +16,8 @@ pub enum Toss {
 }
 
 pub type TossHook<S> = fn(&mut S, Toss);
+
+const STIRS: [f32; 5] = [0.0, -0.42, 0.3, -0.18, 0.5];
 
 static SPLASH: [Beat; 3] = [Beat::new(0.0).scale(0.35).opacity(0.0), Beat::new(0.14).scale(0.95).opacity(1.0), Beat::new(0.8).scale(1.7).opacity(0.0)];
 
@@ -54,6 +56,62 @@ fn stream_for(state: &CanvasState, card: &NodeCardModel, mood: CauldronMood, p: 
     StreamStyle { color, glow: if hexed { p.hex } else { tone.glow }, active, idle, untaken, blocked, hexed, light: state.light, arch_lift }
 }
 
+fn pouring_cards<'a>(state: &'a CanvasState, plan: &'a BrewPlan) -> impl Iterator<Item = (&'a BrewCard, &'a NodeCardModel)> {
+    plan.with_role(BrewRole::Ingredient)
+        .filter_map(|placed| state.card(&placed.id).map(|card| (placed, card)))
+        .filter(|(_, card)| !state.has_run() || matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Running))
+}
+
+pub fn potion_tint(state: &CanvasState) -> Option<Color> {
+    let plan = brew_plan(state, (1280.0, 800.0));
+    let liquids: Vec<Color> = pouring_cards(state, &plan).map(|(_, card)| category_tone(&card.category, state.light).liquid).collect();
+    brew_tint(&liquids)
+}
+
+fn bottle_tint(state: &CanvasState, plan: &BrewPlan, bottle: &NodeId) -> Option<Color> {
+    let own: Vec<Color> = pouring_cards(state, plan)
+        .filter(|(placed, _)| placed.feeds_only.as_ref() == Some(bottle))
+        .map(|(_, card)| category_tone(&card.category, state.light).liquid)
+        .collect();
+    let all: Vec<Color> = pouring_cards(state, plan).map(|(_, card)| category_tone(&card.category, state.light).liquid).collect();
+    brew_tint(&own).or_else(|| brew_tint(&all))
+}
+
+fn drips(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &HearthPalette) -> Vec<El> {
+    if matches!(mood, CauldronMood::Hexed | CauldronMood::Empty) {
+        return Vec::new();
+    }
+    let ingredients: Vec<&BrewCard> = plan.with_role(BrewRole::Ingredient).collect();
+    let spread = ingredients.len().max(2) as f32 - 1.0;
+    let mut out = Vec::new();
+    for (index, placed) in ingredients.iter().enumerate() {
+        let Some(card) = state.card(&placed.id) else { continue };
+        let lift = (36.0 - index as f32 * 10.0).max(0.0) * plan.scale;
+        let style = stream_for(state, card, mood, p, lift);
+        if style.untaken || style.blocked || style.hexed {
+            continue;
+        }
+        let from = [placed.rect[0] + placed.rect[2], placed.rect[1] + placed.rect[3] * 0.5];
+        let to = rim_point(plan, index as f32 / spread.max(1.0));
+        let r = (if style.active { 3.4 } else { 2.6 }) * plan.scale.max(0.6);
+        let period = if style.active { 0.9 } else { 1.8 };
+        for (k, t) in [0.22_f32, 0.48, 0.74].into_iter().enumerate() {
+            let at = pour_point(from, to, lift, t);
+            let delay = period * k as f64 / 3.0 + index as f64 * 0.17;
+            out.push(
+                el().key(format!("drip-{}-{k}", placed.id.0))
+                    .size(r * 2.0, r * 2.0)
+                    .radius(r)
+                    .fill(with_alpha(if style.active { style.glow } else { style.color }, 0.95))
+                    .border(1.0, with_alpha(p.card, 0.8))
+                    .absolute(at[0] - r, at[1] - r)
+                    .looping(LoopSpec::opacity(period, delay, 0.0, 1.0)),
+            );
+        }
+    }
+    out
+}
+
 fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &HearthPalette) -> Shape {
     let mut shape = Shape::new();
     let ingredients: Vec<&BrewCard> = plan.with_role(BrewRole::Ingredient).collect();
@@ -65,14 +123,7 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
         let from = [placed.rect[0] + placed.rect[2], placed.rect[1] + placed.rect[3] * 0.5];
         let lift = (36.0 - index as f32 * 10.0).max(0.0) * plan.scale;
         let style = stream_for(state, card, mood, p, lift);
-        let target = placed.feeds_only.as_ref().and_then(|bottle| bottles.iter().find(|candidate| &candidate.id == bottle));
-        shape = match target {
-            Some(bottle) => {
-                let to = [bottle.rect[0], bottle.rect[1] + bottle.rect[3] * 0.62];
-                bypass_stream(shape, from, to, plan.plaque_top + 46.0 * plan.scale, style)
-            }
-            None => pouring_stream_shape(shape, from, rim_point(plan, index as f32 / spread.max(1.0)), style),
-        };
+        shape = pouring_stream_shape(shape, from, rim_point(plan, index as f32 / spread.max(1.0)), style);
     }
     let spout = spout_point(plan);
     for placed in &bottles {
@@ -80,21 +131,22 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
         let taken = matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Running);
         let untaken = state.has_run() && !taken;
         let ribbon_mood = if multi && taken { CauldronMood::Brewed } else { mood };
-        shape = distillation_ribbon_shape(shape, spout, bottle_neck(placed, multi), ribbon_mood, state.light, taken, untaken);
+        shape =
+            distillation_ribbon_shape(shape, spout, bottle_neck(placed, multi), ribbon_mood, state.light, taken, untaken, bottle_tint(state, plan, &placed.id));
     }
     if let Some(ghost) = plan.ghost_bottle {
-        shape =
-            distillation_ribbon_shape(shape, spout, [ghost[0] + ghost[2] * 0.5, ghost[1] + ghost[3] * 0.15], CauldronMood::Empty, state.light, false, false);
+        shape = distillation_ribbon_shape(
+            shape,
+            spout,
+            [ghost[0] + ghost[2] * 0.5, ghost[1] + ghost[3] * 0.15],
+            CauldronMood::Empty,
+            state.light,
+            false,
+            false,
+            None,
+        );
     }
     shape
-}
-
-fn bypass_stream(shape: Shape, from: [f32; 2], to: [f32; 2], dip_y: f32, style: StreamStyle) -> Shape {
-    let path = Path::new().move_to(from).cubic_to([from[0] + (to[0] - from[0]) * 0.25, dip_y], [to[0] - (to[0] - from[0]) * 0.25, dip_y], to);
-    let ink = if style.untaken || style.blocked { HearthPalette::for_theme(style.light).untaken_ink() } else { style.color };
-    let width = if style.active { 3.2 } else { 2.0 };
-    let shape = if style.active { shape.stroke_path(&path, 8.0, LineCap::Round, with_alpha(style.glow, 0.30)) } else { shape };
-    shape.stroke_path(&path, width, LineCap::Round, ink)
 }
 
 fn route_label(state: &CanvasState, bottle: &NodeId) -> Option<String> {
@@ -125,7 +177,9 @@ fn route_pill(state: &CanvasState, placed: &BrewCard, multi: bool, scale: f32, p
     Some(row().absolute(neck[0] + 30.0 * scale, neck[1] - 10.0).child(pill))
 }
 
-fn bubbles(mood: CauldronMood, plan: &BrewPlan, p: &HearthPalette) -> Vec<El> {
+fn bubbles(mood: CauldronMood, plan: &BrewPlan, p: &HearthPalette, tint: Option<Color>) -> Vec<El> {
+    let froth = tint.map_or(p.broth_foam, |t| crate::hearth::mix(t, crate::hearth::hex(0xFFFFFF), 0.5));
+    let edge = tint.unwrap_or(p.broth_mid);
     if matches!(mood, CauldronMood::Empty | CauldronMood::Hexed) {
         return Vec::new();
     }
@@ -144,8 +198,8 @@ fn bubbles(mood: CauldronMood, plan: &BrewPlan, p: &HearthPalette) -> Vec<El> {
             let dot = el()
                 .size(radius * 2.0, radius * 2.0)
                 .radius(radius)
-                .fill(with_alpha(p.broth_foam, if lively { 0.88 } else { 0.55 }))
-                .border(1.0, with_alpha(p.broth_mid, 0.6))
+                .fill(with_alpha(froth, if lively { 0.88 } else { 0.55 }))
+                .border(1.0, with_alpha(edge, 0.6))
                 .looping(LoopSpec::opacity(period, spec.delay, 0.0, 1.0));
             el().key(format!("pot-bubble-{index}")).absolute(x, rim[1] - radius * 2.0).child(dot).looping(spec)
         })
@@ -300,7 +354,11 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         .key("cauldron-center")
         .size(pot[2], pot[3])
         .absolute(pot[0], pot[1])
-        .child(canvas(hero_cauldron_shape(mood, state.light, pot[2], pot[3])).key("hero-cauldron").size(pot[2], pot[3]))
+        .child(
+            canvas(hero_cauldron_shape(mood, state.light, pot[2], pot[3], potion_tint(state), STIRS[state.toss_count as usize % STIRS.len()]))
+                .key("hero-cauldron")
+                .size(pot[2], pot[3]),
+        )
         .on_press(move |s: &mut S| lens(s).select(None));
 
     let hits: Vec<(NodeId, [f32; 4])> = plan.cards.iter().map(|card| (card.id.clone(), card.rect)).collect();
@@ -338,7 +396,10 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         .child(backdrop)
         .child(streams)
         .child(cauldron);
-    for bubble in bubbles(mood, &plan, &p) {
+    for drip in drips(state, &plan, mood, &p) {
+        board = board.child(drip);
+    }
+    for bubble in bubbles(mood, &plan, &p, potion_tint(state)) {
         board = board.child(bubble);
     }
     let lifted = match &state.drag {

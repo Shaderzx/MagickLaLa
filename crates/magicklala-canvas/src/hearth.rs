@@ -741,9 +741,25 @@ pub fn tabletop_circle_shape(center: [f32; 2], radius: f32, light: bool) -> Shap
     s
 }
 
-pub fn hero_cauldron_shape(mood: CauldronMood, light: bool, width: f32, height: f32) -> Shape {
+pub fn mix(a: Color, b: Color, t: f32) -> Color {
+    Color { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: 1.0 }
+}
+
+pub fn brew_tint(colors: &[Color]) -> Option<Color> {
+    colors.last().copied()
+}
+
+fn tinted_broth(mood: CauldronMood, p: &HearthPalette, tint: Option<Color>) -> (Color, Color, Color, Color) {
+    let base = broth_colors(mood, p);
+    match tint {
+        Some(t) if matches!(mood, CauldronMood::Simmering | CauldronMood::Brewed) => (mix(t, hex(0x0B0814), 0.45), t, mix(t, hex(0xFFFFFF), 0.42), base.3),
+        _ => base,
+    }
+}
+
+pub fn hero_cauldron_shape(mood: CauldronMood, light: bool, width: f32, height: f32, tint: Option<Color>, stir: f32) -> Shape {
     let p = HearthPalette::for_theme(light);
-    let (deep, mid, foam, spark) = broth_colors(mood, &p);
+    let (deep, mid, foam, spark) = tinted_broth(mood, &p, tint);
     let cx = width * 0.5;
     let cy = height * 0.56;
     let u = (width.min(height) / 240.0).clamp(0.55, 1.35);
@@ -854,10 +870,14 @@ pub fn hero_cauldron_shape(mood: CauldronMood, light: bool, width: f32, height: 
     s = fill_star4(s, cx + 7.5 * u, cy + 13.0 * u, 5.2 * u, 1.6 * u, p.gold_hi);
 
     let rim_y = cy - 30.0 * u;
-    let ladle_stem = Path::new().move_to([cx + 26.0 * u, rim_y + 2.0 * u]).line_to([cx + 48.0 * u, rim_y - 44.0 * u]);
+    let base = [cx + 26.0 * u, rim_y + 2.0 * u];
+    let turn = |dx: f32, dy: f32| [base[0] + (dx * stir.cos() - dy * stir.sin()) * u, base[1] + (dx * stir.sin() + dy * stir.cos()) * u];
+    let tip = turn(22.0, -46.0);
+    let knob = turn(18.5, -40.5);
+    let ladle_stem = Path::new().move_to(base).line_to(tip);
     s = s.stroke_path(&ladle_stem, 9.0 * u, LineCap::Round, p.wood);
     s = s.stroke_path(&ladle_stem, 3.0 * u, LineCap::Round, p.wood_hi);
-    s = fill_star4(s, cx + 44.5 * u, rim_y - 38.5 * u, 2.5 * u, 0.9 * u, p.iron);
+    s = fill_star4(s, knob[0], knob[1], 2.5 * u, 0.9 * u, p.iron);
 
     s = fill_ellipse(s, cx, rim_y, 74.0 * u, 20.5 * u, p.iron_rim);
     s = fill_ellipse(s, cx, rim_y - 1.5 * u, 71.0 * u, 18.2 * u, p.iron_hi);
@@ -991,9 +1011,9 @@ pub fn ghost_potion_bottle_shape(light: bool, width: f32, height: f32) -> Shape 
     s
 }
 
-pub fn potion_bottle_shape(mood: CauldronMood, light: bool, width: f32, height: f32, bottled: bool) -> Shape {
+pub fn potion_bottle_shape(mood: CauldronMood, light: bool, width: f32, height: f32, bottled: bool, tint: Option<Color>) -> Shape {
     let p = HearthPalette::for_theme(light);
-    let (deep, mid, foam, spark) = broth_colors(mood, &p);
+    let (deep, mid, foam, spark) = tinted_broth(mood, &p, tint);
     let u = (width.min(height) / 96.0).clamp(0.55, 1.3);
     let brewed = matches!(mood, CauldronMood::Brewed | CauldronMood::Simmering);
     let sealed_vintage = bottled && !brewed && mood != CauldronMood::Hexed && mood != CauldronMood::Empty;
@@ -1182,16 +1202,25 @@ pub fn stream_ink(category: &str, light: bool) -> Color {
     }
 }
 
-pub fn pouring_stream_shape(mut shape: Shape, from: [f32; 2], to: [f32; 2], style: StreamStyle) -> Shape {
-    let StreamStyle { color, glow, active, idle, untaken, blocked, hexed, light, arch_lift } = style;
+pub fn pour_point(from: [f32; 2], to: [f32; 2], arch_lift: f32, t: f32) -> [f32; 2] {
+    let (c1, c2) = pour_controls(from, to, arch_lift);
+    cubic_point(from, c1, c2, to, t)
+}
+
+fn pour_controls(from: [f32; 2], to: [f32; 2], arch_lift: f32) -> ([f32; 2], [f32; 2]) {
     let mid_x = (from[0] + to[0]) * 0.5;
-    let (c1, c2) = if arch_lift <= 0.5 && from[1] > to[1] + 24.0 {
+    if arch_lift <= 0.5 && from[1] > to[1] + 24.0 {
         let dx = (to[0] - from[0]).max(40.0);
         ([from[0] + dx * 0.36, from[1] - 18.0], [to[0] - dx * 0.40, to[1] - 54.0])
     } else {
         let arch_y = from[1].min(to[1]) - (16.0 + arch_lift).min(96.0);
         ([from[0] + (mid_x - from[0]) * 0.62, arch_y], [to[0] - (to[0] - mid_x) * 0.22, arch_y + 10.0])
-    };
+    }
+}
+
+pub fn pouring_stream_shape(mut shape: Shape, from: [f32; 2], to: [f32; 2], style: StreamStyle) -> Shape {
+    let StreamStyle { color, glow, active, idle, untaken, blocked, hexed, light, arch_lift } = style;
+    let (c1, c2) = pour_controls(from, to, arch_lift);
 
     if hexed {
         let stop = 0.46;
@@ -1214,12 +1243,11 @@ pub fn pouring_stream_shape(mut shape: Shape, from: [f32; 2], to: [f32; 2], styl
     }
 
     if idle && !active {
-        let crisp = if light { color } else { with_alpha(color, 0.92) };
-        let pts = sample_cubic(from, c1, c2, to, 44, 1.0);
-        shape = dashed_polyline(shape, &pts, 6.5, 5.0, 2.2, crisp, None);
-        shape = fill_circle(shape, from[0], from[1], 3.5, crisp);
-        shape = fill_circle(shape, from[0], from[1], 1.3, hex(0xFFFFFF));
-        return shape;
+        let path = Path::new().move_to(from).cubic_to(c1, c2, to);
+        shape = shape.stroke_path(&path, 6.0, LineCap::Round, with_alpha(color, if light { 0.16 } else { 0.22 }));
+        shape = shape.stroke_path(&path, 2.6, LineCap::Round, color);
+        shape = shape.stroke_path(&path, 0.8, LineCap::Round, with_alpha(hex(0xFFFFFF), 0.55));
+        return fill_ellipse(shape, to[0], to[1], 4.6, 1.8, with_alpha(color, 0.7));
     }
 
     let path = Path::new().move_to(from).cubic_to(c1, c2, to);
@@ -1235,8 +1263,6 @@ pub fn pouring_stream_shape(mut shape: Shape, from: [f32; 2], to: [f32; 2], styl
         shape = fill_circle(shape, pt[0] - 0.6, pt[1] - 0.6, 1.0, hex(0xFFFFFF));
     }
     shape = fill_ellipse(shape, to[0], to[1], 5.8, 2.2, with_alpha(glow, 0.82));
-    shape = fill_circle(shape, from[0], from[1], 3.8, color);
-    shape = fill_circle(shape, from[0], from[1], 1.5, hex(0xFFFFFF));
     let spark_pt = cubic_point(from, c1, c2, to, 0.45);
     fill_star4(shape, spark_pt[0], spark_pt[1] - 8.0, 3.8, 1.2, color)
 }
@@ -1256,7 +1282,16 @@ pub fn distillation_point(from: [f32; 2], to: [f32; 2], t: f32) -> [f32; 2] {
     cubic_point(from, c1, c2, to, t)
 }
 
-pub fn distillation_ribbon_shape(mut shape: Shape, from: [f32; 2], to: [f32; 2], mood: CauldronMood, light: bool, active: bool, untaken: bool) -> Shape {
+pub fn distillation_ribbon_shape(
+    mut shape: Shape,
+    from: [f32; 2],
+    to: [f32; 2],
+    mood: CauldronMood,
+    light: bool,
+    active: bool,
+    untaken: bool,
+    tint: Option<Color>,
+) -> Shape {
     let p = HearthPalette::for_theme(light);
     let (c1, c2) = distillation_curve(from, to);
     if !active {
@@ -1273,7 +1308,11 @@ pub fn distillation_ribbon_shape(mut shape: Shape, from: [f32; 2], to: [f32; 2],
         return dashed_polyline(shape, &pts, dash, gap, 2.2, muted, None);
     }
     let path = Path::new().move_to(from).cubic_to(c1, c2, to);
-    let core = if light { hex(0x137B60) } else { p.broth_mid };
+    let core = match tint {
+        Some(t) => t,
+        None if light => hex(0x137B60),
+        None => p.broth_mid,
+    };
     let halo = p.gold_hi;
     let w = if mood == CauldronMood::Brewed || mood == CauldronMood::Simmering { 4.2 } else { 3.2 };
     shape = shape.stroke_path(&path, 11.5, LineCap::Round, with_alpha(halo, if light { 0.44 } else { 0.30 }));
