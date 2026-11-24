@@ -1320,6 +1320,20 @@ test('Studio state stays honest: two shelved neighbours poured back in either or
     await rm(dir, { recursive: true, force: true });
   }
 });
+test('Every drawn line keeps to itself: crowded lanes never share a run, ribbons leave the tap level and skip their own bottle tag, no pour runs through another card on any sample at either size, status pills on mirrored cards clear the step badge, untaken and hexed outlines pass 3 to 1, split twins are numbered instead of showing socket ids, and a plain Brew of the webhook router brews', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['drawn-truths']);
+
+  expect(report.sharedRuns).toEqual([]);
+  expect(report.ownTag).toEqual([]);
+  expect(report.spigot).toEqual([]);
+  expect(report.pourCrossings).toEqual([]);
+  expect(report.pills.found).toBeGreaterThan(0);
+  expect(report.pills.hits).toEqual([]);
+  for (const ratio of report.borders) expect(ratio).toBeGreaterThanOrEqual(3);
+  expect(report.twinNames.some((title: string) => /out_\d/.test(title))).toBe(false);
+  expect(report.twinNames.length).toBeGreaterThan(0);
+  expect(report.hookBrew).toBe('Some(Succeeded)');
+});
 test('A brew locks the recipe and the bottles tell the truth: typing, saving, adding, dragging cards and drawing wires all wait until the brew ends and the lit result survives, branch bottles show no step numbers before a brew, a running bottle simmers without a check, a published branch potion shows its sealed version on the bottle, and thirteen-step and thirty-eight-step brews and a many-issue Check keep every log chip and the result inside the log at 960 and 1280', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-locks-'));
   try {

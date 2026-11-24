@@ -4007,6 +4007,119 @@ fn honest_state(db_path: &Path) -> Result<serde_json::Value, String> {
         "editor": { "bottom": editor, "panel": panel },
     }))
 }
+fn drawn_truths() -> Result<serde_json::Value, String> {
+    let open = |spell: SpellGraph, size: (f32, f32)| {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt
+    };
+    let near = |points: &[[f32; 2]], point: [f32; 2], gap: f32| points.iter().any(|other| (other[0] - point[0]).hypot(other[1] - point[1]) < gap);
+    let mut shared_runs = Vec::new();
+    let mut own_tag = Vec::new();
+    let mut spigot = Vec::new();
+    let mut pour_crossings = Vec::new();
+    let spells = [
+        ("support", StudioApp::from_registry().spell.clone()),
+        ("router", example("webhook_router.json")?),
+        ("research", example("parallel_research.json")?),
+        ("dozen", dozen_ingredient_spell()),
+    ];
+    for (name, spell) in spells {
+        for size in [(1280.0_f32, 800.0_f32), (960.0, 640.0)] {
+            let rt = open(spell.clone(), size);
+            let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+            let s = plan.scale;
+            let pours = magicklala_canvas::cauldron::pour_paths(&rt.state.canvas, &plan);
+            if plan.lanes.is_some() {
+                for (index, (id, points)) in pours.iter().enumerate() {
+                    let body = &points[..points.len() * 3 / 4];
+                    for (other_id, other) in pours.iter().skip(index + 1) {
+                        let other_body = &other[..other.len() * 3 / 4];
+                        let touching = body.iter().filter(|point| near(other_body, **point, 1.5)).count();
+                        if touching > 2 {
+                            shared_runs.push(format!("{name}@{}: {} shares {touching} points with {}", size.0, id.0, other_id.0));
+                        }
+                    }
+                }
+            }
+            for (id, points) in &pours {
+                let body = &points[3..points.len().saturating_sub(points.len() / 6)];
+                for card in plan.cards.iter().filter(|card| &card.id != id) {
+                    let r = card.rect;
+                    if body.iter().any(|point| point[0] > r[0] + 2.0 && point[0] < r[0] + r[2] - 2.0 && point[1] > r[1] + 2.0 && point[1] < r[1] + r[3] - 2.0) {
+                        pour_crossings.push(format!("{name}@{}: {} pours through {}", size.0, id.0, card.id.0));
+                    }
+                }
+            }
+            let bottles: Vec<&magicklala_canvas::BrewCard> = plan.with_role(magicklala_canvas::BrewRole::Bottle).collect();
+            for (index, ribbon) in magicklala_canvas::cauldron::ribbon_paths(&plan).iter().enumerate() {
+                if let Some(card) = bottles.get(index) {
+                    let r = card.rect;
+                    let tag = [r[0] - 8.0 * s, r[1] + r[3] * 0.46, r[2] + 16.0 * s, r[3] * 0.54];
+                    if ribbon.iter().any(|point| point[0] > tag[0] && point[0] < tag[0] + tag[2] && point[1] > tag[1] && point[1] < tag[1] + tag[3]) {
+                        own_tag.push(format!("{name}@{}: ribbon {index} crosses its own tag", size.0));
+                    }
+                }
+                if ribbon.len() > 3 {
+                    let lead = [ribbon[2][0] - ribbon[0][0], ribbon[2][1] - ribbon[0][1]];
+                    let tilt = lead[1].abs().atan2(lead[0].abs()).to_degrees();
+                    if tilt > 20.0 {
+                        spigot.push(format!("{name}@{}: ribbon {index} leaves the tap at {}deg", size.0, tilt.round()));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut dozen = open(dozen_ingredient_spell(), (960.0, 640.0));
+    click(&mut dozen, "run-spell")?;
+    live_finish(&mut dozen)?;
+    dozen.frame(3.0);
+    let plan = magicklala_canvas::brew_plan(&dozen.state.canvas, dozen.state.canvas_size());
+    let mut pills = 0;
+    let mut pill_hits = Vec::new();
+    for card in plan.cards.iter().filter(|card| card.mirrored) {
+        let pill = dozen.presented(&format!("status-pill-{}", card.id.0)).map(|(rect, _)| rect);
+        let badge = dozen.presented(&format!("step-badge-{}", card.id.0)).map(|(rect, _)| rect);
+        if let (Some(pill), Some(badge)) = (pill, badge) {
+            pills += 1;
+            if rects_touch(pill, badge) {
+                pill_hits.push(card.id.0.clone());
+            }
+        }
+    }
+
+    let light = magicklala_canvas::HearthPalette::for_theme(true);
+    let dark = magicklala_canvas::HearthPalette::for_theme(false);
+    let borders = [
+        contrast(light.untaken_border(), light.paper),
+        contrast(dark.untaken_border(), dark.paper),
+        contrast(light.hexed_glass_stroke(), light.paper),
+        contrast(dark.hexed_glass_stroke(), dark.paper),
+    ];
+
+    let research = open(example("parallel_research.json")?, (960.0, 640.0));
+    let twin_names: Vec<String> =
+        research.state.canvas.nodes.iter().map(|card| research.state.canvas.display_title(&card.id)).filter(|title| title.contains(" · ")).collect();
+
+    let mut hook = open(example("webhook_router.json")?, (1280.0, 800.0));
+    click(&mut hook, "run-spell")?;
+    live_finish(&mut hook)?;
+    let hook_brew = format!("{:?}", hook.state.canvas.last_brew);
+
+    Ok(json!({
+        "sharedRuns": shared_runs,
+        "ownTag": own_tag,
+        "spigot": spigot,
+        "pourCrossings": pour_crossings,
+        "pills": { "found": pills, "hits": pill_hits },
+        "borders": borders,
+        "twinNames": twin_names,
+        "hookBrew": hook_brew,
+    }))
+}
 fn brew_locks(db_path: &Path) -> Result<serde_json::Value, String> {
     let mut slow_spell = delay_spell(1_500);
     slow_spell.nodes.push(NodeInstance {
@@ -4608,6 +4721,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("shelf-keeps") => shelf_keeps(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("shelf-exact") => shelf_exact(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("cauldron-truths") => cauldron_truths(),
+        Some("drawn-truths") => drawn_truths(),
         Some("honest-state") => honest_state(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("quiet-corners") => quiet_corners(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("shot") => shot(args),

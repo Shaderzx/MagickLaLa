@@ -241,6 +241,10 @@ impl HearthPalette {
         if self.light { hex(0x322A42) } else { hex(0xDFD8F2) }
     }
 
+    pub fn hexed_glass_stroke(&self) -> Color {
+        if self.light { hex(0x9E8FA4) } else { hex(0x6F6588) }
+    }
+
     pub fn sun_ink(&self) -> Color {
         if self.light { self.simmer_ink() } else { self.gold_hi }
     }
@@ -1049,7 +1053,7 @@ pub fn potion_bottle_shape(mood: CauldronMood, light: bool, width: f32, height: 
     let filled = brewed || sealed_vintage;
     let hexed = mood == CauldronMood::Hexed;
     let stroke_col = if hexed {
-        if light { hex(0x9E8FA4) } else { hex(0x6F6588) }
+        p.hexed_glass_stroke()
     } else if !filled && !light {
         hex(0xBEB5D4)
     } else {
