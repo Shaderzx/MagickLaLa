@@ -1372,6 +1372,24 @@ test('Studio keeps its promises: a prompt typed over a shelf shortcut stays type
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});test('Everything stays in plain sight: bottle ribbons never run on top of each other, the log keeps a short result in view and scrolls its full events, a failed step keeps Type it instead above the fold at 960, step names in the brew summary are never cut, the Recipe tab does not repeat the Trace, a failed brew marks nothing Untaken and no pill names a socket, every ingredient outline passes 3 to 1, crowded vials keep their words inside, and an empty pot cannot be sent a message', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['plain-sight']);
+
+  expect(report.ribbonShares).toEqual([]);
+  for (const log of report.logs) {
+    expect(log.resultVisible).toBe(true);
+    expect(log.clipped).toEqual([]);
+  }
+  expect(report.failedInspector.typeInsteadInView).toBe(true);
+  expect(report.summary).toEqual({ cut: [], recipeRepeatsTrace: false });
+  expect(report.untakenAfterFail).toEqual([]);
+  expect(report.socketSuffixes).toEqual([]);
+  expect(report.pillOverlaps).toEqual([]);
+  expect(report.weakBorders).toEqual([]);
+  for (const ratio of report.broth) expect(ratio).toBeGreaterThanOrEqual(3);
+  expect(report.spilling).toEqual([]);
+  expect(report.chatOnEmpty).toBe(0);
+  expect(report.menuHeaderClash).toBe(false);
 });test('A brew locks the recipe and the bottles tell the truth: typing, saving, adding, dragging cards and drawing wires all wait until the brew ends and the lit result survives, branch bottles show no step numbers before a brew, a running bottle simmers without a check, a published branch potion shows its sealed version on the bottle, and thirteen-step and thirty-eight-step brews and a many-issue Check keep every log chip and the result inside the log at 960 and 1280', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-locks-'));
   try {

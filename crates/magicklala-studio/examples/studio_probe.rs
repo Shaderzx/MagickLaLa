@@ -4121,6 +4121,226 @@ fn drawn_truths() -> Result<serde_json::Value, String> {
         "hookBrew": hook_brew,
     }))
 }
+fn segment_gap(point: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let along = [b[0] - a[0], b[1] - a[1]];
+    let length = along[0] * along[0] + along[1] * along[1];
+    let share = if length <= f32::EPSILON { 0.0 } else { (((point[0] - a[0]) * along[0] + (point[1] - a[1]) * along[1]) / length).clamp(0.0, 1.0) };
+    (point[0] - a[0] - along[0] * share).hypot(point[1] - a[1] - along[1] * share)
+}
+
+fn plain_sight() -> Result<serde_json::Value, String> {
+    let mut text = magicklala_studio::studio_text_system();
+    let open = |spell: SpellGraph, size: (f32, f32)| {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt
+    };
+    let brewed = |spell: SpellGraph, size: (f32, f32)| -> Result<Runtime<StudioApp>, String> {
+        let mut rt = open(spell, size);
+        click(&mut rt, "run-spell")?;
+        live_finish(&mut rt)?;
+        rt.frame(3.0);
+        Ok(rt)
+    };
+    let samples = || -> Result<Vec<(&'static str, SpellGraph)>, String> {
+        Ok(vec![
+            ("support", StudioApp::from_registry().spell.clone()),
+            ("router", example("webhook_router.json")?),
+            ("research", example("parallel_research.json")?),
+            ("dozen", dozen_ingredient_spell()),
+        ])
+    };
+    let sizes = [(1280.0_f32, 800.0_f32), (960.0, 640.0)];
+    let fits = |text: &mut rune::text::TextSystem, line: &str, rect: [f32; 4], size: f32, weight: f32| {
+        let (natural, line_h) = text.measure(line, rune::TextStyle::new(size, weight), 1.0);
+        let rows = (rect[3] / line_h).round().max(1.0);
+        natural <= rect[2] * rows + 2.0
+    };
+
+    let mut ribbon_shares = Vec::new();
+    for (name, spell) in samples()? {
+        for size in sizes {
+            let rt = brewed(spell.clone(), size)?;
+            let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+            let ribbons = magicklala_canvas::cauldron::ribbon_paths(&plan);
+            let body = |ribbon: &Vec<[f32; 2]>| -> Vec<[f32; 2]> {
+                let tap = ribbon.first().copied().unwrap_or_default();
+                let mouth = ribbon.last().copied().unwrap_or_default();
+                ribbon
+                    .iter()
+                    .copied()
+                    .filter(|point| {
+                        (point[0] - tap[0]).hypot(point[1] - tap[1]) > 40.0 * plan.scale && (point[0] - mouth[0]).hypot(point[1] - mouth[1]) > 12.0 * plan.scale
+                    })
+                    .collect()
+            };
+            for (index, ribbon) in ribbons.iter().enumerate() {
+                for (other_index, other) in ribbons.iter().enumerate().skip(index + 1) {
+                    let (mine, theirs) = (body(ribbon), body(other));
+                    let touching = mine.iter().filter(|point| theirs.windows(2).any(|pair| segment_gap(**point, pair[0], pair[1]) < 8.0 * plan.scale)).count();
+                    if touching > 3 {
+                        ribbon_shares.push(format!("{name}@{}: ribbons {index} and {other_index} share {touching} points", size.0));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut logs = Vec::new();
+    for size in sizes {
+        let rt = brewed(example("parallel_research.json")?, size)?;
+        let strip = layout_rect(&rt, "trace-strip").ok_or("no log")?;
+        let lines = text_lines_under(&rt, "trace-strip");
+        let result = lines.iter().any(|(line, rect)| line.starts_with("Hexed") && inside(strip, *rect) && rect[0] + rect[2] <= strip[0] + strip[2]);
+        let clipped: Vec<String> = lines.iter().filter(|(_, rect)| rect[0] + rect[2] > strip[0] + strip[2] + 0.5).map(|(line, _)| line.clone()).collect();
+        logs.push(json!({ "spell": "research", "width": size.0, "resultVisible": result, "clipped": clipped }));
+    }
+    let mut expanded = brewed(example("webhook_router.json")?, (960.0, 640.0))?;
+    expanded.update(|app, _| app.trace_expanded = true);
+    expanded.frame(4.0);
+    let strip = layout_rect(&expanded, "trace-strip").ok_or("no log")?;
+    let lines = text_lines_under(&expanded, "trace-strip");
+    let clipped: Vec<String> = lines.iter().filter(|(_, rect)| rect[0] + rect[2] > strip[0] + strip[2] + 0.5).map(|(line, _)| line.clone()).collect();
+    let result = lines.iter().any(|(line, rect)| line == "Brewed" && inside(strip, *rect));
+    logs.push(json!({ "spell": "router expanded", "width": 960.0, "resultVisible": result, "clipped": clipped }));
+
+    let mut failing = brewed(example("parallel_research.json")?, (960.0, 640.0))?;
+    let failed = failing.state.canvas.nodes.iter().find(|card| card.status == ExecutionStatus::Failed).map(|card| card.id.clone()).ok_or("nothing failed")?;
+    failing.update(move |app, _| {
+        app.canvas.select(Some(failed.clone()));
+        app.right_tab = RightTab::Inspector;
+    });
+    failing.frame(4.0);
+    let scroll = layout_rect(&failing, "inspector-scroll").ok_or("no inspector")?;
+    let unplug = layout_rect(&failing, "prompt-unplug");
+    let failed_inspector = json!({ "typeInsteadInView": unplug.is_some_and(|rect| rect[1] + rect[3] <= scroll[1] + scroll[3] + 0.5) });
+
+    let mut summary = brewed(example("webhook_router.json")?, (960.0, 640.0))?;
+    summary.update(|app, _| {
+        app.canvas.select(None);
+        app.right_tab = RightTab::Trace;
+    });
+    summary.frame(4.0);
+    let step_names: Vec<String> = summary
+        .state
+        .trace
+        .iter()
+        .filter(|line| line.kind == "NodeFinished")
+        .filter_map(|line| line.node.clone())
+        .map(|id| summary.state.canvas.display_title(&id))
+        .collect();
+    let shown = text_lines_under(&summary, "inspector-scroll");
+    let cut_steps: Vec<String> =
+        step_names.iter().filter(|name| !shown.iter().any(|(line, rect)| line == *name && fits(&mut text, line, *rect, 12.0, 600.0))).cloned().collect();
+    let trace_words: Vec<String> = shown.iter().map(|(line, _)| line.clone()).collect();
+    summary.update(|app, _| app.right_tab = RightTab::Inspector);
+    summary.frame(5.0);
+    let recipe_words: Vec<String> = text_lines_under(&summary, "inspector-scroll").into_iter().map(|(line, _)| line).collect();
+    let summary_report = json!({ "cut": cut_steps, "recipeRepeatsTrace": recipe_words == trace_words });
+
+    let mut untaken_after_fail = Vec::new();
+    let mut socket_suffixes = Vec::new();
+    let mut pill_overlaps = Vec::new();
+    for (name, spell) in samples()? {
+        for size in sizes {
+            let rt = brewed(spell.clone(), size)?;
+            let words = all_texts(&rt);
+            if format!("{:?}", rt.state.canvas.last_brew) != "Some(Succeeded)" && words.iter().any(|line| line.starts_with("Untaken")) {
+                untaken_after_fail.push(format!("{name}@{}", size.0));
+            }
+            socket_suffixes.extend(
+                words
+                    .iter()
+                    .filter(|line| line.starts_with("Untaken ·") && (line.ends_with("· out") || line.contains("out_")))
+                    .map(|line| format!("{name}@{}: {line}", size.0)),
+            );
+            let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+            for card in &plan.cards {
+                let Some((pill, _)) = rt.presented(&format!("status-pill-{}", card.id.0)) else { continue };
+                for other in plan.cards.iter().filter(|other| other.id != card.id) {
+                    let Some((r, _)) = rt.presented(&format!("node-{}", other.id.0)) else { continue };
+                    let overlap_w = (pill[0] + pill[2]).min(r[0] + r[2]) - pill[0].max(r[0]);
+                    let overlap_h = (pill[1] + pill[3]).min(r[1] + r[3]) - pill[1].max(r[1]);
+                    if overlap_w > 1.0 && overlap_h > 1.0 {
+                        pill_overlaps.push(format!("{name}@{}: {} pill on {}", size.0, card.id.0, other.id.0));
+                    }
+                }
+            }
+        }
+    }
+
+    let light = magicklala_canvas::HearthPalette::for_theme(true);
+    let dark = magicklala_canvas::HearthPalette::for_theme(false);
+    let categories = ["events", "ai", "memory", "knowledge", "flow", "io", "code", "text", "math", "json", "variables", "time", "logic", "array"];
+    let weak_borders: Vec<String> = categories
+        .iter()
+        .flat_map(|category| {
+            [(true, light.paper), (false, dark.paper)].into_iter().filter_map(move |(is_light, ground)| {
+                let ratio = contrast(magicklala_canvas::hearth::category_tone(category, is_light).border, ground);
+                (ratio < 3.0).then(|| format!("{category} {}: {ratio:.2}", if is_light { "sunlit" } else { "midnight" }))
+            })
+        })
+        .collect();
+    let broth = [contrast(light.broth_mid, light.paper), contrast(light.broth_mid, light.shelf)];
+
+    let dozen = open(dozen_ingredient_spell(), (1280.0, 800.0));
+    let plan = magicklala_canvas::brew_plan(&dozen.state.canvas, dozen.state.canvas_size());
+    let mut spilling = Vec::new();
+    for card in plan.cards.iter().filter(|card| card.role != magicklala_canvas::BrewRole::Bottle) {
+        let Some((r, _)) = dozen.presented(&format!("node-{}", card.id.0)) else { continue };
+        let inset = 3.0 * plan.scale;
+        for (line, rect) in text_lines_under(&dozen, &format!("node-{}", card.id.0)) {
+            if rect[1] > r[1] && rect[1] + rect[3] > r[1] + r[3] - inset {
+                spilling.push(format!("{}: {line}", card.id.0));
+            }
+        }
+    }
+
+    let mut empty = open(SpellGraph::new("Empty Pot"), (1280.0, 800.0));
+    click(&mut empty, "tab-playground")?;
+    empty.update(|app, _| app.chat_input = rune::TextEdit::new("anyone home"));
+    let _ = click(&mut empty, "chat-send");
+    let chat_on_empty = empty.state.chat.len();
+
+    let mut twins = SpellGraph::new("Twin Watchers");
+    twins.nodes = vec![
+        studio_node("first", "event/on_variable_changed", 0.0, serde_json::Value::Null),
+        studio_node("second", "event/on_variable_changed", 280.0, serde_json::Value::Null),
+    ];
+    let mut menu = open(twins, (1280.0, 800.0));
+    let target = menu.state.canvas.card(&NodeId::from("second")).map(|card| card.id.clone()).ok_or("no twin")?;
+    menu.update(move |app, _| {
+        app.canvas.select(Some(target.clone()));
+        app.canvas.context_menu = Some([400.0, 300.0]);
+    });
+    menu.frame(1.0);
+    let dismiss = layout_rect(&menu, "context-dismiss").ok_or("no menu")?;
+    let header_clash = all_texts(&menu).is_empty()
+        || menu
+            .elements()
+            .iter()
+            .filter(|element| {
+                element.text.as_deref().is_some_and(|line| line.starts_with("On Variable Changed")) && (element.rect[1] - dismiss[1]).abs() < 12.0
+            })
+            .any(|element| element.rect[0] + element.rect[2] > dismiss[0] - 2.0);
+
+    Ok(json!({
+        "ribbonShares": ribbon_shares,
+        "logs": logs,
+        "failedInspector": failed_inspector,
+        "summary": summary_report,
+        "untakenAfterFail": untaken_after_fail,
+        "socketSuffixes": socket_suffixes,
+        "pillOverlaps": pill_overlaps,
+        "weakBorders": weak_borders,
+        "broth": broth,
+        "spilling": spilling,
+        "chatOnEmpty": chat_on_empty,
+        "menuHeaderClash": header_clash,
+    }))
+}
 fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
@@ -5017,6 +5237,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("shelf-keeps") => shelf_keeps(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("shelf-exact") => shelf_exact(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("cauldron-truths") => cauldron_truths(),
+        Some("plain-sight") => plain_sight(),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("drawn-truths") => drawn_truths(),
