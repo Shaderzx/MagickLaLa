@@ -128,13 +128,11 @@ pub fn recipe_order(state: &CanvasState) -> Vec<NodeId> {
 }
 
 fn trigger_reach(state: &CanvasState) -> Vec<NodeId> {
-    let mut ran: Vec<NodeId> = state
-        .nodes
-        .iter()
-        .filter(|card| !state.is_shelved(&card.id))
-        .filter(|card| card.category.eq_ignore_ascii_case("events") && state.wires.iter().any(|wire| wire.from_node == card.id && wire.ty.is_flow()))
-        .map(|card| card.id.clone())
-        .collect();
+    let triggers: Vec<&NodeCardModel> = state.nodes.iter().filter(|card| !state.is_shelved(&card.id) && card.category.eq_ignore_ascii_case("events")).collect();
+    let pouring: Vec<NodeId> =
+        triggers.iter().filter(|card| state.wires.iter().any(|wire| wire.from_node == card.id && wire.ty.is_flow())).map(|card| card.id.clone()).collect();
+    let lone = |card: &&&NodeCardModel| !state.wires.iter().any(|wire| wire.from_node == card.id || wire.to_node == card.id);
+    let mut ran: Vec<NodeId> = if pouring.is_empty() { triggers.iter().filter(lone).map(|card| card.id.clone()).collect() } else { pouring };
     let mut index = 0;
     while index < ran.len() {
         let node = ran[index].clone();
@@ -150,7 +148,7 @@ fn trigger_reach(state: &CanvasState) -> Vec<NodeId> {
 
 pub fn potion_ends(state: &CanvasState) -> Vec<NodeId> {
     let reach = trigger_reach(state);
-    let fed = |card: &NodeCardModel| state.wires.is_empty() || reach.contains(&card.id);
+    let fed = |card: &NodeCardModel| reach.contains(&card.id) || (reach.is_empty() && state.wires.is_empty());
     let outputs: Vec<NodeId> = state
         .nodes
         .iter()
@@ -175,6 +173,10 @@ pub fn brewing_nodes(state: &CanvasState) -> HashSet<NodeId> {
     let bottles = potion_ends(state);
     let open = |id: &NodeId| !state.is_shelved(id);
     if bottles.is_empty() && state.wires.is_empty() {
+        let reach = trigger_reach(state);
+        if !reach.is_empty() {
+            return reach.into_iter().collect();
+        }
         return state.nodes.iter().map(|card| card.id.clone()).filter(open).collect();
     }
     if bottles.is_empty() {

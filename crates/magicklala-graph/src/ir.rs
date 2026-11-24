@@ -67,6 +67,8 @@ pub struct ShelfEntry {
     pub parked: Vec<Wire>,
     #[serde(default)]
     pub bridges: Vec<Wire>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused: Vec<Wire>,
 }
 
 impl SpellGraph {

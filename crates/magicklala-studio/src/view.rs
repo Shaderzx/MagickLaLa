@@ -1200,7 +1200,7 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
             .items_center()
             .child(
                 row()
-                    .key(format!("var-type-{}", variable.name))
+                    .key(format!("var-type-{idx}"))
                     .w(74.0)
                     .h(28.0)
                     .px(8.0)
@@ -1318,7 +1318,7 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
             let choices = [SocketType::String, SocketType::Int, SocketType::Float, SocketType::Bool, SocketType::Json, SocketType::Any];
             let dropdown = choices.into_iter().fold(
                 col()
-                    .key(format!("var-type-menu-{}", variable.name))
+                    .key(format!("var-type-menu-{idx}"))
                     .w_full()
                     .padding(4.0)
                     .gap(2.0)

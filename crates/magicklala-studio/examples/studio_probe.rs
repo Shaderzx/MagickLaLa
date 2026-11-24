@@ -3705,7 +3705,8 @@ fn quiet_corners(db_path: &Path) -> Result<serde_json::Value, String> {
         }
     });
     vars.frame(1.0);
-    let json_choice = text_lines_under(&vars, &format!("var-type-menu-{name}")).iter().any(|(line, _)| line == "Json");
+    let menu_row = vars.state.spell.variables.iter().position(|variable| variable.name == name).unwrap_or_default();
+    let json_choice = text_lines_under(&vars, &format!("var-type-menu-{menu_row}")).iter().any(|(line, _)| line == "Json");
     let token = format!("{{{{{name}}}}}");
     let note = NodeId::from(node_of_kind(&vars.state, "ai/generate_text").ok_or("no model")?.as_str());
     let hinted = note.clone();
@@ -4287,7 +4288,9 @@ fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let mut restoring = studio_at(db_path)?;
     restoring.update(|app, _| {
         app.new_empty_spell();
-        app.load_graph(tasting_spell());
+        let mut restore = tasting_spell();
+        restore.name = "Restore Agent".to_owned();
+        app.load_graph(restore);
     });
     click(&mut restoring, "publish")?;
     restoring.update(|app, _| {
@@ -4313,7 +4316,12 @@ fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     grim.frame(1.0);
     let socket_drag = |rt: &mut Runtime<StudioApp>, from: &str, to: &str| -> Result<(), String> {
         let (start, end) = (rt.find(from).ok_or(format!("no {from}"))?, rt.find(to).ok_or(format!("no {to}"))?);
-        drag(rt, from, (end.0 - start.0, end.1 - start.1))
+        drag(rt, from, (end.0 - start.0, end.1 - start.1))?;
+        rt.update(|app, _| {
+            app.sync_edits();
+        });
+        rt.frame(1.0);
+        Ok(())
     };
     socket_drag(&mut grim, "socket-trigger-out-out", "socket-once-in-in")?;
     socket_drag(&mut grim, "socket-once-out-out", "socket-reply-in-in")?;

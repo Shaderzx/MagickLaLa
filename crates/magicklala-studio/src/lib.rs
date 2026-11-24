@@ -159,6 +159,14 @@ fn same_recipe(a: &SpellGraph, b: &SpellGraph) -> bool {
         && links(a) == links(b)
 }
 
+fn calls_only_pinned_spells(graph: &SpellGraph) -> bool {
+    graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == SUBGRAPH_KIND)
+        .all(|node| graph.subgraphs.iter().any(|reference| reference.node_id == node.id && reference.release_version.is_some()))
+}
+
 fn recipe_from(spell: &SpellGraph, canvas: &CanvasState, specs: &[NodeSpec]) -> SpellGraph {
     let mut graph = spell.clone();
     graph.shelf.clear();
@@ -183,9 +191,7 @@ impl StudioWorkspace {
     fn of(record: SpellRecord, releases: Vec<SpellRelease>) -> Self {
         let recipe = recipe_of(&record.graph, &registry_specs());
         let (graph, active_release) = match releases.last() {
-            Some(release) if same_recipe(&release.graph, &recipe) && recipe.nodes.iter().all(|node| node.kind != SUBGRAPH_KIND) => {
-                (record.graph, Some(release.version))
-            }
+            Some(release) if same_recipe(&release.graph, &recipe) => (record.graph, Some(release.version)),
             Some(release) if release.created_at > record.updated_at => (release.graph.clone(), Some(release.version)),
             _ => (record.graph, None),
         };
@@ -809,6 +815,8 @@ pub struct StudioApp {
     pub undo_stack: Vec<UndoEntry>,
     pub aside_wires: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
     pub aside_bridges: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
+    pub aside_refused: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
+    var_problems: Vec<String>,
     pub saved_potions: Vec<(String, String)>,
     pub pantry_drag: Option<PantryDrag>,
     pub undo_banner: Option<String>,
@@ -929,6 +937,8 @@ impl StudioApp {
             undo_stack: Vec::new(),
             aside_wires: HashMap::new(),
             aside_bridges: HashMap::new(),
+            aside_refused: HashMap::new(),
+            var_problems: Vec::new(),
             saved_potions: Vec::new(),
             pantry_drag: None,
             undo_banner: None,
@@ -1106,6 +1116,7 @@ impl StudioApp {
     fn sync_var_edits_from_spell(&mut self) {
         self.var_name_edits = self.spell.variables.iter().map(|v| TextEdit::new(&v.name)).collect();
         self.var_default_edits = self.spell.variables.iter().map(|v| TextEdit::new(Self::format_value(v.default.as_ref()))).collect();
+        self.var_problems = self.variable_errors();
     }
 
     pub fn var_default_error(&self, idx: usize) -> Option<&'static str> {
@@ -1285,6 +1296,7 @@ impl StudioApp {
         self.stop_active_run();
         self.aside_wires.clear();
         self.aside_bridges.clear();
+        self.aside_refused.clear();
         self.spell = graph;
         self.canvas = CanvasState::from_graph(&self.spell, &self.specs);
         self.canvas.mode = mode;
@@ -1321,6 +1333,10 @@ impl StudioApp {
             let bridges = socket_pairs(&entry.bridges);
             if !bridges.is_empty() {
                 self.aside_bridges.insert(entry.node.clone(), bridges);
+            }
+            let refused = socket_pairs(&entry.refused);
+            if !refused.is_empty() {
+                self.aside_refused.insert(entry.node.clone(), refused);
             }
         }
         self.rebuild_bridges();
@@ -1506,8 +1522,8 @@ impl StudioApp {
         if let Some(graph) = graph {
             self.load_graph(graph);
         }
-        self.active_release_version = None;
-        self.canvas.release_badge = None;
+        self.active_release_version = self.live_release_matching_recipe();
+        self.canvas.release_badge = self.active_release_version.map(|version| format!("v{version}"));
         self.dirty = true;
         self.draft_status = Some(format!("Loaded v{version} into draft"));
     }
@@ -1567,6 +1583,21 @@ impl StudioApp {
     pub fn unplug_wire(&mut self, wire: &magicklala_graph::WireId) {
         if self.is_running() {
             return;
+        }
+        let cut = self
+            .canvas
+            .wires
+            .iter()
+            .find(|candidate| &candidate.id == wire)
+            .map(|cut| (SocketRef::new(cut.from_node.clone(), cut.from_socket.clone()), SocketRef::new(cut.to_node.clone(), cut.to_socket.clone())));
+        if let Some(pair) = cut {
+            for (id, bridges) in &mut self.aside_bridges {
+                if let Some(index) = bridges.iter().position(|bridge| bridge == &pair) {
+                    bridges.remove(index);
+                    self.aside_refused.entry(id.clone()).or_default().push(pair.clone());
+                }
+            }
+            self.aside_bridges.retain(|_, bridges| !bridges.is_empty());
         }
         self.canvas.wires.retain(|candidate| &candidate.id != wire);
         self.validation = ValidationState::Unchecked;
@@ -2036,15 +2067,30 @@ impl StudioApp {
     }
 
     pub fn sync_spell(&mut self) {
-        if self.aside_wires.keys().chain(self.aside_bridges.keys()).any(|id| !self.canvas.is_shelved(id)) {
-            self.rebuild_bridges();
-        }
         self.sync_edits();
+    }
+
+    fn wire_refusal(error: &magicklala_canvas::ConnectError) -> String {
+        use magicklala_canvas::ConnectError;
+        match error {
+            ConnectError::FlowMismatch { .. } => "Wire refused: a flow socket and a value socket cannot meet".to_owned(),
+            ConnectError::TypeMismatch { from, to } => format!("Wire refused: {from:?} does not fit {to:?}"),
+            ConnectError::UnknownSocket { socket, .. } => format!("Wire refused: no socket {socket}"),
+            ConnectError::SameNode => "Wire refused: a step cannot wire into itself".to_owned(),
+            ConnectError::Duplicate => "Wire refused: that wire already exists".to_owned(),
+        }
     }
 
     pub fn sync_edits(&mut self) -> bool {
         if self.is_running() {
             return false;
+        }
+        let refusal = self.canvas.last_connect_error.take().map(|error| Self::wire_refusal(&error));
+        if let Some(message) = &refusal {
+            self.store_error = Some(message.clone());
+        }
+        if self.aside_wires.keys().chain(self.aside_bridges.keys()).chain(self.aside_refused.keys()).any(|id| !self.canvas.is_shelved(id)) {
+            self.rebuild_bridges();
         }
         let mut vars_changed = false;
         for (idx, var) in self.spell.variables.iter_mut().enumerate() {
@@ -2072,14 +2118,27 @@ impl StudioApp {
                 vars_changed = true;
             }
         }
+        let problems = self.variable_errors();
+        let problems_changed = problems != self.var_problems;
+        self.var_problems = problems;
         let (nodes, wires, subgraphs) = self.rebuilt_parts();
         let shelf = self.shelf_entries();
-        if !vars_changed && nodes == self.spell.nodes && wires == self.spell.wires && subgraphs == self.spell.subgraphs && shelf == self.spell.shelf {
+        if refusal.is_some() && !problems_changed && !vars_changed && wires == self.spell.wires {
+            return true;
+        }
+        if !problems_changed
+            && !vars_changed
+            && nodes == self.spell.nodes
+            && wires == self.spell.wires
+            && subgraphs == self.spell.subgraphs
+            && shelf == self.spell.shelf
+        {
             return false;
         }
         self.spell.shelf = shelf;
         let unplaced = |list: &[NodeInstance]| list.iter().map(|node| (node.id.clone(), node.kind.clone(), node.config.clone())).collect::<Vec<_>>();
-        if vars_changed || wires != self.spell.wires || subgraphs != self.spell.subgraphs || unplaced(&nodes) != unplaced(&self.spell.nodes) {
+        if vars_changed || problems_changed || wires != self.spell.wires || subgraphs != self.spell.subgraphs || unplaced(&nodes) != unplaced(&self.spell.nodes)
+        {
             self.canvas.clear_run_marks();
             self.canvas.last_brew = None;
             self.canvas.brew_total_ms = None;
@@ -2094,8 +2153,8 @@ impl StudioApp {
         self.spell.subgraphs = subgraphs;
         self.draft_status = None;
         self.publish_status = None;
-        self.store_error = None;
-        self.active_release_version = self.live_release_matching_recipe();
+        self.store_error = refusal;
+        self.active_release_version = if self.var_problems.is_empty() { self.live_release_matching_recipe() } else { None };
         self.canvas.release_badge = self.active_release_version.map(|version| format!("v{version}"));
         self.dirty = true;
         self.canvas.spell_name = self.spell.name.clone();
@@ -2166,6 +2225,7 @@ impl StudioApp {
                 node: card.id.clone(),
                 parked: self.aside_wires.get(&card.id).map(|wires| stored_wires("parked", wires)).unwrap_or_default(),
                 bridges: self.aside_bridges.get(&card.id).map(|wires| stored_wires("bridge", wires)).unwrap_or_default(),
+                refused: self.aside_refused.get(&card.id).map(|wires| stored_wires("refused", wires)).unwrap_or_default(),
             })
             .collect()
     }
@@ -2240,6 +2300,7 @@ impl StudioApp {
         self.drop_bridges(&stale);
         let canvas = &self.canvas;
         self.aside_wires.retain(|id, _| canvas.is_shelved(id));
+        self.aside_refused.retain(|id, _| canvas.is_shelved(id));
         let mut known: Vec<(SocketRef, SocketRef)> = self
             .canvas
             .wires
@@ -2296,10 +2357,13 @@ impl StudioApp {
 
     fn bypass_for(&mut self, id: &NodeId, known: &[(SocketRef, SocketRef)]) -> Vec<(SocketRef, SocketRef)> {
         let mut bridges = Vec::new();
+        let refused = self.aside_refused.get(id).cloned().unwrap_or_default();
+        let welcome = |source: &SocketRef, target: &SocketRef| !refused.iter().any(|(from, to)| from == source && to == target);
         let sources = self.reach_past_shelf(id, known, true, true);
         let targets = self.reach_past_shelf(id, known, true, false);
         if let ([source], [target]) = (sources.as_slice(), targets.as_slice())
             && !self.is_fed(&target.node, &target.socket)
+            && welcome(source, target)
             && self.canvas.connect_sockets(source, target).is_ok()
         {
             bridges.push((source.clone(), target.clone()));
@@ -2313,7 +2377,7 @@ impl StudioApp {
             let Some(want) = self.input_type(&target) else { continue };
             let mut ranked: Vec<&(SocketRef, SocketType)> = value_sources.iter().filter(|(_, ty)| want.accepts(*ty)).collect();
             ranked.sort_by_key(|(_, ty)| *ty != want);
-            for (source, _) in ranked {
+            for (source, _) in ranked.into_iter().filter(|(source, _)| welcome(source, &target)) {
                 if self.canvas.connect_sockets(source, &target).is_ok() {
                     bridges.push((source.clone(), target.clone()));
                     break;
@@ -2448,7 +2512,7 @@ impl StudioApp {
     fn live_release_matching_recipe(&self) -> Option<u32> {
         let release = self.last_published.as_ref()?;
         let recipe = self.brew_graph();
-        (recipe.nodes.iter().all(|node| node.kind != SUBGRAPH_KIND) && same_recipe(&release.graph, &recipe)).then_some(release.version)
+        (calls_only_pinned_spells(&recipe) && same_recipe(&release.graph, &recipe)).then_some(release.version)
     }
 
     pub fn is_unchanged_from_live_release(&self) -> bool {
@@ -2456,9 +2520,19 @@ impl StudioApp {
     }
 
     fn variable_errors(&self) -> Vec<String> {
-        (0..self.spell.variables.len())
-            .filter_map(|index| self.var_default_error(index).map(|problem| format!("{}: {problem}", self.spell.variables[index].name)))
-            .collect()
+        let typed: Vec<String> = self.var_name_edits.iter().map(|edit| edit.text.trim().to_owned()).collect();
+        let naming = typed.iter().enumerate().filter_map(|(index, name)| {
+            if name.is_empty() {
+                Some(format!("Variable {} needs a name", index + 1))
+            } else if typed[..index].contains(name) {
+                Some(format!("{name}: two variables share this name"))
+            } else {
+                None
+            }
+        });
+        let defaults = (0..self.spell.variables.len())
+            .filter_map(|index| self.var_default_error(index).map(|problem| format!("{}: {problem}", self.spell.variables[index].name)));
+        naming.chain(defaults).collect()
     }
 
     pub fn has_recipe_trigger(&self) -> bool {
@@ -2475,7 +2549,10 @@ impl StudioApp {
 
     fn brew_payload(&self) -> serde_json::Value {
         let chat_shaped = self.run_payload.get("channel").is_some() && self.run_payload.get("content").is_some();
-        let webhook = self.brew_graph().nodes.iter().any(|node| node.kind == "event/on_webhook");
+        let webhook = self
+            .trigger(None, &self.run_payload)
+            .and_then(|trigger| self.spell.node(&trigger.node).map(|node| node.kind == "event/on_webhook"))
+            .unwrap_or(false);
         if !(chat_shaped && webhook) {
             return self.run_payload.clone();
         }
