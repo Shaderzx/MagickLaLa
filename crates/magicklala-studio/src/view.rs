@@ -144,11 +144,9 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<El> {
     let selected_card = app.canvas.selected_card();
     let selected_title = selected_card.map(|card| card.title.as_str());
     let quick_add_title = app.specs.iter().find(|spec| spec.kind == QUICK_ADD_KIND).map_or(QUICK_ADD_KIND, |spec| spec.title.as_str());
-    let quick_add =
-        if selected_card.is_some_and(|card| card.kind == QUICK_ADD_KIND) { format!("Duplicate {quick_add_title}") } else { format!("Add {quick_add_title}") };
-    let has_selection = app.canvas.selection.is_some();
+    let quick_add = format!("Add {quick_add_title}");
     let title_label = selected_title.unwrap_or("Cauldron");
-    let delete = if has_selection { "Remove" } else { "Remove ingredient" };
+    let delete = "Remove";
     let header = row().w_full().h(24.0).px(8.0).items_center().justify_between().child(label(title_label, 10.5, 700.0, t.mute)).child(
         row()
             .key("context-dismiss")
@@ -160,7 +158,7 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<El> {
             .child(label("×", 12.5, 700.0, t.ink_2))
             .on_press(StudioApp::close_context_menu),
     );
-    let card = col()
+    let mut card = col()
         .key("context-menu")
         .size(CONTEXT_MENU_SIZE.0, CONTEXT_MENU_SIZE.1)
         .padding(5.0)
@@ -172,35 +170,52 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<El> {
         .shadow(6.0, 20.0, t.shadow_soft)
         .absolute(x, y)
         .child(header)
-        .child(el().w_full().h(1.0).fill(t.rule))
-        .child(menu_item(
-            MenuItemSpec {
-                key: &palette_key(QUICK_ADD_KIND).replacen("palette-", "context-add-", 1),
-                caption: &quick_add,
-                shortcut: "",
-                enabled: true,
-                primary: true,
-                danger: false,
-            },
-            t,
-            StudioApp::quick_add_from_menu,
-        ))
-        .child(menu_item(
-            MenuItemSpec { key: "context-open-grimoire", caption: "Inspect in Grimoire", shortcut: "", enabled: true, primary: false, danger: false },
-            t,
-            StudioApp::open_grimoire,
-        ))
-        .child(menu_item(
-            MenuItemSpec { key: "context-delete-node", caption: delete, shortcut: "", enabled: has_selection, primary: false, danger: has_selection },
-            t,
-            StudioApp::delete_selected_node,
-        ))
-        .child(el().w_full().h(1.0).fill(t.rule))
-        .child(menu_item(
-            MenuItemSpec { key: "context-fit-view", caption: "Fit canvas", shortcut: "", enabled: true, primary: false, danger: false },
-            t,
-            StudioApp::fit_view,
-        ));
+        .child(el().w_full().h(1.0).fill(t.rule));
+    card = match selected_title {
+        Some(title) => card
+            .child(menu_item(
+                MenuItemSpec {
+                    key: "context-duplicate-node",
+                    caption: &format!("Duplicate {title}"),
+                    shortcut: "",
+                    enabled: true,
+                    primary: true,
+                    danger: false,
+                },
+                t,
+                StudioApp::duplicate_selected_node,
+            ))
+            .child(menu_item(
+                MenuItemSpec { key: "context-open-grimoire", caption: "Inspect in Grimoire", shortcut: "", enabled: true, primary: false, danger: false },
+                t,
+                StudioApp::open_grimoire,
+            ))
+            .child(el().w_full().h(1.0).fill(t.rule))
+            .child(menu_item(
+                MenuItemSpec { key: "context-delete-node", caption: delete, shortcut: "", enabled: true, primary: false, danger: true },
+                t,
+                StudioApp::delete_selected_node,
+            )),
+        None => card
+            .child(menu_item(
+                MenuItemSpec {
+                    key: &palette_key(QUICK_ADD_KIND).replacen("palette-", "context-add-", 1),
+                    caption: &quick_add,
+                    shortcut: "",
+                    enabled: true,
+                    primary: true,
+                    danger: false,
+                },
+                t,
+                StudioApp::quick_add_from_menu,
+            ))
+            .child(el().w_full().h(1.0).fill(t.rule))
+            .child(menu_item(
+                MenuItemSpec { key: "context-fit-view", caption: "Fit canvas", shortcut: "", enabled: true, primary: false, danger: false },
+                t,
+                StudioApp::fit_view,
+            )),
+    };
     Some(card)
 }
 

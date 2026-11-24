@@ -2105,11 +2105,20 @@ impl StudioApp {
 
     pub fn quick_add_from_menu(&mut self) {
         let anchor = self.canvas.context_menu.unwrap_or([self.canvas_size().0 * 0.5, self.canvas_size().1 * 0.5]);
-        let selected_clone = self.canvas.selected_card().filter(|card| card.kind == QUICK_ADD_KIND).map(|card| {
-            (self.configs.get(&card.id).cloned(), self.prompts.get(&card.id).map(|e| e.text.clone()), self.versions.get(&card.id).map(|e| e.text.clone()))
-        });
         self.close_context_menu();
-        if let Some(new_id) = self.spawn_at(QUICK_ADD_KIND, anchor)
+        self.spawn_at(QUICK_ADD_KIND, anchor);
+    }
+
+    pub fn duplicate_selected_node(&mut self) {
+        let anchor = self.canvas.context_menu.unwrap_or([self.canvas_size().0 * 0.5, self.canvas_size().1 * 0.5]);
+        let Some(card) = self.canvas.selected_card().cloned() else { return self.close_context_menu() };
+        let selected_clone = Some((
+            self.configs.get(&card.id).cloned(),
+            self.prompts.get(&card.id).map(|e| e.text.clone()),
+            self.versions.get(&card.id).map(|e| e.text.clone()),
+        ));
+        self.close_context_menu();
+        if let Some(new_id) = self.spawn_at(&card.kind, [anchor[0] + 24.0, anchor[1] + 24.0])
             && let Some((cfg, prompt, version)) = selected_clone
         {
             if let Some(cfg) = cfg {
