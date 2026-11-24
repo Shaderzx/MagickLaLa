@@ -241,6 +241,10 @@ impl HearthPalette {
         if self.light { hex(0x322A42) } else { hex(0xDFD8F2) }
     }
 
+    pub fn sun_ink(&self) -> Color {
+        self.gold_hi
+    }
+
     pub fn running_mark(&self) -> Color {
         if self.light { self.simmer_ink() } else { self.gold }
     }
@@ -1367,10 +1371,10 @@ pub fn theme_icon_shape(is_dark_currently: bool, light: bool) -> Shape {
     let p = HearthPalette::for_theme(light);
     let mut s = Shape::new();
     if is_dark_currently {
-        s = fill_circle(s, 7.0, 7.0, 3.0, p.gold_hi);
+        s = fill_circle(s, 7.0, 7.0, 3.0, p.sun_ink());
         for k in 0..8 {
             let a = (k as f32 / 8.0) * TAU;
-            s = s.line([7.0 + a.cos() * 4.3, 7.0 + a.sin() * 4.3], [7.0 + a.cos() * 6.0, 7.0 + a.sin() * 6.0], 1.2, LineCap::Round, p.gold_hi);
+            s = s.line([7.0 + a.cos() * 4.3, 7.0 + a.sin() * 4.3], [7.0 + a.cos() * 6.0, 7.0 + a.sin() * 6.0], 1.2, LineCap::Round, p.sun_ink());
         }
     } else {
         s = fill_circle(s, 7.0, 7.0, 4.6, p.ink_2);

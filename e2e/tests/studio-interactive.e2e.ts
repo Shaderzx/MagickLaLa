@@ -559,6 +559,8 @@ test('Save and Publish show their outcome in the TRACE strip on the default Node
     expect(report.published.shown).toEqual({ text: `Published v${releases[0].version}`, insideTrace: true, onScreen: true });
 
     expect(report.resaved.shown).toEqual({ text: 'Draft saved', insideTrace: true, onScreen: true });
+    expect(report.resaved.live).toBe(releases[0].version);
+    expect(report.resaved.releasesAfterPublish).toEqual([releases[0].version]);
     expect(report.edited.status).toBeNull();
     expect(report.edited.shown).toBeNull();
   } finally {
@@ -1234,7 +1236,26 @@ test('The shelf is kept and respected: a set-aside step survives save and reopen
   }
 });
 
-test('A brew locks the recipe and the bottles tell the truth: typing, saving, adding, dragging cards and drawing wires all wait until the brew ends and the lit result survives, branch bottles show no step numbers before a brew, a running bottle simmers without a check, a published branch potion shows its sealed version on the bottle, and a thirteen-step brew and a many-issue Check keep every log chip and the result inside the log at 960 and 1280', { timeout: 900_000 }, async () => {
+test('Set-aside steps come back exactly as they left: the shelf survives a restart and a reopen from Potions, pouring back drops the bypass so one message gets one reply, a template keeps its own named input, pouring one step leaves its shelved neighbour on the shelf, a shelved sub-spell with a bad version never blocks Check, a reply no flow reaches is no bottle, and the more-issues chip lists every Check finding with rows that open the ingredient', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-shelf-exact-'));
+  try {
+    const report = await studioProbe(['shelf-exact', join(dir, 'studio.sqlite')]);
+
+    const back = { reply: ['fill.text->content', 'once.out->in'], fill: ['trigger.content->person'], said: 'Hi Ada' };
+    expect(report.restart).toEqual({ once: 'Aside', fill: 'Aside', pouredBack: back });
+    expect(report.fromPotions).toEqual({ once: 'Aside', pouredBack: back });
+    expect(report.pairSecond).toBe('Aside');
+    expect(report.shelvedBadVersion).toBe('valid');
+    expect(report.muteReply).toBe('Aside');
+    expect(report.moreIssues.chip).toBe(true);
+    expect(report.moreIssues.total).toBeGreaterThan(2);
+    expect(report.moreIssues.rows).toBe(report.moreIssues.total);
+    expect(report.moreIssues.opensIngredient).toBe(true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+test('A brew locks the recipe and the bottles tell the truth: typing, saving, adding, dragging cards and drawing wires all wait until the brew ends and the lit result survives, branch bottles show no step numbers before a brew, a running bottle simmers without a check, a published branch potion shows its sealed version on the bottle, and thirteen-step and thirty-eight-step brews and a many-issue Check keep every log chip and the result inside the log at 960 and 1280', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-locks-'));
   try {
     const report = await studioProbe(['brew-locks', join(dir, 'studio.sqlite')]);
@@ -1244,6 +1265,7 @@ test('A brew locks the recipe and the bottles tell the truth: typing, saving, ad
     expect(report.runningBottle).toContain('Simmering');
     expect(report.runningBottle.some((line: string) => /ms$/.test(line))).toBe(false);
     expect(report.sealedBottle).toContain('v1');
+    expect(report.logs.map((log: { steps: number }) => log.steps)).toEqual(expect.arrayContaining([38]));
     for (const log of report.logs) {
       expect(log.resultVisible).toBe(true);
       expect(log.clipped).toEqual([]);
@@ -1262,6 +1284,7 @@ test('Every pour, name and count reads true: twelve ingredients land on twelve r
     expect(report.throughBelly).toEqual([]);
     expect(report.ribbonThroughPot).toBe(0);
     for (const ratio of report.runningContrast) expect(ratio).toBeGreaterThanOrEqual(3);
+    for (const ratio of report.sunContrast) expect(ratio).toBeGreaterThanOrEqual(3);
     expect(report.tabs.gap).toBeGreaterThanOrEqual(6);
     expect(report.tabs.wordsFit).toBe(true);
     expect(report.badges.found).toBeGreaterThan(0);

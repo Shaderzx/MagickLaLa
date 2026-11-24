@@ -1162,7 +1162,10 @@ fn visible_status(db_path: &Path) -> Result<serde_json::Value, String> {
     let mut published = status_view(&rt);
     published["version"] = json!(rt.state.last_published.as_ref().map(|release| release.version));
     click(&mut rt, "save")?;
-    let resaved = status_view(&rt);
+    let mut resaved = status_view(&rt);
+    resaved["live"] = json!(rt.state.active_release_version);
+    let _ = click(&mut rt, "publish");
+    resaved["releasesAfterPublish"] = json!(release_versions(&rt.state));
     type_prompt(&mut rt, &NodeId::from("llm"), "edited after the save for {{content}}")?;
     rt.update(|app, _| app.sync_spell());
     rt.frame(0.0);
@@ -3238,6 +3241,118 @@ fn shelf_keeps(db_path: &Path) -> Result<serde_json::Value, String> {
         "secondRestored": second_restored,
     }))
 }
+fn shelf_exact(db_path: &Path) -> Result<serde_json::Value, String> {
+    let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
+        id: NodeId::from(id),
+        kind: kind.to_owned(),
+        position: [x * 260.0, 0.0],
+        config,
+    };
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let mut exact = SpellGraph::new("Exact Agent");
+    exact.nodes = vec![
+        place("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        place("once", "flow/do_once", 1.0, serde_json::Value::Null),
+        place("fill", "text/template", 1.0, json!({ "template": "Hi {{person}}" })),
+        place("reply", "io/send_message", 2.0, serde_json::Value::Null),
+    ];
+    exact.wires = vec![
+        wire("w1", ("trigger", "out"), ("once", "in")),
+        wire("w2", ("once", "out"), ("reply", "in")),
+        wire("w3", ("trigger", "content"), ("fill", "person")),
+        wire("w4", ("fill", "text"), ("reply", "content")),
+    ];
+    let mut rt = studio_at(db_path)?;
+    rt.update(move |app, _| {
+        app.new_empty_spell();
+        app.load_graph(exact.clone());
+    });
+    rt.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("fill"))));
+    rt.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("once"))));
+    click(&mut rt, "save")?;
+    let pour_back = |rt: &mut Runtime<StudioApp>| -> Result<serde_json::Value, String> {
+        rt.update(|app, _| app.toss(magicklala_canvas::Toss::IntoPot(NodeId::from("once"))));
+        rt.update(|app, _| app.toss(magicklala_canvas::Toss::IntoPot(NodeId::from("fill"))));
+        let mut reply = feeders_of(&rt.state, "reply");
+        reply.sort();
+        Ok(json!({ "reply": reply, "fill": feeders_of(&rt.state, "fill"), "said": chat_reply(rt, "Ada")? }))
+    };
+    let mut restarted = studio_at(db_path)?;
+    let restart = json!({
+        "once": role_of(&restarted.state, "once"),
+        "fill": role_of(&restarted.state, "fill"),
+        "pouredBack": pour_back(&mut restarted)?,
+    });
+    let mut picked = studio_at(db_path)?;
+    switch_to_saved(&mut picked, "spell-exact-agent")?;
+    let from_potions = json!({ "once": role_of(&picked.state, "once"), "pouredBack": pour_back(&mut picked)? });
+
+    let mut pair = SpellGraph::new("Pair Agent");
+    pair.nodes = vec![
+        place("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        place("first", "time/delay", 1.0, json!({ "ms": 0 })),
+        place("second", "time/delay", 2.0, json!({ "ms": 0 })),
+        place("reply", "io/send_message", 3.0, serde_json::Value::Null),
+    ];
+    pair.wires = vec![
+        wire("p1", ("trigger", "out"), ("first", "in")),
+        wire("p2", ("first", "out"), ("second", "in")),
+        wire("p3", ("second", "out"), ("reply", "in")),
+        wire("p4", ("trigger", "content"), ("reply", "content")),
+    ];
+    let mut pair_rt = runtime_for(pair);
+    pair_rt.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("first"))));
+    pair_rt.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("second"))));
+    pair_rt.update(|app, _| app.toss(magicklala_canvas::Toss::IntoPot(NodeId::from("first"))));
+    let pair_second = role_of(&pair_rt.state, "second");
+
+    let mut sub = StudioApp::from_registry().spell.clone();
+    sub.nodes.push(place("call", "flow/subgraph", 0.0, json!({ "spell_id": SpellId::new(), "release_version": 0 })));
+    let mut sub_rt = runtime_for(sub);
+    sub_rt.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("call"))));
+    click(&mut sub_rt, "validate")?;
+    let shelved_bad_version = sub_rt.state.validation.label();
+
+    let mut mute = SpellGraph::new("Mute Agent");
+    mute.nodes = vec![place("trigger", "event/on_message", 0.0, serde_json::Value::Null), place("reply", "io/send_message", 1.0, serde_json::Value::Null)];
+    mute.wires = vec![wire("m1", ("trigger", "content"), ("reply", "content"))];
+    let mute_rt = runtime_for(mute);
+    let mute_reply = role_of(&mute_rt.state, "reply");
+
+    let mut gaps = SpellGraph::new("Gappy Agent");
+    gaps.nodes = vec![place("trigger", "event/on_message", 0.0, serde_json::Value::Null)];
+    for index in 0..4 {
+        gaps.nodes.push(place(&format!("say_{index}"), "io/send_message", 1.0 + index as f32, serde_json::Value::Null));
+    }
+    let chain: Vec<String> = gaps.nodes.iter().map(|node| node.id.0.clone()).collect();
+    for (index, link) in chain.windows(2).enumerate() {
+        gaps.wires.push(wire(&format!("g{index}"), (&link[0], "out"), (&link[1], "in")));
+    }
+    let mut gaps_rt = runtime_for(gaps);
+    click(&mut gaps_rt, "validate")?;
+    gaps_rt.frame(1.0);
+    let more = click(&mut gaps_rt, "log-more-issues").is_ok();
+    gaps_rt.frame(1.0);
+    let issue_rows = (0..64).take_while(|index| layout_rect(&gaps_rt, &format!("trace-issue-{index}")).is_some()).count();
+    let issues_total = gaps_rt.state.trace.iter().filter(|line| line.kind == "RunRejected").count();
+    gaps_rt.update(|app, _| app.canvas.select(None));
+    let opened = click(&mut gaps_rt, "trace-issue-0").is_ok() && gaps_rt.state.canvas.selected_card().is_some();
+
+    Ok(json!({
+        "restart": restart,
+        "fromPotions": from_potions,
+        "pairSecond": pair_second,
+        "shelvedBadVersion": shelved_bad_version,
+        "muteReply": mute_reply,
+        "moreIssues": { "chip": more, "rows": issue_rows, "total": issues_total, "opensIngredient": opened },
+    }))
+}
 fn brew_locks(db_path: &Path) -> Result<serde_json::Value, String> {
     let mut slow_spell = delay_spell(1_500);
     slow_spell.nodes.push(NodeInstance {
@@ -3325,9 +3440,50 @@ fn brew_locks(db_path: &Path) -> Result<serde_json::Value, String> {
     sealed.frame(2.0);
     let sealed_lines: Vec<String> = text_lines_under(&sealed, "node-order_reply").into_iter().map(|(line, _)| line).collect();
 
+    let mut logs = Vec::new();
+    for (pauses, size) in [(11, (960.0_f32, 640.0_f32)), (11, (1280.0, 800.0)), (36, (960.0, 640.0))] {
+        logs.push(brewed_log(delay_chain(pauses), size)?);
+    }
+    logs.push(brewed_log(dozen_ingredient_spell(), (960.0, 640.0))?);
+
+    Ok(json!({
+        "midBrew": {
+            "promptUnchanged": prompt_before == prompt_after,
+            "saveError": save_error,
+            "added": added,
+            "moved": position_before != position_after,
+            "wiresAdded": wires_after as i64 - wires_before as i64,
+            "litAfterBrew": lit_after,
+        },
+        "idleBadges": idle_badges,
+        "runningBottle": running_lines,
+        "sealedBottle": sealed_lines,
+        "logs": logs,
+    }))
+}
+
+fn brewed_log(spell: SpellGraph, size: (f32, f32)) -> Result<serde_json::Value, String> {
+    let mut app = StudioApp::with_spell(spell, registry_specs());
+    app.size = size;
+    let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+    rt.frame(0.0);
+    click(&mut rt, "run-spell")?;
+    live_finish(&mut rt)?;
+    rt.frame(3.0);
+    let strip = layout_rect(&rt, "trace-strip").ok_or("no log")?;
+    let lines = text_lines_under(&rt, "trace-strip");
+    let result_visible =
+        lines.iter().any(|(line, rect)| (line == "Brewed" || line.starts_with("Hexed")) && inside(strip, *rect) && rect[0] + rect[2] <= size.0);
+    let clipped: Vec<String> = lines.iter().filter(|(_, rect)| !inside(strip, *rect) || rect[0] + rect[2] > size.0).map(|(line, _)| line.clone()).collect();
+    Ok(
+        json!({ "width": size.0, "steps": rt.state.trace.iter().filter(|line| line.kind == "NodeFinished").count(), "resultVisible": result_visible, "clipped": clipped }),
+    )
+}
+
+fn delay_chain(pauses: usize) -> SpellGraph {
     let mut chain = SpellGraph::new("Long Chain");
     chain.nodes.push(NodeInstance { id: NodeId::from("trigger"), kind: "event/on_message".to_owned(), position: [0.0, 0.0], config: serde_json::Value::Null });
-    for step in 0..11 {
+    for step in 0..pauses {
         chain.nodes.push(NodeInstance {
             id: NodeId::from(format!("pause_{step}").as_str()),
             kind: "time/delay".to_owned(),
@@ -3353,37 +3509,7 @@ fn brew_locks(db_path: &Path) -> Result<serde_json::Value, String> {
         to_node: NodeId::from("reply"),
         to_socket: "content".to_owned(),
     });
-    let mut logs = Vec::new();
-    for (spell, size) in [(chain.clone(), (960.0_f32, 640.0_f32)), (chain, (1280.0, 800.0)), (dozen_ingredient_spell(), (960.0, 640.0))] {
-        let mut dozen_app = StudioApp::with_spell(spell, registry_specs());
-        dozen_app.size = size;
-        let mut dozen = Runtime::new(dozen_app, studio_view, size, Env::new(true, 1.0));
-        dozen.frame(0.0);
-        click(&mut dozen, "run-spell")?;
-        live_finish(&mut dozen)?;
-        dozen.frame(3.0);
-        let strip = layout_rect(&dozen, "trace-strip").ok_or("no log")?;
-        let lines = text_lines_under(&dozen, "trace-strip");
-        let result_visible =
-            lines.iter().any(|(line, rect)| (line == "Brewed" || line.starts_with("Hexed")) && inside(strip, *rect) && rect[0] + rect[2] <= size.0);
-        let clipped: Vec<String> = lines.iter().filter(|(_, rect)| !inside(strip, *rect)).map(|(line, _)| line.clone()).collect();
-        logs.push(json!({ "width": size.0, "resultVisible": result_visible, "clipped": clipped }));
-    }
-
-    Ok(json!({
-        "midBrew": {
-            "promptUnchanged": prompt_before == prompt_after,
-            "saveError": save_error,
-            "added": added,
-            "moved": position_before != position_after,
-            "wiresAdded": wires_after as i64 - wires_before as i64,
-            "litAfterBrew": lit_after,
-        },
-        "idleBadges": idle_badges,
-        "runningBottle": running_lines,
-        "sealedBottle": sealed_lines,
-        "logs": logs,
-    }))
+    chain
 }
 fn geometry_and_polish(db_path: &Path) -> Result<serde_json::Value, String> {
     let sized = |spell: SpellGraph, size: (f32, f32)| {
@@ -3432,6 +3558,7 @@ fn geometry_and_polish(db_path: &Path) -> Result<serde_json::Value, String> {
     let light = magicklala_canvas::HearthPalette::for_theme(true);
     let dark = magicklala_canvas::HearthPalette::for_theme(false);
     let running_contrast = [contrast(light.running_mark(), light.card), contrast(dark.running_mark(), dark.card)];
+    let sun_contrast = [contrast(light.sun_ink(), light.wash_2), contrast(dark.sun_ink(), dark.wash_2)];
 
     let mut rail = sized(StudioApp::from_registry().spell.clone(), (960.0, 640.0));
     click(&mut rail, "expand-nodes")?;
@@ -3559,6 +3686,7 @@ fn geometry_and_polish(db_path: &Path) -> Result<serde_json::Value, String> {
         "throughBelly": through_belly,
         "ribbonThroughPot": ribbon_through_pot,
         "runningContrast": running_contrast,
+        "sunContrast": sun_contrast,
         "tabs": { "gap": tab_gap, "wordsFit": tab_words_fit },
         "badges": { "found": badges_found, "overlaps": badge_overlaps },
         "names": { "vials": vial_titles, "triggers": trigger_names, "menu": menu_title },
@@ -3806,6 +3934,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("brew-locks") => brew_locks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("geometry-and-polish") => geometry_and_polish(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("shelf-keeps") => shelf_keeps(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("shelf-exact") => shelf_exact(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("fit-and-wording") => fit_and_wording(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-recipe") => one_recipe(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("tray-drop") => tray_drop(),
