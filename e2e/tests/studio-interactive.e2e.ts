@@ -1185,7 +1185,7 @@ test('What Studio shows, brews and publishes is the same recipe: a spare reply s
   }
 });
 
-test('Studio reads as one finished product: twelve strands keep clear of every card at 960 by 640, the empty pot ring sits below the mode switch, every vial keeps its formula line at 960, the log says Not brewed yet in one voice, Publish is simply unavailable mid-brew, messages read as sentences about potions, the Potions tab and release rows say each thing once, the theme button names the current theme, and the card menu never hides the plaque', { timeout: 900_000 }, async () => {
+test('Studio reads as one finished product: twelve strands keep clear of every card at 960 by 640, the empty pot ring sits below the mode switch, every vial keeps its formula line at 960, the log says Not brewed yet in one voice, Publish is simply unavailable mid-brew, messages read as sentences about potions, the Potions tab and release rows say each thing once, the theme button names the current theme, the card menu never hides the plaque, and untaken Grimoire routes from one card take nearer lanes the lower they leave so their dashed drops never cross', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-finish-'));
   try {
     const report = await studioProbe(['fit-and-wording', join(dir, 'studio.sqlite')]);
@@ -1204,6 +1204,7 @@ test('Studio reads as one finished product: twelve strands keep clear of every c
     expect(report.shelf).toMatch(/v1 2 ingredients/);
     expect(report.theme).toBe('Sunlit');
     expect(report.menuCoversPlaque).toBe(false);
+    expect(report.untakenLanes).toEqual({ 'default->ignored_reply': 1, 'support->support_reply': -1 });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

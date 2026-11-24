@@ -3044,6 +3044,16 @@ fn fit_and_wording(db_path: &Path) -> Result<serde_json::Value, String> {
     });
     menu.frame(1.0);
     let menu_rect = layout_rect(&menu, "context-menu").ok_or("no menu")?;
+    let mut routed = runtime_for(example("webhook_router.json")?);
+    routed.update(|app, _| app.run_payload = json!({ "method": "POST", "path": "/hooks/router", "body": { "type": "order", "id": "42" } }));
+    click(&mut routed, "run-spell")?;
+    live_finish(&mut routed)?;
+    let lanes: serde_json::Map<String, serde_json::Value> = magicklala_canvas::view::grimoire_lanes(&routed.state.canvas)
+        .into_iter()
+        .filter_map(|(id, lane)| {
+            routed.state.canvas.wires.iter().find(|wire| wire.id == id).map(|wire| (format!("{}->{}", wire.from_socket, wire.to_node.0), json!(lane)))
+        })
+        .collect();
     let plaque = layout_rect(&menu, "cauldron-plaque").ok_or("no plaque")?;
 
     Ok(json!({
@@ -3056,6 +3066,7 @@ fn fit_and_wording(db_path: &Path) -> Result<serde_json::Value, String> {
         "shelf": shelf_texts,
         "theme": theme_caption,
         "menuCoversPlaque": rects_touch(menu_rect, plaque),
+        "untakenLanes": lanes,
     }))
 }
 fn pull_middle() -> Result<serde_json::Value, String> {
