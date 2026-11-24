@@ -2561,6 +2561,112 @@ fn r4_look() -> Result<serde_json::Value, String> {
         },
     }))
 }
+fn all_texts(rt: &Runtime<StudioApp>) -> Vec<String> {
+    rt.elements().iter().filter(|element| !element.exiting).filter_map(|element| element.text.clone()).collect()
+}
+
+fn carbon_r4() -> Result<serde_json::Value, String> {
+    let compact = |spell: SpellGraph| {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = (960.0, 640.0);
+        let mut rt = Runtime::new(app, studio_view, (960.0, 640.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt
+    };
+    let demo = StudioApp::from_registry().spell.clone();
+
+    let mut vars = compact(demo.clone());
+    vars.update(|app, _| app.right_tab = RightTab::Variables);
+    vars.frame(1.0);
+    let var_widths: Vec<f32> =
+        (0..vars.state.spell.variables.len()).map(|index| layout_rect(&vars, &format!("var-label-{index}")).map_or(0.0, |rect| rect[2].round())).collect();
+
+    let mut broken = demo.clone();
+    let cut = broken.wires.iter().position(|wire| wire.to_socket == "query").ok_or("demo spell has no query wire")?;
+    let removed = broken.wires.remove(cut);
+    let mut hexed = compact(broken.clone());
+    hexed.update(|app, _| app.canvas.select(Some(removed.to_node.clone())));
+    click(&mut hexed, "validate")?;
+    hexed.frame(2.0);
+    let error_box = layout_rect(&hexed, "inspector-error").ok_or("no error box")?;
+    let spilled: Vec<String> = ["inspector-fix", "inspector-open-grimoire"]
+        .iter()
+        .filter(|key| layout_rect(&hexed, key).is_none_or(|rect| !inside(error_box, rect)))
+        .map(|key| (*key).to_owned())
+        .collect();
+
+    let mut empty = compact(SpellGraph::new("New Potion"));
+    empty.frame(1.0);
+    let pot = layout_rect(&empty, "cauldron-center").ok_or("no pot")?;
+    let overlay = layout_rect(&empty, "empty-canvas").ok_or("no empty overlay")?;
+    let board = layout_rect(&empty, "canvas").ok_or("no canvas")?;
+
+    let mut rail = compact(demo.clone());
+    click(&mut rail, "expand-nodes")?;
+    let opened = rail.state.left_rail_pinned;
+    let collapsed = click(&mut rail, "collapse-left-rail").is_ok() && !rail.state.left_rail_pinned;
+
+    let mut grim = headless(StudioApp::from_registry());
+    click(&mut grim, "run-spell")?;
+    live_finish(&mut grim)?;
+    click(&mut grim, "mode-grimoire")?;
+    grim.frame(3.0);
+    let glyphs: Vec<String> = all_texts(&grim).into_iter().filter(|line| line.contains(['\u{2713}', '\u{25B4}', '\u{25BE}'])).collect();
+
+    let mut hook = runtime_for(example("webhook_router.json")?);
+    hook.update(|app, _| app.canvas.select(Some(NodeId::from("order_reply"))));
+    hook.frame(1.0);
+    let recipe_title = text_lines_under(&hook, "inspector-card").into_iter().map(|(line, _)| line).find(|line| line.starts_with("Send"));
+
+    let stats_of = |rt: &Runtime<StudioApp>| text_lines_under(rt, "toolbar-left").into_iter().map(|(line, _)| line).find(|line| line.contains("ingredient"));
+    let mut aside = headless(StudioApp::from_registry());
+    aside.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("recall"))));
+    aside.frame(1.0);
+    let place =
+        |id: &str, kind: &str, x: f32| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position: [x, 0.0], config: serde_json::Value::Null };
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let mut relay = SpellGraph::new("Relay");
+    relay.nodes = vec![place("trigger", "event/on_message", 0.0), place("send", "io/send_message", 1.0), place("keep", "memory/add", 2.0)];
+    relay.wires = vec![
+        wire("w1", ("trigger", "out"), ("send", "in")),
+        wire("w2", ("trigger", "content"), ("send", "content")),
+        wire("w3", ("send", "out"), ("keep", "in")),
+        wire("w4", ("trigger", "content"), ("keep", "content")),
+    ];
+    let mut relay_rt = runtime_for(relay);
+    relay_rt.frame(1.0);
+
+    let mut checked = headless(StudioApp::with_spell(broken, registry_specs()));
+    click(&mut checked, "validate")?;
+    checked.update(|app, _| {
+        app.canvas.select(None);
+        app.right_tab = RightTab::Trace;
+    });
+    checked.frame(2.0);
+    let trace_texts = text_lines_under(&checked, "inspector").into_iter().map(|(line, _)| line).collect::<Vec<_>>();
+    let mut texts = trace_texts.clone();
+    texts.extend(all_texts(&grim));
+    let singular_plurals: Vec<String> =
+        texts.into_iter().filter(|line| line.contains("1 steps") || line.contains("1 events") || line.contains(" 1 issues")).collect();
+
+    Ok(json!({
+        "varLabelWidths": var_widths,
+        "errorSpill": spilled,
+        "emptyCompact": { "belowPot": (overlay[1] - (pot[1] + pot[3])).round(), "insideCanvas": inside(board, overlay) },
+        "rail": { "opened": opened, "collapsed": collapsed },
+        "grimoireGlyphs": glyphs,
+        "recipeTitle": recipe_title,
+        "stats": { "aside": stats_of(&aside), "relay": stats_of(&relay_rt) },
+        "checkHeader": trace_texts.iter().find(|line| line.starts_with("Brew #") || line.starts_with("Check")),
+        "singularPlurals": singular_plurals,
+    }))
+}
 fn pull_middle() -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32| NodeInstance {
         id: NodeId::from(id),
@@ -2791,6 +2897,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("r3-look") => r3_look(),
         Some("pull-middle") => pull_middle(),
         Some("r4-look") => r4_look(),
+        Some("carbon-r4") => carbon_r4(),
         Some("tray-drop") => tray_drop(),
         Some("sol-r3") => sol_r3(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),

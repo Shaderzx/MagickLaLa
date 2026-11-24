@@ -1129,3 +1129,18 @@ test('Every step keeps one name and every card keeps its words: ingredient title
   expect(report.empty.buttonOffset).toBeLessThanOrEqual(2);
   expect(report.empty.belowPot).toBeGreaterThanOrEqual(24);
 });
+test('Studio fits and counts honestly at 960 by 640: variable names keep their own line, the hex card keeps its buttons inside, the empty pot leaves room for its heading, the opened pantry can be folded away again, the Grimoire draws its checkmarks and chevrons instead of font glyphs, the recipe panel uses the same bottle name as the cauldron, the toolbar counts ingredients, set-aside cards and bottles the way the pot does, and a Check before any brew never reads Brew #0', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['carbon-r4']);
+
+  expect(report.varLabelWidths.length).toBeGreaterThan(0);
+  for (const width of report.varLabelWidths) expect(width).toBeGreaterThanOrEqual(150);
+  expect(report.errorSpill).toEqual([]);
+  expect(report.emptyCompact.belowPot).toBeGreaterThanOrEqual(16);
+  expect(report.emptyCompact.insideCanvas).toBe(true);
+  expect(report.rail).toEqual({ opened: true, collapsed: true });
+  expect(report.grimoireGlyphs).toEqual([]);
+  expect(report.recipeTitle).toBe('Send · orders');
+  expect(report.stats).toEqual({ aside: '3 ingredients · 1 aside · 1 output', relay: '2 ingredients · 1 output' });
+  expect(report.checkHeader).toMatch(/^Check/);
+  expect(report.singularPlurals).toEqual([]);
+});
