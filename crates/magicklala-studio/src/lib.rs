@@ -321,6 +321,11 @@ impl StudioStore {
         .map_err(|error| StudioError::Store(error.to_string()))
     }
 
+    pub fn releases_of_record(&self, record: SpellRecordId) -> Vec<SpellRelease> {
+        let repository = self.repository.clone();
+        block(move || async move { sorted_releases(&repository, record).await }).ok().and_then(Result::ok).unwrap_or_default()
+    }
+
     fn adopt_latest_workspace(&mut self) -> Result<Option<StudioWorkspace>, StudioError> {
         let workspace = self.latest_workspace()?;
         if let Some(workspace) = &workspace {
@@ -1296,16 +1301,29 @@ impl StudioApp {
             .unwrap_or_default();
     }
 
+    fn adopt_releases(&mut self, workspace: &StudioWorkspace) {
+        self.releases = workspace.releases.iter().map(|release| Release { version: release.version, nodes: release.graph.nodes.len() }).collect();
+        self.release_graphs = workspace.releases.iter().map(|release| (release.version, release.graph.clone())).collect();
+        self.release_notes = workspace.releases.iter().map(|release| (release.version, release.created_at.format("%b %d · %H:%M").to_string())).collect();
+        self.last_published = workspace.releases.last().cloned();
+        self.active_release_version = workspace.active_release;
+        self.canvas.release_badge = self.active_release_version.map(|v| format!("v{v}"));
+        self.dirty = false;
+    }
+
     pub fn open_sample_spell(&mut self, name: &str) {
         if name != "Research Agent"
             && name != "Support Agent"
             && let Some(record) = self.store.as_ref().and_then(|store| store.saved_spells().into_iter().find(|record| record.name == name))
         {
             self.detach_spell_history();
-            self.load_graph(record.graph.clone());
+            let releases = self.store.as_ref().map(|store| store.releases_of_record(record.id)).unwrap_or_default();
+            let workspace = StudioWorkspace::of(record.clone(), releases);
+            self.load_graph(workspace.graph.clone());
             if let Some(store) = self.store.as_mut() {
                 store.attach_record(record.id);
             }
+            self.adopt_releases(&workspace);
             self.refresh_saved_potions();
             return;
         }
@@ -1447,6 +1465,8 @@ impl StudioApp {
         if wire_in && kind != SUBGRAPH_KIND {
             self.auto_wire_cauldron_ingredient(&id, &spec);
             self.canvas.toss_count += 1;
+        } else if self.canvas.mode == WorkbenchMode::Cauldron {
+            self.canvas.shelve(&id);
         }
         let source = self
             .canvas
@@ -1528,6 +1548,9 @@ impl StudioApp {
                     })
                     .collect();
                 if removed.is_empty() {
+                    self.canvas.shelve(&id);
+                    self.validation = ValidationState::Unchecked;
+                    self.sync_spell();
                     return;
                 }
                 let bridges = self.bridge_around(&id);
@@ -1538,6 +1561,7 @@ impl StudioApp {
                 self.undo_banner = Some(format!("Set aside {title}"));
             }
             magicklala_canvas::Toss::IntoPot(id) => {
+                self.canvas.unshelve(&id);
                 let stash = self.aside_wires.remove(&id).unwrap_or_default();
                 if let Some(bridges) = self.aside_bridges.remove(&id) {
                     self.drop_bridges(&bridges);
@@ -1967,13 +1991,11 @@ impl StudioApp {
 
     pub fn brew_graph(&self) -> SpellGraph {
         let mut graph = self.spell.clone();
-        if graph.wires.is_empty() {
-            return graph;
-        }
-        let wired = |id: &NodeId| graph.wires.iter().any(|wire| &wire.from_node == id || &wire.to_node == id);
+        let recipe = magicklala_canvas::recipe_nodes(&self.canvas);
         let known = |kind: &str| self.specs.iter().any(|spec| spec.kind == kind);
-        let loose: Vec<NodeId> = graph.nodes.iter().filter(|node| !wired(&node.id) && known(&node.kind)).map(|node| node.id.clone()).collect();
-        graph.nodes.retain(|node| !loose.contains(&node.id));
+        graph.nodes.retain(|node| recipe.contains(&node.id) || !known(&node.kind));
+        let kept: Vec<NodeId> = graph.nodes.iter().map(|node| node.id.clone()).collect();
+        graph.wires.retain(|wire| kept.contains(&wire.from_node) && kept.contains(&wire.to_node));
         graph
     }
 
@@ -2015,7 +2037,8 @@ impl StudioApp {
             .collect();
         self.canvas.set_aside(id);
         let mut bridges = Vec::new();
-        for target in &targets {
+        let straight = sources.len() == 1 && targets.len() == 1;
+        for target in targets.iter().filter(|_| straight) {
             if self.is_fed(&target.node, &target.socket) {
                 continue;
             }
@@ -2151,11 +2174,11 @@ impl StudioApp {
     pub fn is_unchanged_from_live_release(&self) -> bool {
         self.active_release_version.is_some()
             && self.spell.nodes.iter().all(|node| node.kind != SUBGRAPH_KIND)
-            && self.last_published.as_ref().is_none_or(|release| release.graph == self.spell)
+            && self.last_published.as_ref().is_none_or(|release| release.graph == self.brew_graph())
     }
 
     pub fn run_spell(&mut self) -> bool {
-        if self.canvas.nodes.is_empty() || matches!(self.validation, ValidationState::Invalid(_)) {
+        if self.brew_graph().nodes.is_empty() || matches!(self.validation, ValidationState::Invalid(_)) {
             return false;
         }
         let payload = self.run_payload.clone();
@@ -2395,7 +2418,9 @@ impl StudioApp {
 
     pub fn new_empty_spell(&mut self) {
         self.detach_spell_history();
-        self.spell = SpellGraph::new("New Potion");
+        let taken = |name: &str| self.saved_potions.iter().any(|(saved, _)| saved == name);
+        let name = std::iter::once("New Potion".to_owned()).chain((2..).map(|n| format!("New Potion {n}"))).find(|name| !taken(name)).unwrap_or_default();
+        self.spell = SpellGraph::new(&name);
         self.canvas = CanvasState::from_graph(&self.spell, &self.specs);
         self.canvas.light = self.theme == Theme::Light;
         self.prompts.clear();
@@ -2496,10 +2521,9 @@ impl StudioApp {
             UndoEntry::Aside { id, wires, bridges } => {
                 self.drop_bridges(&bridges);
                 self.aside_bridges.remove(&id);
+                self.canvas.unshelve(&id);
                 for (from, to) in &wires {
-                    if !self.is_fed(&to.node, &to.socket) {
-                        let _ = self.canvas.connect_sockets(from, to);
-                    }
+                    let _ = self.canvas.connect_sockets(from, to);
                 }
                 self.aside_wires.remove(&id);
                 self.validation = ValidationState::Unchecked;
@@ -2601,6 +2625,9 @@ impl StudioApp {
     }
 
     pub fn publish(&mut self) -> Result<u32, StudioError> {
+        if self.is_running() {
+            return Err(self.refuse("cannot publish while brewing".to_owned()));
+        }
         self.sync_spell();
         if self.canvas.nodes.is_empty() {
             return Err(self.refuse("cannot publish an empty potion".to_owned()));
@@ -2621,8 +2648,9 @@ impl StudioApp {
             return Err(self.refuse(message));
         }
         self.validation = ValidationState::Valid;
+        let recipe = self.brew_graph();
         let store = self.store.as_mut().ok_or_else(|| StudioError::Store("no studio store".to_owned()))?;
-        let published = store.publish(&self.spell);
+        let published = store.publish(&recipe);
         let release = published.inspect_err(|error| self.store_error = Some(error.to_string()))?;
         self.refresh_releases(&release);
         self.store_error = None;

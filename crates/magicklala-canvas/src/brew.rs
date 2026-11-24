@@ -126,14 +126,20 @@ pub fn recipe_order(state: &CanvasState) -> Vec<NodeId> {
 }
 
 pub fn potion_ends(state: &CanvasState) -> Vec<NodeId> {
-    let outputs: Vec<NodeId> =
-        state.nodes.iter().filter(|card| is_bottle(card) && !state.wires.iter().any(|wire| wire.from_node == card.id)).map(|card| card.id.clone()).collect();
+    let fed = |card: &NodeCardModel| state.wires.is_empty() || state.wires.iter().any(|wire| wire.to_node == card.id);
+    let outputs: Vec<NodeId> = state
+        .nodes
+        .iter()
+        .filter(|card| !state.is_shelved(&card.id) && is_bottle(card) && fed(card) && !state.wires.iter().any(|wire| wire.from_node == card.id))
+        .map(|card| card.id.clone())
+        .collect();
     if !outputs.is_empty() {
         return outputs;
     }
     state
         .nodes
         .iter()
+        .filter(|card| !state.is_shelved(&card.id))
         .filter(|card| state.wires.iter().any(|wire| wire.to_node == card.id && wire.ty.is_flow()))
         .filter(|card| !state.wires.iter().any(|wire| wire.from_node == card.id))
         .map(|card| card.id.clone())
@@ -142,8 +148,9 @@ pub fn potion_ends(state: &CanvasState) -> Vec<NodeId> {
 
 pub fn brewing_nodes(state: &CanvasState) -> HashSet<NodeId> {
     let bottles = potion_ends(state);
+    let open = |id: &NodeId| !state.is_shelved(id);
     if bottles.is_empty() && state.wires.is_empty() {
-        return state.nodes.iter().map(|card| card.id.clone()).collect();
+        return state.nodes.iter().map(|card| card.id.clone()).filter(open).collect();
     }
     if bottles.is_empty() {
         return state
@@ -151,9 +158,33 @@ pub fn brewing_nodes(state: &CanvasState) -> HashSet<NodeId> {
             .iter()
             .filter(|card| state.wires.iter().any(|wire| wire.from_node == card.id || wire.to_node == card.id))
             .map(|card| card.id.clone())
+            .filter(open)
             .collect();
     }
-    upstream_of(state, &bottles)
+    let mut ran: Vec<NodeId> = state
+        .nodes
+        .iter()
+        .filter(|card| card.category.eq_ignore_ascii_case("events") && state.wires.iter().any(|wire| wire.from_node == card.id && wire.ty.is_flow()))
+        .map(|card| card.id.clone())
+        .collect();
+    let mut index = 0;
+    while index < ran.len() {
+        let node = ran[index].clone();
+        for wire in state.wires.iter().filter(|wire| wire.from_node == node && wire.ty.is_flow()) {
+            if !ran.contains(&wire.to_node) {
+                ran.push(wire.to_node.clone());
+            }
+        }
+        index += 1;
+    }
+    ran.extend(bottles);
+    upstream_of(state, &ran).into_iter().filter(open).collect()
+}
+
+pub fn recipe_nodes(state: &CanvasState) -> HashSet<NodeId> {
+    let mut recipe = brewing_nodes(state);
+    recipe.extend(potion_ends(state));
+    recipe
 }
 
 fn feeds_only_one_bottle(state: &CanvasState, id: &NodeId, bottle_count: usize) -> Option<NodeId> {

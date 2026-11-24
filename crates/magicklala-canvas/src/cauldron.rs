@@ -183,8 +183,16 @@ pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32
                     let share = column as f32 / (columns.len().max(2) - 1) as f32;
                     let to = rim_point(plan, (share + offset * 0.035).clamp(0.0, 1.0));
                     let turn = [lane_x, shelf_bottom + gap];
-                    let mut points: Vec<[f32; 2]> = (0..=4).map(|step| [from[0] + (lane_x - from[0]) * step as f32 / 4.0, from[1]]).collect();
-                    points.extend((1..=12).map(|step| [lane_x, from[1] + (turn[1] - from[1]) * step as f32 / 12.0]));
+                    let bend = (8.0 * plan.scale).min((lane_x - from[0]).abs() * 0.8).min((turn[1] - from[1]).abs() * 0.5);
+                    let side = if lane_x >= from[0] { 1.0 } else { -1.0 };
+                    let corner = [lane_x - side * bend, from[1]];
+                    let mut points: Vec<[f32; 2]> = (0..=4).map(|step| [from[0] + (corner[0] - from[0]) * step as f32 / 4.0, from[1]]).collect();
+                    points.extend((1..=6).map(|step| {
+                        let t = step as f32 / 6.0;
+                        let u = 1.0 - t;
+                        [u * u * corner[0] + 2.0 * u * t * lane_x + t * t * lane_x, u * u * from[1] + 2.0 * u * t * from[1] + t * t * (from[1] + bend)]
+                    }));
+                    points.extend((1..=12).map(|step| [lane_x, from[1] + bend + (turn[1] - from[1] - bend) * step as f32 / 12.0]));
                     points.extend((1..=16).map(|step| {
                         let t = step as f32 / 16.0;
                         let c1 = [to[0] + (lane_x - to[0]) * 0.35, turn[1]];

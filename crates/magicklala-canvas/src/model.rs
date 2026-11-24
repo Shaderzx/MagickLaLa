@@ -249,6 +249,7 @@ pub struct CanvasState {
     pub last_brew: Option<RunStatus>,
     pub toss_count: u32,
     pub pot_hover: bool,
+    pub shelved: Vec<NodeId>,
     next_id: u64,
 }
 
@@ -393,6 +394,7 @@ impl CanvasState {
         let id = self.selection.take()?;
         let index = self.nodes.iter().position(|card| card.id == id)?;
         self.wires.retain(|wire| wire.from_node != id && wire.to_node != id);
+        self.unshelve(&id);
         Some(self.nodes.remove(index))
     }
 
@@ -429,6 +431,8 @@ impl CanvasState {
         if exists {
             return Err(ConnectError::Duplicate);
         }
+        self.unshelve(&from.node);
+        self.unshelve(&to.node);
         if !to_ty.is_flow() {
             self.wires.retain(|wire| !(wire.to_node == to.node && wire.to_socket == to.socket));
         }
@@ -494,7 +498,22 @@ impl CanvasState {
         }
     }
 
+    pub fn is_shelved(&self, id: &NodeId) -> bool {
+        self.shelved.contains(id)
+    }
+
+    pub fn shelve(&mut self, id: &NodeId) {
+        if !self.shelved.contains(id) {
+            self.shelved.push(id.clone());
+        }
+    }
+
+    pub fn unshelve(&mut self, id: &NodeId) {
+        self.shelved.retain(|other| other != id);
+    }
+
     pub fn set_aside(&mut self, id: &NodeId) -> usize {
+        self.shelve(id);
         let before = self.wires.len();
         self.wires.retain(|wire| &wire.from_node != id && &wire.to_node != id);
         before - self.wires.len()

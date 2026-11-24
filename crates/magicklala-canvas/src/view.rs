@@ -473,8 +473,10 @@ pub(crate) fn branch_bottle_view<S: 'static>(
 }
 
 pub fn bottle_art_mood(state: &CanvasState, output: &NodeCardModel) -> CauldronMood {
-    let mood = cauldron_mood(state);
-    if mood == CauldronMood::Brewed && !crate::cauldron::bottle_filled(state, output) { CauldronMood::Ready } else { mood }
+    match cauldron_mood(state) {
+        CauldronMood::Brewed | CauldronMood::Simmering if !crate::cauldron::bottle_filled(state, output) => CauldronMood::Ready,
+        mood => mood,
+    }
 }
 
 fn bottle_hex_pill(card: &NodeCardModel, p: &HearthPalette) -> Option<El> {

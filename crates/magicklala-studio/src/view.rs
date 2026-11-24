@@ -642,7 +642,6 @@ fn left_rail(app: &StudioApp, t: &HearthPalette) -> El {
                     .gap(8.0)
                     .child(canvas(empty_bottle_mark(light, 36.0)).size(36.0, 36.0))
                     .child(heading("No matching ingredients", 13.5, 750.0, t.ink))
-                    .child(label("Try another herb, flow, or spirit name.", 11.5, 450.0, t.mute).wrap())
                     .child(button_el("palette-clear-search", "Clear search", ButtonKind::Secondary, 12.0, t, |app| {
                         app.palette_query = TextEdit::new("");
                     }))
@@ -760,7 +759,6 @@ fn left_rail(app: &StudioApp, t: &HearthPalette) -> El {
             } else {
                 format!("{} ingredients · {} in cauldron", app.specs.len(), in_pot_count)
             };
-            let fade_overlay = el().w_full().h(30.0).absolute(0.0, -30.0).gradient(with_alpha(t.shelf, 0.0), t.shelf);
             let scroll_list = col()
                 .key("left-rail-scroll")
                 .w_full()
@@ -777,7 +775,7 @@ fn left_rail(app: &StudioApp, t: &HearthPalette) -> El {
                     .child(el().w_full().h(1.0).fill(t.rule))
                     .child(row().w_full().h(28.0).px(12.0).items_center().justify_between().fill(t.wash_2).child(label(footer_text, 10.5, 550.0, t.ink_2))),
             );
-            let footer_wrap = if query.is_empty() { el().w_full().child(fade_overlay).child(footer) } else { footer };
+            let footer_wrap = footer;
             rail = rail.child(search_wrap).child(scroll_list).child(footer_wrap);
         }
         LeftTab::Agents => {
