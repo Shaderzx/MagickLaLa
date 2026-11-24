@@ -307,7 +307,11 @@ impl CanvasState {
         if twins.len() < 2 {
             return card.title.clone();
         }
-        let short = card.title.split_whitespace().next().unwrap_or(&card.title);
+        let short = match card.title.as_str() {
+            "Send Message" => "Send",
+            "Stream Message" => "Stream",
+            whole => whole,
+        };
         let route =
             self.wires.iter().find(|wire| &wire.to_node == id && wire.ty.is_flow()).map(|wire| wire.from_socket.as_str()).filter(|socket| *socket != "out");
         match route {
@@ -552,7 +556,7 @@ impl CanvasState {
     }
 
     pub fn has_run(&self) -> bool {
-        self.wires.iter().any(|wire| wire.active)
+        self.wires.iter().any(|wire| wire.active) || (self.wires.is_empty() && self.nodes.iter().any(|card| card.status != ExecutionStatus::Idle))
     }
 
     pub fn fit(&mut self, viewport: (f32, f32)) {

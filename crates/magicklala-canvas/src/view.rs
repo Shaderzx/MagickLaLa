@@ -74,7 +74,7 @@ pub fn status_color(status: ExecutionStatus) -> Color {
     let p = HearthPalette::for_theme(true);
     match status {
         ExecutionStatus::Idle => p.mute,
-        ExecutionStatus::Running => p.gold,
+        ExecutionStatus::Running => p.running_mark(),
         ExecutionStatus::Succeeded => p.broth_mid,
         ExecutionStatus::Failed => p.hex,
     }
@@ -161,6 +161,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     pos: [f32; 2],
     dims: [f32; 2],
     aside: bool,
+    mirrored: bool,
     p: &HearthPalette,
     lens: fn(&mut S) -> &mut CanvasState,
     toss: TossHook<S>,
@@ -205,7 +206,13 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         .fill(if hexed { with_alpha(p.hex, 0.14) } else { tone.tint })
         .border(1.3, if hexed { p.hex } else { tone.border })
         .center()
-        .child(canvas(mini_vial_icon(&card.category, state.light, badge * 0.76)).size(badge * 0.76, badge * 0.76).rotate(if aside { 0.0 } else { 0.5 }));
+        .child(canvas(mini_vial_icon(&card.category, state.light, badge * 0.76)).size(badge * 0.76, badge * 0.76).rotate(if aside {
+            0.0
+        } else if mirrored {
+            -0.5
+        } else {
+            0.5
+        }));
 
     let step_badge = step_num.map(|num| {
         row()
@@ -292,7 +299,10 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         None
     };
 
-    let top_row = col().w_full().min_w(0.0).child(text(&card.title).font(TextStyle::new(13.0, 750.0)).color(if dimmed { untaken_title } else { p.ink }).wrap());
+    let top_row = col()
+        .w_full()
+        .min_w(0.0)
+        .child(text(state.display_title(&card.id)).font(TextStyle::new(13.0, 750.0)).color(if dimmed { untaken_title } else { p.ink }).wrap());
 
     let sub_color = if hexed {
         p.hex
@@ -303,23 +313,26 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     };
 
     let kind_line = text(&card.kind).font(TextStyle::new((11.2 / plan.scale).clamp(11.5, 13.0), 500.0).mono()).color(sub_color).truncate();
+    let side_by_side = |words: El, vial: El, gap: f32| {
+        let pair = row().grow(1.0).min_w(0.0).gap(gap).items_center();
+        if mirrored { pair.child(vial).child(words) } else { pair.child(words).child(vial) }
+    };
     let card_body = if dense {
-        row().grow(1.0).min_w(0.0).gap(9.0).items_center().child(col().grow(1.0).min_w(0.0).child(top_row)).child(vial_badge)
+        side_by_side(col().grow(1.0).min_w(0.0).child(top_row), vial_badge, 9.0)
     } else if narrow {
-        col()
-            .grow(1.0)
-            .min_w(0.0)
-            .gap(2.0)
-            .child(row().w_full().gap(6.0).items_center().child(col().grow(1.0).min_w(0.0).child(top_row)).child(vial_badge))
-            .child(kind_line)
+        let words = col().grow(1.0).min_w(0.0).child(top_row);
+        let pair = row().w_full().gap(6.0).items_center();
+        let pair = if mirrored { pair.child(vial_badge).child(words) } else { pair.child(words).child(vial_badge) };
+        col().grow(1.0).min_w(0.0).gap(2.0).child(pair).child(kind_line)
     } else {
-        row().grow(1.0).min_w(0.0).gap(9.0).items_center().child(col().grow(1.0).min_w(0.0).gap(2.0).child(top_row).child(kind_line)).child(vial_badge)
+        side_by_side(col().grow(1.0).min_w(0.0).gap(2.0).child(top_row).child(kind_line), vial_badge, 9.0)
     };
 
     let content = row()
         .key(format!("node-{}-header", card.id.0))
         .size(dims[0], dims[1])
-        .px(9.0)
+        .pl(if step_num.is_some() && !mirrored { 15.0 } else { 9.0 })
+        .pr(if step_num.is_some() && mirrored { 15.0 } else { 9.0 })
         .gap(9.0)
         .radius(24.0)
         .continuous_corners()
@@ -363,7 +376,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
 
     let mut shell = el().key(format!("node-{}", card.id.0)).size(dims[0], dims[1]).absolute(pos[0], pos[1]).child(content);
     if let Some(badge) = step_badge {
-        shell = shell.child(el().absolute(-5.0, -6.0).child(badge));
+        shell = shell.child(el().key(format!("step-badge-{}", card.id.0)).absolute(if mirrored { dims[0] - 11.0 } else { -9.0 }, -9.0).child(badge));
     }
     if let Some(pill) = status_pill {
         shell = shell.child(row().w(dims[0]).px(10.0).justify_end().absolute(0.0, -12.0).child(pill));
@@ -379,6 +392,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     frame: [f32; 3],
     tint: Option<Color>,
     has_run: bool,
+    terse: bool,
     p: &HearthPalette,
     lens: fn(&mut S) -> &mut CanvasState,
 ) -> El {
@@ -463,7 +477,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
             Some(key) => row().key(key).w_full().child(text(title).font(TextStyle::new(12.5, 750.0)).color(title_col).wrap()),
             None => row().w_full().child(text(title).font(TextStyle::new(12.5, 750.0)).color(title_col).wrap()),
         })
-        .child(text(&card.kind).font(TextStyle::new(11.0, 500.0).mono()).color(sub_col).truncate());
+        .children((!terse).then(|| text(&card.kind).font(TextStyle::new(11.0, 500.0).mono()).color(sub_col).truncate()));
     let mut tag_wrap = el().w_full().child(tag_inner).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(pill));
     if let Some(num) = step_num {
         let step_badge = row()
@@ -506,6 +520,8 @@ pub fn grimoire_lanes(state: &CanvasState) -> Vec<(magicklala_graph::WireId, i8)
     lanes
 }
 
+const DETAIL_ZOOM: f32 = 0.75;
+
 fn bottle_hex_pill(card: &NodeCardModel, p: &HearthPalette) -> Option<El> {
     let caption = match card.inputs.iter().find(|socket| socket.flagged) {
         Some(socket) if socket.mistyped => format!("Wrong type \"{}\"", socket.name),
@@ -533,6 +549,7 @@ pub(crate) fn potion_stand_view<S: 'static>(
     frame: [f32; 3],
     tint: Option<Color>,
     mood: CauldronMood,
+    terse: bool,
     p: &HearthPalette,
     lens: fn(&mut S) -> &mut CanvasState,
 ) -> El {
@@ -596,7 +613,7 @@ pub(crate) fn potion_stand_view<S: 'static>(
         .shadow(3.0, 10.0, p.shadow_card)
         .child(header_row)
         .child(text(out_title).font(TextStyle::new(12.0, 600.0)).color(p.ink_2).truncate())
-        .child(text(out_kind).font(TextStyle::new(11.0, 500.0).mono()).color(p.mute).truncate());
+        .children((!terse).then(|| text(out_kind).font(TextStyle::new(11.0, 500.0).mono()).color(p.mute).truncate()));
     if out_brewed {
         let ms_text = match primary_output.and_then(|c| c.duration_ms) {
             Some(0) => "<1ms".to_owned(),
@@ -626,7 +643,8 @@ pub(crate) fn potion_stand_view<S: 'static>(
         tag_card = col().w_full().child(el().w_full().child(tag_card).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(pill)));
     }
 
-    let mut stand = col().key("potion-stand").w(width).gap(4.0).items_center().absolute(pos[0], pos[1]).child(bottle_art).child(tag_card);
+    let stand = col().key("potion-stand").w(width).gap(4.0).items_center().absolute(pos[0], pos[1]);
+    let mut stand = stand.child(bottle_art).child(tag_card);
 
     if let Some(id) = select_id {
         stand = stand.key(format!("node-{}-header", id.0)).on_press(move |s: &mut S| lens(s).select(Some(id.clone())));
@@ -867,7 +885,7 @@ fn socket_row(card: &NodeCardModel, row_index: usize, dimmed: bool, p: &HearthPa
             Some(socket) => (socket.name.as_str(), 500.0, if dimmed { if p.light { hex(0x463D57) } else { hex(0xCFC7E6) } } else { p.ink_2 }),
             None => ("", 450.0, p.mute),
         };
-        text(content).font(TextStyle::new((13.0 * zoom).clamp(11.4, 13.5), weight)).color(color)
+        text(if zoom >= DETAIL_ZOOM { content } else { "" }).font(TextStyle::new((13.0 * zoom).clamp(11.4, 13.5), weight)).color(color)
     };
     let mut r = row()
         .w_full()
@@ -923,7 +941,7 @@ fn grimoire_card_view<S: 'static>(
                 .justify_center()
                 .gap((1.0 * zoom).max(0.5))
                 .child(text(display_title).font(TextStyle::new(title_size, 750.0)).color(title_color).truncate())
-                .child(text(&card.kind).font(TextStyle::new(kind_size, 500.0).mono()).color(kind_color).truncate()),
+                .children((zoom >= DETAIL_ZOOM).then(|| text(&card.kind).font(TextStyle::new(kind_size, 500.0).mono()).color(kind_color).truncate())),
         );
     let perched_badge = status_box(card.status, card.duration_ms, p, zoom).or_else(|| {
         dimmed.then(|| {
@@ -1069,7 +1087,7 @@ fn socket_port<S: 'static>(
         } else if has_run && !wired_active {
             (muted_dot, p.card, r)
         } else if card.status == ExecutionStatus::Running {
-            (p.gold, p.card, r)
+            (p.running_mark(), p.card, r)
         } else {
             (flow_col, p.card, r)
         }

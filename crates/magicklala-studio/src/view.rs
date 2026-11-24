@@ -156,10 +156,10 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<El> {
     let plaque_top = if app.canvas.mode == WorkbenchMode::Cauldron { magicklala_canvas::brew_plan(&app.canvas, view).plaque_top } else { view.1 };
     let y = py.min(view.1 - CONTEXT_MENU_SIZE.1 - 12.0).min(plaque_top - CONTEXT_MENU_SIZE.1 - 8.0).max(12.0);
     let selected_card = app.canvas.selected_card();
-    let selected_title = selected_card.map(|card| card.title.as_str());
+    let selected_title = selected_card.map(|card| app.canvas.display_title(&card.id));
     let quick_add_title = app.specs.iter().find(|spec| spec.kind == QUICK_ADD_KIND).map_or(QUICK_ADD_KIND, |spec| spec.title.as_str());
     let quick_add = format!("Add {quick_add_title}");
-    let title_label = selected_title.unwrap_or("Cauldron");
+    let title_label = selected_title.as_deref().unwrap_or("Cauldron");
     let delete = "Remove";
     let header = row().w_full().h(24.0).px(8.0).items_center().justify_between().child(label(title_label, 10.5, 700.0, t.mute)).child(
         row()
@@ -495,7 +495,7 @@ fn toolbar(app: &StudioApp, t: &HearthPalette) -> El {
 }
 
 fn tab_sized(key: &str, caption: &str, active: bool, compact: bool, light: bool, t: &HearthPalette, action: fn(&mut StudioApp)) -> El {
-    let underline_w = if compact { 44.0 } else { 58.0 };
+    let underline_w = if compact { 40.0 } else { 58.0 };
     let underline = if active {
         row().w_full().h(5.0).items_center().justify_center().child(canvas(sparkle_connector_h(underline_w, 5.0, light)).size(underline_w, 5.0))
     } else {
@@ -516,10 +516,6 @@ fn tab_sized(key: &str, caption: &str, active: bool, compact: bool, light: bool,
         )))
         .child(underline)
         .on_press(action)
-}
-
-fn tab(key: &str, caption: &str, active: bool, light: bool, t: &HearthPalette, action: fn(&mut StudioApp)) -> El {
-    tab_sized(key, caption, active, false, light, t, action)
 }
 
 fn palette_key(kind: &str) -> String {
@@ -567,22 +563,23 @@ fn left_rail(app: &StudioApp, t: &HearthPalette) -> El {
     }
     let mut tabs = row()
         .w_full()
-        .px(12.0)
-        .gap(8.0)
+        .px(if app.compact_toolbar() { 8.0 } else { 12.0 })
+        .gap(if app.compact_toolbar() { 10.0 } else { 8.0 })
         .items_center()
         .fill(t.shelf)
         .border_sides([0.0, 0.0, 1.0, 0.0], t.rule)
-        .child(tab("tab-palette", "Pantry", app.left_tab == LeftTab::Palette, light, t, |app| app.left_tab = LeftTab::Palette))
-        .child(tab("tab-agents", "Potions", app.left_tab == LeftTab::Agents, light, t, |app| {
+        .child(tab_sized("tab-palette", "Pantry", app.left_tab == LeftTab::Palette, app.compact_toolbar(), light, t, |app| app.left_tab = LeftTab::Palette))
+        .child(tab_sized("tab-agents", "Potions", app.left_tab == LeftTab::Agents, app.compact_toolbar(), light, t, |app| {
             app.left_tab = LeftTab::Agents;
         }));
     if app.compact_toolbar() {
-        tabs = tabs.child(el().grow(1.0)).child(button_el("collapse-left-rail", "Hide", ButtonKind::Subtle, 7.0, t, StudioApp::toggle_left_rail));
+        tabs = tabs.child(button_el("collapse-left-rail", "Hide", ButtonKind::Subtle, 7.0, t, StudioApp::toggle_left_rail));
     }
     let query = app.palette_query.text.trim().to_ascii_lowercase();
     let mut rail = col().key("left-rail").w(rail_w).h_full().min_h(0.0).fill(t.shelf).border_sides([0.0, 1.0, 0.0, 0.0], t.rule).child(tabs);
     match app.left_tab {
         LeftTab::Palette => {
+            let pot_plan = magicklala_canvas::brew_plan(&app.canvas, app.canvas_size());
             let filtered: Vec<&NodeSpec> = app
                 .specs
                 .iter()
@@ -670,11 +667,16 @@ fn left_rail(app: &StudioApp, t: &HearthPalette) -> El {
                     entries.into_iter().fold(list.child(heading), |list, spec| {
                         let kind = spec.kind.clone();
                         let drag_kind = spec.kind.clone();
-                        let in_pot = app.canvas.nodes.iter().any(|card| card.kind == spec.kind);
+                        let in_pot = app.canvas.nodes.iter().any(|card| {
+                            card.kind == spec.kind
+                                && !app.canvas.is_shelved(&card.id)
+                                && pot_plan.card(&card.id).is_some_and(|placed| placed.role != magicklala_canvas::BrewRole::Aside)
+                        });
                         let mut right_actions = row().gap(4.0).items_center();
                         if in_pot {
                             right_actions = right_actions.child(
                                 row()
+                                    .key(format!("pantry-in-{}", spec.kind.replace('/', "-")))
                                     .px(5.0)
                                     .py(1.0)
                                     .radius(6.0)
@@ -800,8 +802,11 @@ fn left_rail(app: &StudioApp, t: &HearthPalette) -> El {
 fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     let section_bar = |title: &str| row().w_full().pt(14.0).pb(6.0).child(heading(title, 14.5, 800.0, t.ink));
     let spell_invalid = matches!(app.validation, ValidationState::Invalid(_));
-    let ingr_count = app.canvas.nodes.iter().filter(|card| card.kind != "io/send_message").count();
+    let roles = magicklala_canvas::brew_plan(&app.canvas, app.canvas_size());
+    let ingr_count = roles.with_role(magicklala_canvas::BrewRole::Ingredient).count();
+    let aside_count = roles.with_role(magicklala_canvas::BrewRole::Aside).count();
     let ingr_word = if ingr_count == 1 { "ingredient" } else { "ingredients" };
+    let ingr_word = if aside_count > 0 { format!("{ingr_word} · {aside_count} aside") } else { ingr_word.to_owned() };
     let spells_header = row().w_full().pt(14.0).pb(6.0).items_center().justify_between().child(heading("Potions", 14.5, 800.0, t.ink)).child(button_el(
         "new-spell",
         "+ New",
@@ -983,7 +988,10 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     app.releases.iter().rev().fold(column, |list, release| {
         let is_active = app.active_release_version == Some(release.version);
         let is_pending = app.pending_restore_version == Some(release.version);
-        let parts = release.nodes.saturating_sub(1).max(1);
+        let parts = app.release_graphs.get(&release.version).map_or(release.nodes, |graph| {
+            let canvas = magicklala_canvas::CanvasState::from_graph(graph, &app.specs);
+            magicklala_canvas::brew_plan(&canvas, app.canvas_size()).with_role(magicklala_canvas::BrewRole::Ingredient).count()
+        });
         let p_word = if parts == 1 { "ingredient" } else { "ingredients" };
         let stamp = el().size(28.0, 24.0).radius(8.0).continuous_corners().fill(if is_active { t.primary_bg } else { t.wash }).center().child(figure(
             format!("v{}", release.version),
@@ -1524,7 +1532,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     let editor_height = if has_error { 86.0 } else { prompt_editor_height(app.size) };
     let wired_source = field.and_then(|field| {
         app.canvas.wires.iter().find(|wire| wire.to_node == card.id && wire.to_socket == field).map(|wire| {
-            let title = app.canvas.card(&wire.from_node).map_or_else(|| wire.from_node.0.clone(), |source| source.title.clone());
+            let title = app.canvas.card(&wire.from_node).map_or_else(|| wire.from_node.0.clone(), |source| app.canvas.display_title(&source.id));
             (format!("From {title} · {}", wire.from_socket), wire.id.clone())
         })
     });
@@ -1592,7 +1600,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     if has_error {
         let flagged_socket = card.inputs.iter().find(|socket| socket.flagged).map(|socket| socket.name.clone());
         let headline = match &flagged_socket {
-            Some(socket) => format!("{} needs \"{socket}\"", card.title),
+            Some(socket) => format!("{} needs \"{socket}\"", app.canvas.display_title(&card.id)),
             None => diagnostics.first().cloned().unwrap_or_default(),
         };
         let mend = app.hex_mend_source(&card.id);

@@ -242,7 +242,7 @@ impl HearthPalette {
     }
 
     pub fn running_mark(&self) -> Color {
-        self.gold
+        if self.light { self.simmer_ink() } else { self.gold }
     }
 
     pub fn simmer_ink(&self) -> Color {
@@ -1219,10 +1219,16 @@ pub fn pour_point(from: [f32; 2], to: [f32; 2], arch_lift: f32, t: f32) -> [f32;
 }
 
 fn pour_controls(from: [f32; 2], to: [f32; 2], arch_lift: f32) -> ([f32; 2], [f32; 2]) {
+    if to[0] < from[0] {
+        let flip = |point: [f32; 2]| [2.0 * from[0] - point[0], point[1]];
+        let (c1, c2) = pour_controls(from, flip(to), arch_lift);
+        return (flip(c1), flip(c2));
+    }
     let mid_x = (from[0] + to[0]) * 0.5;
     if arch_lift <= 0.5 && from[1] > to[1] + 24.0 {
         let dx = (to[0] - from[0]).max(40.0);
-        ([from[0] + dx * 0.36, from[1] - 18.0], [to[0] - dx * 0.40, to[1] - 54.0])
+        let rise = (from[1] - to[1]).max(60.0);
+        ([from[0], to[1] - rise * 0.6], [to[0] - dx * 0.05, to[1] - 90.0])
     } else {
         let arch_y = from[1].min(to[1]) - (16.0 + arch_lift).min(96.0);
         ([from[0] + (mid_x - from[0]) * 0.62, arch_y], [to[0] - (to[0] - mid_x) * 0.22, arch_y + 10.0])
@@ -1278,10 +1284,17 @@ pub fn pouring_stream_shape(mut shape: Shape, from: [f32; 2], to: [f32; 2], styl
     fill_star4(shape, spark_pt[0], spark_pt[1] - 8.0, 3.8, 1.2, color)
 }
 
+pub fn ribbon_controls(from: [f32; 2], to: [f32; 2], tapped: bool) -> ([f32; 2], [f32; 2]) {
+    if tapped {
+        return ([from[0] + (to[0] - from[0]) * 0.4, from[1] - 12.0], [to[0], to[1] - 30.0]);
+    }
+    distillation_curve(from, to)
+}
+
 pub fn distillation_curve(from: [f32; 2], to: [f32; 2]) -> ([f32; 2], [f32; 2]) {
     let mid_x = (from[0] + to[0]) * 0.5;
     if to[1] > from[1] + 56.0 {
-        ([from[0] + 24.0, from[1] + 58.0], [mid_x - 16.0, to[1] - 8.0])
+        ([from[0] + 64.0, from[1] - 28.0], [to[0] - (to[0] - mid_x) * 0.2, to[1] - 70.0])
     } else {
         let arch_y = from[1].min(to[1]) - 58.0;
         ([from[0] + (mid_x - from[0]) * 0.42, arch_y], [to[0] - (to[0] - mid_x) * 0.25, arch_y + 10.0])
@@ -1298,6 +1311,7 @@ pub fn distillation_ribbon_shape(
     mut shape: Shape,
     from: [f32; 2],
     to: [f32; 2],
+    tapped: bool,
     mood: CauldronMood,
     light: bool,
     active: bool,
@@ -1305,7 +1319,7 @@ pub fn distillation_ribbon_shape(
     tint: Option<Color>,
 ) -> Shape {
     let p = HearthPalette::for_theme(light);
-    let (c1, c2) = distillation_curve(from, to);
+    let (c1, c2) = ribbon_controls(from, to, tapped);
     if !active {
         let pts = sample_cubic(from, c1, c2, to, 44, 1.0);
         let (muted, dash, gap) = if untaken {

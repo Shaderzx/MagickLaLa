@@ -1,10 +1,10 @@
 use magicklala_graph::NodeId;
-use rune::{Beat, Color, El, LoopSpec, Phase, Sequence, Shape, TextStyle, canvas, el, row, text};
+use rune::{Beat, Color, El, LineCap, LoopSpec, Path, Phase, Sequence, Shape, TextStyle, canvas, el, row, text};
 
 use crate::brew::{BrewCard, BrewPlan, BrewRole, MULTI_BOTTLE_SIZE, SINGLE_BOTTLE_SIZE, brew_plan};
 use crate::hearth::{
-    CauldronMood, HearthPalette, StreamStyle, brew_tint, category_tone, distillation_ribbon_shape, ghost_potion_bottle_shape, hero_cauldron_shape, pour_point,
-    pouring_stream_shape, stream_ink, with_alpha,
+    CauldronMood, HearthPalette, StreamStyle, brew_tint, category_tone, distillation_ribbon_shape, fill_circle, ghost_potion_bottle_shape, hero_cauldron_shape,
+    pour_point, pouring_stream_shape, stream_ink, with_alpha,
 };
 use crate::view::{apothecary_dots, branch_bottle_view, cauldron_mood, ingredient_vial_card, mode_switcher, potion_stand_view};
 use crate::{CanvasState, DragState, ExecutionStatus, NodeCardModel, WireModel};
@@ -28,7 +28,36 @@ fn rim_point(plan: &BrewPlan, share: f32) -> [f32; 2] {
 
 fn spout_point(plan: &BrewPlan) -> [f32; 2] {
     let pot = plan.pot;
-    [pot[0] + pot[2] * 0.76, pot[1] + pot[3] * 0.42]
+    if plan.flank {
+        let (cx, cy, u) = pot_frame(pot);
+        [cx + 94.0 * u, cy + 30.0 * u]
+    } else {
+        [pot[0] + pot[2] * 0.76, pot[1] + pot[3] * 0.42]
+    }
+}
+
+fn pot_frame(pot: [f32; 4]) -> (f32, f32, f32) {
+    (pot[0] + pot[2] * 0.5, pot[1] + pot[3] * 0.56, (pot[2].min(pot[3]) / 240.0).clamp(0.55, 1.35))
+}
+
+fn tap_shape(mut shape: Shape, plan: &BrewPlan, p: &HearthPalette) -> Shape {
+    let (cx, cy, u) = pot_frame(plan.pot);
+    let pipe = Path::new().move_to([cx + 66.0 * u, cy + 30.0 * u]).line_to([cx + 90.0 * u, cy + 30.0 * u]);
+    shape = shape.stroke_path(&pipe, 7.0 * u, LineCap::Round, p.gold);
+    shape = shape.stroke_path(&pipe, 2.4 * u, LineCap::Round, p.gold_hi);
+    shape = fill_circle(shape, cx + 70.0 * u, cy + 30.0 * u, 5.2 * u, p.gold);
+    fill_circle(shape, cx + 93.0 * u, cy + 30.0 * u, 4.4 * u, p.gold_hi)
+}
+
+fn landing(plan: &BrewPlan, placed: &BrewCard, index: usize, spread: f32) -> ([f32; 2], f32) {
+    if !plan.flank {
+        return (rim_point(plan, index as f32 / spread.max(1.0)), (36.0 - index as f32 * 10.0).max(0.0) * plan.scale);
+    }
+    let side: Vec<&BrewCard> = plan.with_role(BrewRole::Ingredient).filter(|other| other.mirrored == placed.mirrored).collect();
+    let rank = side.iter().filter(|other| other.rect[1] < placed.rect[1] - 0.5).count();
+    let depth = rank as f32 / (side.len().max(2) - 1) as f32;
+    let share = if placed.mirrored { 0.58 + 0.42 * depth } else { 0.42 * (1.0 - depth) };
+    (rim_point(plan, share), (1.0 - depth) * 36.0 * plan.scale)
 }
 
 pub fn ribbon_paths(plan: &BrewPlan) -> Vec<Vec<[f32; 2]>> {
@@ -41,7 +70,7 @@ pub fn ribbon_paths(plan: &BrewPlan) -> Vec<Vec<[f32; 2]>> {
         .map(|placed| bottle_neck(placed, multi))
         .chain(ghost)
         .map(|to| {
-            let (c1, c2) = crate::hearth::distillation_curve(spout, to);
+            let (c1, c2) = crate::hearth::ribbon_controls(spout, to, plan.flank);
             (0..=44)
                 .map(|step| {
                     let t = step as f32 / 44.0;
@@ -160,6 +189,10 @@ fn vial_mouth(placed: &BrewCard, plan: &BrewPlan) -> [f32; 2] {
     let narrow = plan.vial[0] < 170.0;
     let badge = if dense || narrow { 30.0 } else { 38.0 };
     let centre_y = if narrow && !dense { placed.rect[1] + ((plan.vial[1] - 46.0) * 0.5 + 15.0) * scale } else { placed.rect[1] + placed.rect[3] * 0.5 };
+    if placed.mirrored {
+        let center = [placed.rect[0] + (9.0 + badge * 0.5) * scale, centre_y];
+        return [center[0] - badge * 0.22 * scale, center[1] - badge * 0.36 * scale];
+    }
     let center = [placed.rect[0] + placed.rect[2] - (9.0 + badge * 0.5) * scale, centre_y];
     [center[0] + badge * 0.22 * scale, center[1] - badge * 0.36 * scale]
 }
@@ -225,8 +258,7 @@ pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32
                     points
                 }
                 None => {
-                    let to = rim_point(plan, index as f32 / spread.max(1.0));
-                    let lift = (36.0 - index as f32 * 10.0).max(0.0) * plan.scale;
+                    let (to, lift) = landing(plan, placed, index, spread);
                     (0..=40).map(|step| pour_point(from, to, lift, step as f32 / 40.0)).collect()
                 }
             };
@@ -259,14 +291,17 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
     let paths = pour_paths(state, plan);
     for (index, placed) in ingredients.iter().enumerate() {
         let Some(card) = state.card(&placed.id) else { continue };
-        let lift = (36.0 - index as f32 * 10.0).max(0.0) * plan.scale;
+        let (to, lift) = landing(plan, placed, index, spread);
         let style = stream_for(state, card, mood, p, lift);
         shape = match (plan.lanes, paths.iter().find(|(id, _)| id == &placed.id)) {
             (Some(_), Some((_, points))) => lane_stream(shape, points, style, p),
-            _ => pouring_stream_shape(shape, vial_mouth(placed, plan), rim_point(plan, index as f32 / spread.max(1.0)), style),
+            _ => pouring_stream_shape(shape, vial_mouth(placed, plan), to, style),
         };
     }
     let spout = spout_point(plan);
+    if plan.flank {
+        shape = tap_shape(shape, plan, p);
+    }
     for placed in &bottles {
         let Some(card) = state.card(&placed.id) else { continue };
         let taken = matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Running);
@@ -276,6 +311,7 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
             shape,
             spout,
             bottle_neck(placed, multi),
+            plan.flank,
             ribbon_mood,
             state.light,
             taken,
@@ -288,6 +324,7 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
             shape,
             spout,
             [ghost[0] + ghost[2] * 0.5, ghost[1] + ghost[3] * 0.15],
+            plan.flank,
             CauldronMood::Empty,
             state.light,
             false,
@@ -601,7 +638,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
             placed.recipe_step
         };
         let origin = card_frame(placed.rect, plan.vial, plan.scale, lifted_offset(state, &placed.id));
-        let vial = ingredient_vial_card(state, card, step, origin, plan.vial, placed.role == BrewRole::Aside, &p, lens, toss, plan.clone());
+        let vial = ingredient_vial_card(state, card, step, origin, plan.vial, placed.role == BrewRole::Aside, placed.mirrored, &p, lens, toss, plan.clone());
         board = board.child(vial.scale(plan.scale));
     }
     for placed in &bottles {
@@ -616,9 +653,9 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         let natural = if multi { MULTI_BOTTLE_SIZE } else { SINGLE_BOTTLE_SIZE };
         let origin = card_frame(placed.rect, natural, plan.scale, [0.0, 0.0]);
         let view = if multi {
-            branch_bottle_view(state, card, step, [0.0, 0.0, natural[0]], bottle_tint(state, &plan, &placed.id), has_run, &p, lens)
+            branch_bottle_view(state, card, step, [0.0, 0.0, natural[0]], bottle_tint(state, &plan, &placed.id), has_run, plan.vial[1] < 50.0, &p, lens)
         } else {
-            potion_stand_view(state, card, step, [0.0, 0.0, natural[0]], potion_tint(state, &plan), mood, &p, lens)
+            potion_stand_view(state, card, step, [0.0, 0.0, natural[0]], potion_tint(state, &plan), mood, plan.vial[1] < 50.0, &p, lens)
         };
         board =
             board.child(el().key(format!("node-{}", placed.id.0)).size(natural[0], natural[1]).absolute(origin[0], origin[1]).child(view).scale(plan.scale));

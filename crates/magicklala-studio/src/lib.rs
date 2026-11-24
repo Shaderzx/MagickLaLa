@@ -966,11 +966,9 @@ impl StudioApp {
         let mut ranked: Vec<&NodeCardModel> = self.canvas.nodes.iter().filter(|other| !downstream.contains(&other.id)).collect();
         ranked.sort_by_key(|other| if other.category == "events" { 0 } else { 1 });
         ranked.into_iter().find_map(|other| {
-            other
-                .outputs
-                .iter()
-                .find(|output| output.ty == socket.ty && !output.ty.is_flow())
-                .map(|output| (SocketRef::new(other.id.clone(), output.name.clone()), format!("Pour {} · {}", other.title, output.name)))
+            other.outputs.iter().find(|output| output.ty == socket.ty && !output.ty.is_flow()).map(|output| {
+                (SocketRef::new(other.id.clone(), output.name.clone()), format!("Pour {} · {}", self.canvas.display_title(&other.id), output.name))
+            })
         })
     }
 
@@ -1072,7 +1070,7 @@ impl StudioApp {
                 cfg.as_object().is_some_and(|map| map.contains_key(name) || map.values().any(|v| v.as_str().is_some_and(|s| s.contains(&template_token))))
             });
             if in_prompt || in_config {
-                return (format!("→ {}", card.title), true);
+                return (format!("→ {}", self.canvas.display_title(&card.id)), true);
             }
         }
         ("Unused".to_owned(), false)
@@ -2151,7 +2149,7 @@ impl StudioApp {
         }
         let validator = SpellValidator::new(self.specs.clone());
         if let Err(errors) = validator.validate(&self.brew_graph()) {
-            let title_of = |id: &NodeId| self.canvas.card(id).map_or_else(|| id.0.clone(), |card| card.title.clone());
+            let title_of = |id: &NodeId| self.canvas.display_title(id);
             return errors.iter().map(|error| HexFinding::from_validation(error, &self.spell, &title_of)).collect();
         }
         if self.spell.subgraphs.is_empty() {
@@ -2219,7 +2217,7 @@ impl StudioApp {
                         node: finding.node.clone(),
                     });
                 }
-                self.canvas.brew_summary = Some(hex_plaque(&findings, &self.canvas.nodes));
+                self.canvas.brew_summary = Some(hex_plaque(&findings, &self.canvas));
                 let errors: Vec<String> = findings.into_iter().map(|finding| finding.message).collect();
                 if self.trace.is_empty() || self.trace.iter().all(|line| line.kind == "RunRejected") {
                     self.trace = rejected;
@@ -2937,8 +2935,8 @@ pub fn palette_categories(specs: &[NodeSpec]) -> Vec<String> {
     found
 }
 
-fn hex_plaque(findings: &[HexFinding], cards: &[NodeCardModel]) -> String {
-    let title_of = |id: &NodeId| cards.iter().find(|card| &card.id == id).map(|card| card.title.clone());
+fn hex_plaque(findings: &[HexFinding], canvas: &CanvasState) -> String {
+    let title_of = |id: &NodeId| canvas.card(id).map(|_| canvas.display_title(id));
     match findings.first() {
         Some(HexFinding { socket: Some(socket), mistyped: true, .. }) => format!("Hexed · wrong type \"{socket}\""),
         Some(HexFinding { socket: Some(socket), .. }) => format!("Hexed · missing \"{socket}\""),
