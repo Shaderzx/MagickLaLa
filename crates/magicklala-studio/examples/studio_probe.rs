@@ -3238,6 +3238,153 @@ fn shelf_keeps(db_path: &Path) -> Result<serde_json::Value, String> {
         "secondRestored": second_restored,
     }))
 }
+fn brew_locks(db_path: &Path) -> Result<serde_json::Value, String> {
+    let mut slow_spell = delay_spell(1_500);
+    slow_spell.nodes.push(NodeInstance {
+        id: NodeId::from("note"),
+        kind: "text/template".to_owned(),
+        position: [280.0, 200.0],
+        config: json!({ "template": "said {{content}}" }),
+    });
+    slow_spell.wires.retain(|wire| wire.id.0 != "w3");
+    slow_spell.wires.push(Wire {
+        id: WireId::from("w4"),
+        from_node: NodeId::from("trigger"),
+        from_socket: "content".to_owned(),
+        to_node: NodeId::from("note"),
+        to_socket: "content".to_owned(),
+    });
+    slow_spell.wires.push(Wire {
+        id: WireId::from("w5"),
+        from_node: NodeId::from("note"),
+        from_socket: "text".to_owned(),
+        to_node: NodeId::from("reply"),
+        to_socket: "content".to_owned(),
+    });
+    let mut app = StudioApp::with_spell(slow_spell, registry_specs());
+    app.run_timeout = Duration::from_secs(600);
+    let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|app, _| app.canvas.select(Some(NodeId::from("note"))));
+    click_at(&mut rt, "run-spell", 0.5)?;
+    rt.update(|app, _| {
+        app.wait_until(SETTLE, delay_started);
+    });
+    let prompt_before = rt.state.prompts.get(&NodeId::from("note")).map(|edit| edit.text.clone());
+    if click_at(&mut rt, "prompt-field", 1.0).is_ok() {
+        rt.ime(rune::Ime::Commit("zz".to_owned()));
+        rt.frame(1.2);
+    }
+    let prompt_after = rt.state.prompts.get(&NodeId::from("note")).map(|edit| edit.text.clone());
+    click_at(&mut rt, "save", 1.4)?;
+    let save_error = rt.state.store_error.clone();
+    rt.update(|app, _| {
+        app.canvas.select(None);
+        app.canvas.context_menu = Some([600.0, 300.0]);
+    });
+    let nodes_before = rt.state.canvas.nodes.len();
+    let _ = click_at(&mut rt, "context-add-ai-generate_text", 1.6);
+    let added = rt.state.canvas.nodes.len() - nodes_before;
+    click_at(&mut rt, "mode-grimoire", 1.8)?;
+    rt.frame(2.0);
+    let position_before = rt.state.canvas.card(&NodeId::from("note")).map(|card| card.position);
+    let _ = drag(&mut rt, "node-note-header", (90.0, 40.0));
+    let position_after = rt.state.canvas.card(&NodeId::from("note")).map(|card| card.position);
+    let wires_before = rt.state.canvas.wires.len();
+    if let (Some(from), Some(to)) = (rt.find("socket-trigger-out-out"), rt.find("socket-note-in-content")) {
+        let _ = drag(&mut rt, "socket-trigger-out-out", (to.0 - from.0, to.1 - from.1));
+    }
+    let wires_after = rt.state.canvas.wires.len();
+    live_finish(&mut rt)?;
+    rt.frame(3.0);
+    let lit_after = rt.state.canvas.has_run();
+
+    let mut hook = runtime_for(example("webhook_router.json")?);
+    hook.frame(1.0);
+    let idle_badges: Vec<String> = ["order_reply", "support_reply", "ignored_reply"]
+        .iter()
+        .flat_map(|id| text_lines_under(&hook, &format!("node-{id}")).into_iter().map(|(line, _)| line))
+        .filter(|line| line.chars().all(|c| c.is_ascii_digit()))
+        .collect();
+    hook.update(|app, _| {
+        if let Some(card) = app.canvas.nodes.iter_mut().find(|card| card.id.0 == "order_reply") {
+            card.status = ExecutionStatus::Running;
+        }
+        app.canvas.running_brew = true;
+    });
+    hook.frame(2.0);
+    let running_lines: Vec<String> = text_lines_under(&hook, "node-order_reply").into_iter().map(|(line, _)| line).collect();
+
+    let config = StudioConfig { db_path: Some(db_path.to_path_buf()), ..StudioConfig::default() };
+    let mut app = StudioApp::open(&config).map_err(|error| error.to_string())?;
+    app.new_empty_spell();
+    app.load_graph(example("webhook_router.json")?);
+    let mut sealed = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    sealed.frame(0.0);
+    click(&mut sealed, "publish")?;
+    sealed.frame(2.0);
+    let sealed_lines: Vec<String> = text_lines_under(&sealed, "node-order_reply").into_iter().map(|(line, _)| line).collect();
+
+    let mut chain = SpellGraph::new("Long Chain");
+    chain.nodes.push(NodeInstance { id: NodeId::from("trigger"), kind: "event/on_message".to_owned(), position: [0.0, 0.0], config: serde_json::Value::Null });
+    for step in 0..11 {
+        chain.nodes.push(NodeInstance {
+            id: NodeId::from(format!("pause_{step}").as_str()),
+            kind: "time/delay".to_owned(),
+            position: [(step as f32 + 1.0) * 260.0, 0.0],
+            config: json!({ "ms": 0 }),
+        });
+    }
+    chain.nodes.push(NodeInstance { id: NodeId::from("reply"), kind: "io/send_message".to_owned(), position: [3120.0, 0.0], config: serde_json::Value::Null });
+    let ids: Vec<String> = chain.nodes.iter().map(|node| node.id.0.clone()).collect();
+    for (index, pair) in ids.windows(2).enumerate() {
+        chain.wires.push(Wire {
+            id: WireId::from(format!("flow_{index}").as_str()),
+            from_node: NodeId::from(pair[0].as_str()),
+            from_socket: "out".to_owned(),
+            to_node: NodeId::from(pair[1].as_str()),
+            to_socket: "in".to_owned(),
+        });
+    }
+    chain.wires.push(Wire {
+        id: WireId::from("words"),
+        from_node: NodeId::from("trigger"),
+        from_socket: "content".to_owned(),
+        to_node: NodeId::from("reply"),
+        to_socket: "content".to_owned(),
+    });
+    let mut logs = Vec::new();
+    for (spell, size) in [(chain.clone(), (960.0_f32, 640.0_f32)), (chain, (1280.0, 800.0)), (dozen_ingredient_spell(), (960.0, 640.0))] {
+        let mut dozen_app = StudioApp::with_spell(spell, registry_specs());
+        dozen_app.size = size;
+        let mut dozen = Runtime::new(dozen_app, studio_view, size, Env::new(true, 1.0));
+        dozen.frame(0.0);
+        click(&mut dozen, "run-spell")?;
+        live_finish(&mut dozen)?;
+        dozen.frame(3.0);
+        let strip = layout_rect(&dozen, "trace-strip").ok_or("no log")?;
+        let lines = text_lines_under(&dozen, "trace-strip");
+        let result_visible =
+            lines.iter().any(|(line, rect)| (line == "Brewed" || line.starts_with("Hexed")) && inside(strip, *rect) && rect[0] + rect[2] <= size.0);
+        let clipped: Vec<String> = lines.iter().filter(|(_, rect)| !inside(strip, *rect)).map(|(line, _)| line.clone()).collect();
+        logs.push(json!({ "width": size.0, "resultVisible": result_visible, "clipped": clipped }));
+    }
+
+    Ok(json!({
+        "midBrew": {
+            "promptUnchanged": prompt_before == prompt_after,
+            "saveError": save_error,
+            "added": added,
+            "moved": position_before != position_after,
+            "wiresAdded": wires_after as i64 - wires_before as i64,
+            "litAfterBrew": lit_after,
+        },
+        "idleBadges": idle_badges,
+        "runningBottle": running_lines,
+        "sealedBottle": sealed_lines,
+        "logs": logs,
+    }))
+}
 fn pull_middle() -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32| NodeInstance {
         id: NodeId::from(id),
@@ -3470,6 +3617,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("one-name") => one_name_per_step(),
         Some("compact-fit") => compact_fit(),
         Some("recipe-mending") => recipe_mending(),
+        Some("brew-locks") => brew_locks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("shelf-keeps") => shelf_keeps(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("fit-and-wording") => fit_and_wording(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-recipe") => one_recipe(Path::new(args.get(1).ok_or("missing database path")?)),

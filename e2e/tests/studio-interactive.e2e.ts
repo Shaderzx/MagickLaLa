@@ -1233,3 +1233,22 @@ test('The shelf is kept and respected: a set-aside step survives save and reopen
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('A brew locks the recipe and the bottles tell the truth: typing, saving, adding, dragging cards and drawing wires all wait until the brew ends and the lit result survives, branch bottles show no step numbers before a brew, a running bottle simmers without a check, a published branch potion shows its sealed version on the bottle, and a thirteen-step brew and a many-issue Check keep every log chip and the result inside the log at 960 and 1280', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-locks-'));
+  try {
+    const report = await studioProbe(['brew-locks', join(dir, 'studio.sqlite')]);
+
+    expect(report.midBrew).toEqual({ promptUnchanged: true, saveError: null, added: 0, moved: false, wiresAdded: 0, litAfterBrew: true });
+    expect(report.idleBadges).toEqual([]);
+    expect(report.runningBottle).toContain('Simmering');
+    expect(report.runningBottle.some((line: string) => /ms$/.test(line))).toBe(false);
+    expect(report.sealedBottle).toContain('v1');
+    for (const log of report.logs) {
+      expect(log.resultVisible).toBe(true);
+      expect(log.clipped).toEqual([]);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
