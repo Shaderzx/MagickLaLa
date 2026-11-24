@@ -346,11 +346,7 @@ fn empty_canvas_overlay(app: &StudioApp, t: &HearthPalette) -> El {
     let card_w = 400.0_f32.min(size.0 - 32.0).max(240.0);
     let x = (pot[0] + pot[2] * 0.5 - card_w * 0.5).min(size.0 - card_w - 16.0).max(16.0);
     let y = (pot[1] + pot[3] + 24.0).min(size.1 - 106.0);
-    col().key("empty-canvas").w(card_w).px(16.0).py(12.0).items_center().gap(8.0).absolute(x, y).child(heading("Start a new potion", 24.0, 800.0, t.ink)).child(
-        row().pt(4.0).child(sized_button("empty-add-trigger", "Add On Message", true, false, 16.0, t, |app| {
-            app.spawn("event/on_message");
-        })),
-    )
+    col().key("empty-canvas").w(card_w).px(16.0).py(12.0).items_center().gap(8.0).absolute(x, y).child(heading("Start a new potion", 24.0, 800.0, t.ink))
 }
 
 fn canvas_with_menu(app: &StudioApp, t: &HearthPalette) -> El {
@@ -380,7 +376,7 @@ fn toolbar(app: &StudioApp, t: &HearthPalette) -> El {
         .gap(3.0)
         .items_center()
         .child(button_el("zoom-out", "−", ButtonKind::Subtle, if compact { 6.0 } else { 8.0 }, t, |app| {
-            app.canvas.zoom_active(1.0 / 1.2, [app.canvas_size().0 / 2.0, app.canvas_size().1 / 2.0]);
+            app.canvas.zoom_active(1.0 / 1.2, [app.canvas_size().0 / 2.0, app.canvas_size().1 / 2.0], app.canvas_size());
         }))
         .child(row().key("zoom-readout").w(readout).justify_center().child(figure(
             format!("{}%", app.canvas.active_camera().zoom_percent()),
@@ -389,7 +385,7 @@ fn toolbar(app: &StudioApp, t: &HearthPalette) -> El {
             t.ink_2,
         )))
         .child(button_el("zoom-in", "+", ButtonKind::Subtle, if compact { 6.0 } else { 8.0 }, t, |app| {
-            app.canvas.zoom_active(1.2, [app.canvas_size().0 / 2.0, app.canvas_size().1 / 2.0]);
+            app.canvas.zoom_active(1.2, [app.canvas_size().0 / 2.0, app.canvas_size().1 / 2.0], app.canvas_size());
         }))
         .child(button_el("zoom-fit", "Fit", ButtonKind::Subtle, if compact { 6.0 } else { 9.0 }, t, StudioApp::fit_view));
     let plan = magicklala_canvas::brew_plan(&app.canvas, app.canvas_size());

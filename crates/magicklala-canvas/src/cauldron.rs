@@ -68,12 +68,16 @@ fn cubic_samples(from: [f32; 2], c1: [f32; 2], c2: [f32; 2], to: [f32; 2], steps
 }
 
 fn lane_route(from: [f32; 2], to: [f32; 2], lane: f32, s: f32) -> Vec<[f32; 2]> {
-    let turn = [lane, to[1] - 10.0 * s];
+    let rising = to[1] - 10.0 * s < from[1];
+    let turn = [lane, if rising { to[1] - 10.0 * s } else { to[1] - 44.0 * s }];
     let bend = ((from[1] - turn[1]).abs() * 0.5).min(48.0 * s);
-    let rise = if turn[1] < from[1] { bend } else { -bend };
-    let mut points = cubic_samples(from, [from[0] + (lane - from[0]) * 0.7, from[1]], [lane, turn[1] + rise], turn, 28);
+    let approach = [lane, if rising { turn[1] + bend } else { turn[1] - bend }];
+    let mut points = cubic_samples(from, [from[0] + (lane - from[0]) * 0.7, from[1]], approach, turn, 28);
     points.pop();
-    points.extend(cubic_samples(turn, [lane, turn[1] - 26.0 * s], [to[0], to[1] - 30.0 * s], to, 16));
+    let heading = [turn[0] - approach[0], turn[1] - approach[1]];
+    let length = heading[0].hypot(heading[1]).max(0.01);
+    let carry = [turn[0] + heading[0] / length * 22.0 * s, turn[1] + heading[1] / length * 22.0 * s];
+    points.extend(cubic_samples(turn, carry, [to[0] - 6.0 * s, to[1] - 26.0 * s], to, 16));
     points
 }
 
@@ -81,11 +85,11 @@ fn over_route(from: [f32; 2], to: [f32; 2], ceiling: f32, climb_x: f32, s: f32) 
     let corner = 22.0 * s;
     let rise = [climb_x.clamp(from[0] + corner, (to[0] - corner * 2.0).max(from[0] + corner)), ceiling];
     let fall = [to[0] - corner, ceiling];
-    let mut points = cubic_samples(from, [rise[0] - corner * 0.4, from[1]], [rise[0] - corner * 0.1, ceiling + (from[1] - ceiling) * 0.35], rise, 14);
+    let mut points = cubic_samples(from, [from[0] + (rise[0] - from[0]) * 0.55, from[1]], [from[0] + (rise[0] - from[0]) * 0.45, ceiling], rise, 18);
     points.pop();
     let run = ((fall[0] - rise[0]).max(0.0) / (6.0 * s)).ceil().max(1.0) as usize;
     points.extend((0..run).map(|step| [rise[0] + (fall[0] - rise[0]) * step as f32 / run as f32, ceiling]));
-    points.extend(cubic_samples(fall, [to[0] - corner * 0.2, ceiling], [to[0], ceiling + (to[1] - ceiling) * 0.4], to, 12));
+    points.extend(cubic_samples(fall, [to[0] - corner * 0.35, ceiling], [to[0], ceiling + (to[1] - ceiling) * 0.45], to, 14));
     points
 }
 
@@ -469,14 +473,15 @@ fn plaque_text(state: &CanvasState, mood: CauldronMood, plan: &BrewPlan) -> Stri
         CauldronMood::Ready if state.last_brew == Some(magicklala_graph::RunStatus::Cancelled) => format!("Cancelled · {ingredients} {word}{aside_part}"),
         CauldronMood::Simmering => format!("Brewing · {ingredients} {word}"),
         CauldronMood::Brewed => {
-            let ms: u64 = state.nodes.iter().filter_map(|card| card.duration_ms).sum();
+            let ms = state.brew_total_ms.unwrap_or_else(|| state.nodes.iter().filter_map(|card| card.duration_ms).sum());
             let time = if ms == 0 { "<1ms".to_owned() } else { format!("{ms}ms") };
             let bottles: Vec<&BrewCard> = plan.with_role(BrewRole::Bottle).collect();
             let filled = bottles.iter().filter(|placed| state.card(&placed.id).is_some_and(|card| card.status == ExecutionStatus::Succeeded)).count();
             match (bottles.len(), filled) {
-                (0 | 1, 0) => format!("Brewed · {time} · bottle empty"),
+                (_, 0) => format!("Brewed · {time} · bottle empty"),
                 (0 | 1, _) => format!("Brewed · {time}"),
-                (count, _) => format!("Brewed · {time} · {filled} of {count} bottles"),
+                (_, 1) => format!("Brewed · {time} · 1 bottle filled"),
+                (_, count) => format!("Brewed · {time} · {count} bottles filled"),
             }
         }
         CauldronMood::Ready => match &state.release_badge {

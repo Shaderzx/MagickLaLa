@@ -2166,7 +2166,7 @@ fn recipe_honesty() -> Result<serde_json::Value, String> {
     let mistyped_report = json!({ "card": texts_under(&mut mistyped, "node-llm"), "plaque": texts_under(&mut mistyped, "cauldron-plaque") });
 
     let mut empty = headless(StudioApp::with_spell(SpellGraph::new("New Potion"), registry_specs()));
-    click(&mut empty, "empty-add-trigger")?;
+    click(&mut empty, "starter-event-on_message")?;
     let first = node_of_kind(&empty.state, "event/on_message").ok_or("no trigger added")?;
     let lone = role_of(&empty.state, &first);
 

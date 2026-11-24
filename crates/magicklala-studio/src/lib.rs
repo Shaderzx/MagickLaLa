@@ -1355,6 +1355,7 @@ impl StudioApp {
         self.run_started = None;
         self.canvas.running_brew = false;
         self.canvas.last_brew = None;
+        self.canvas.brew_total_ms = None;
     }
 
     fn drop_active_run(&mut self) {
@@ -2054,6 +2055,7 @@ impl StudioApp {
         if vars_changed || wires != self.spell.wires || subgraphs != self.spell.subgraphs || unplaced(&nodes) != unplaced(&self.spell.nodes) {
             self.canvas.clear_run_marks();
             self.canvas.last_brew = None;
+            self.canvas.brew_total_ms = None;
         }
         self.spell.nodes = nodes;
         self.spell.wires = wires;
@@ -2373,6 +2375,7 @@ impl StudioApp {
                 self.active = Some(active);
                 self.canvas.running_brew = true;
                 self.canvas.last_brew = None;
+                self.canvas.brew_total_ms = None;
                 true
             }
             Err(error) => {
@@ -2518,6 +2521,7 @@ impl StudioApp {
             RunOutcome::Finished(status) => Some(status),
             RunOutcome::Invalid => None,
         };
+        self.canvas.brew_total_ms = self.trace.last().map(|line| line.at_ms);
         if reply_to_chat {
             self.chat.push(ChatMessage { from_user: false, text: report.chat_reply(self.runs) });
         }

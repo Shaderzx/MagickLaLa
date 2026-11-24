@@ -1255,7 +1255,7 @@ test('Set-aside steps come back exactly as they left: the shelf survives a resta
     await rm(dir, { recursive: true, force: true });
   }
 });
-test('The cauldron draws only what is true: every potion leaves through the brass tap, no bottle ribbon runs behind a card or turns sharply, the plaque shows the brew total, zooming out stops while text stays readable, a routed brew reads 1 bottle filled, no legend chip explains the drawing, the set-aside shelf is a drawn plank with no caption, the plaque never covers a card or the shelf when zoomed out, a dozen ingredients keep both shelves after Check and Brew, Brew is disabled when no trigger is in the recipe, an all-shelved pot goes cold, and the potion stand carries no Test pill', { timeout: 900_000 }, async () => {
+test('The cauldron draws only what is true: potions leave through the tap, ribbons never cross cards or turn sharply, the plaque shows the brew total, zooming out stops while text stays readable, a routed brew reads 1 bottle filled, no legend chips, the shelf is a captionless plank, the plaque clears cards and shelf, a dozen keep both shelves after Check and Brew, Brew is disabled without a recipe trigger, an all-shelved pot goes cold, and the stand has no Test pill', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['cauldron-truths']);
 
   expect(report.offTap).toEqual([]);

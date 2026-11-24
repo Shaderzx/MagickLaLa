@@ -7,6 +7,7 @@ pub const CARD_HEADER: f32 = 44.0;
 pub const SOCKET_ROW: f32 = 22.0;
 pub const SOCKET_HIT_RADIUS: f32 = 14.0;
 const BODY_TOP: f32 = 6.0;
+const BREW_SCALE_FLOOR: f32 = 0.6;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SocketModel {
@@ -247,6 +248,7 @@ pub struct CanvasState {
     pub invalid_brew: bool,
     pub running_brew: bool,
     pub last_brew: Option<RunStatus>,
+    pub brew_total_ms: Option<u64>,
     pub toss_count: u32,
     pub pot_hover: bool,
     pub shelved: Vec<NodeId>,
@@ -544,9 +546,12 @@ impl CanvasState {
         }
     }
 
-    pub fn zoom_active(&mut self, factor: f32, pivot: [f32; 2]) {
+    pub fn zoom_active(&mut self, factor: f32, pivot: [f32; 2], viewport: (f32, f32)) {
         match self.mode {
-            WorkbenchMode::Cauldron => self.brew_camera.zoom_about_origin(factor),
+            WorkbenchMode::Cauldron => {
+                let fit = crate::brew::brew_plan(self, viewport).scale / self.brew_camera.zoom.max(0.01);
+                self.brew_camera.zoom_about_origin_above(factor, (BREW_SCALE_FLOOR / fit.max(0.01)).min(1.0));
+            }
             WorkbenchMode::Grimoire => self.camera.zoom_by(factor, pivot),
         }
     }
