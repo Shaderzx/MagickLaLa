@@ -631,6 +631,8 @@ pub fn editable_field(kind: &str) -> Option<&'static str> {
     match kind {
         "text/template" => Some("template"),
         SUBGRAPH_KIND => Some(SUBGRAPH_SPELL_FIELD),
+        "var/get" | "var/set" | "var/reset" => Some("name"),
+        "ai/embedding" => Some("text"),
         kind if kind.starts_with("code/") => Some("script"),
         kind if kind.starts_with("ai/") => Some("prompt"),
         _ => None,
@@ -1032,10 +1034,16 @@ impl StudioApp {
             }
             cursor += 1;
         }
-        let mut ranked: Vec<&NodeCardModel> = self.canvas.nodes.iter().filter(|other| !downstream.contains(&other.id)).collect();
+        let route = self.flow_ancestors(card_id);
+        let mut ranked: Vec<&NodeCardModel> = self
+            .canvas
+            .nodes
+            .iter()
+            .filter(|other| !downstream.contains(&other.id) && !self.canvas.is_shelved(&other.id) && self.runs_on(&other.id, &route))
+            .collect();
         ranked.sort_by_key(|other| if other.category == "events" { 0 } else { 1 });
         ranked.into_iter().find_map(|other| {
-            other.outputs.iter().find(|output| output.ty == socket.ty && !output.ty.is_flow()).map(|output| {
+            other.outputs.iter().find(|output| !output.ty.is_flow() && socket.ty.accepts(output.ty)).map(|output| {
                 (SocketRef::new(other.id.clone(), output.name.clone()), format!("Pour {} · {}", self.canvas.display_title(&other.id), output.name))
             })
         })
@@ -1630,6 +1638,11 @@ impl StudioApp {
         let center = self.canvas.camera.screen_to_world(screen);
         let id = self.canvas.add_node_from_spec(&spec, center);
         self.track_config(id.clone(), kind, serde_json::Value::Null);
+        if editable_field(kind) == Some("name")
+            && let Some(first) = self.spell.variables.first()
+        {
+            self.prompts.insert(id.clone(), TextEdit::new(first.name.clone()));
+        }
         if wire_in && kind != SUBGRAPH_KIND {
             self.auto_wire_cauldron_ingredient(&id, &spec);
             self.canvas.toss_count += 1;
@@ -1722,8 +1735,11 @@ impl StudioApp {
                     .filter(|pair| !shortcuts.contains(pair))
                     .collect();
                 if removed.is_empty() {
+                    let title = self.canvas.display_title(&id);
                     self.canvas.set_aside(&id);
                     self.rebuild_bridges();
+                    self.undo_stack.push(UndoEntry::Aside { id, wires: Vec::new(), bridges: Vec::new() });
+                    self.undo_banner = Some(format!("Set aside {title}"));
                     self.validation = ValidationState::Unchecked;
                     self.sync_spell();
                     return;
@@ -1797,11 +1813,18 @@ impl StudioApp {
     }
 
     fn runs_on(&self, node: &NodeId, route: &std::collections::HashSet<NodeId>) -> bool {
+        self.runs_on_seen(node, route, &mut std::collections::HashSet::new())
+    }
+
+    fn runs_on_seen(&self, node: &NodeId, route: &std::collections::HashSet<NodeId>, seen: &mut std::collections::HashSet<NodeId>) -> bool {
         if route.contains(node) {
             return true;
         }
+        if !seen.insert(node.clone()) {
+            return false;
+        }
         let flowless = self.canvas.card(node).is_some_and(|card| card.inputs.iter().chain(card.outputs.iter()).all(|socket| !socket.ty.is_flow()));
-        flowless && self.canvas.wires.iter().filter(|wire| &wire.to_node == node).all(|wire| self.runs_on(&wire.from_node, route))
+        flowless && self.canvas.wires.iter().filter(|wire| &wire.to_node == node).all(|wire| self.runs_on_seen(&wire.from_node, route, seen))
     }
 
     fn downstream_of(&self, id: &NodeId) -> std::collections::HashSet<NodeId> {
@@ -1885,6 +1908,7 @@ impl StudioApp {
                 let mut wide = spec.clone();
                 wide.inputs[open].name = "content".to_owned();
                 wide.inputs[open].label = "content".to_owned();
+                wide.inputs[open].required = true;
                 if let Some(card) = self.canvas.nodes.iter_mut().find(|card| &card.id == id) {
                     card.ensure_socket("content", wide.inputs[open].ty, false);
                 }
@@ -2083,7 +2107,24 @@ impl StudioApp {
     }
 
     pub fn node_config(&self, id: &NodeId, kind: &str) -> serde_json::Value {
-        let config = self.prompted_config(id, kind);
+        let mut config = self.prompted_config(id, kind);
+        if kind == "code/rhai_script" && config.get("inputs").is_none() {
+            let fed: Vec<serde_json::Value> = self
+                .canvas
+                .wires
+                .iter()
+                .filter(|wire| &wire.to_node == id && !wire.ty.is_flow())
+                .map(|wire| serde_json::Value::String(wire.to_socket.clone()))
+                .collect();
+            if !fed.is_empty() {
+                if !config.is_object() {
+                    config = json!({});
+                }
+                if let Some(map) = config.as_object_mut() {
+                    map.insert("inputs".to_owned(), serde_json::Value::Array(fed));
+                }
+            }
+        }
         match self.versions.get(id).filter(|_| kind == SUBGRAPH_KIND) {
             Some(edit) => with_release_version(config, &edit.text),
             None => config,
@@ -2094,7 +2135,10 @@ impl StudioApp {
         let mut config = self.configs.get(id).cloned().unwrap_or(serde_json::Value::Null);
         let (Some(field), Some(edit)) = (editable_field(kind), self.prompts.get(id)) else { return config };
         let present = config.get(field).is_some();
-        if !present && edit.text.is_empty() {
+        if edit.text.trim().is_empty() {
+            if let Some(map) = config.as_object_mut().filter(|_| present) {
+                map.remove(field);
+            }
             return config;
         }
         if present
@@ -2138,6 +2182,25 @@ impl StudioApp {
         if self.aside_wires.keys().chain(self.aside_bridges.keys()).chain(self.aside_refused.keys()).any(|id| !self.canvas.is_shelved(id)) {
             self.rebuild_bridges();
         }
+        let pulled: Vec<(NodeId, (SocketRef, SocketRef))> = self
+            .aside_bridges
+            .iter()
+            .flat_map(|(id, bridges)| bridges.iter().map(move |bridge| (id.clone(), bridge.clone())))
+            .filter(|(_, (from, to))| {
+                !self
+                    .canvas
+                    .wires
+                    .iter()
+                    .any(|wire| wire.from_node == from.node && wire.from_socket == from.socket && wire.to_node == to.node && wire.to_socket == to.socket)
+            })
+            .collect();
+        for (id, bridge) in pulled {
+            if let Some(bridges) = self.aside_bridges.get_mut(&id) {
+                bridges.retain(|kept| kept != &bridge);
+            }
+            self.aside_refused.entry(id).or_default().push(bridge);
+        }
+        self.aside_bridges.retain(|_, bridges| !bridges.is_empty());
         let mut vars_changed = false;
         for (idx, var) in self.spell.variables.iter_mut().enumerate() {
             if let Some(edit) = self.var_name_edits.get(idx) {
@@ -2193,6 +2256,9 @@ impl StudioApp {
             self.canvas.validated = false;
             self.hex_findings.clear();
             self.trace.retain(|line| line.kind != "RunRejected");
+            if !self.trace.is_empty() {
+                self.trace_stale = true;
+            }
         }
         self.spell.nodes = nodes;
         self.spell.wires = wires;
@@ -2464,6 +2530,24 @@ impl StudioApp {
             .collect();
         if !version_findings.is_empty() {
             return version_findings;
+        }
+        let field_findings: Vec<HexFinding> = self
+            .brew_graph()
+            .nodes
+            .iter()
+            .filter(|node| node.kind != SUBGRAPH_KIND)
+            .filter_map(|node| {
+                let key = editable_field(&node.kind)?;
+                let field = self.specs.iter().find(|spec| spec.kind == node.kind)?.config.iter().find(|field| field.key == key && field.required)?;
+                let blank = node.config.get(key).is_none_or(|value| value.is_null() || value.as_str().is_some_and(|text| text.trim().is_empty()));
+                blank.then(|| {
+                    let readable = format!("{}: needs a {}", self.canvas.display_title(&node.id), field.label.to_lowercase());
+                    HexFinding { node: Some(node.id.clone()), socket: None, readable: readable.clone(), message: readable, mistyped: false }
+                })
+            })
+            .collect();
+        if !field_findings.is_empty() {
+            return field_findings;
         }
         let validator = SpellValidator::new(self.specs.clone());
         if let Err(errors) = validator.validate(&self.brew_graph()) {
@@ -3325,7 +3409,7 @@ fn default_prompt(kind: &str) -> String {
         "ai/generate_text" => "You are a helpful agent.\n\nMemory:\n{{memory}}\n\nKnowledge:\n{{knowledge}}\n\nUser: {{content}}".to_owned(),
         "memory/search" => "Recall the 5 most relevant memories for {{content}}".to_owned(),
         "knowledge/search" => "Search the knowledge base for {{content}}".to_owned(),
-        "code/rhai_script" => "let reply = input.content;\nreply.to_upper()".to_owned(),
+        "code/rhai_script" => "content.to_upper()".to_owned(),
         "text/template" => "{{content}}".to_owned(),
         _ => String::new(),
     }
@@ -3365,7 +3449,7 @@ fn demo_spell() -> SpellGraph {
         |id: &str, kind: &str, position: [f32; 2], config: serde_json::Value| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position, config };
     spell.nodes = vec![
         place("trigger", "event/on_message", [0.0, 108.0], serde_json::Value::Null),
-        place("recall", "memory/search", [228.0, 12.0], json!({ "max_memories": 5 })),
+        place("recall", "memory/search", [228.0, 12.0], serde_json::Value::Null),
         place("search", "knowledge/search", [228.0, 208.0], serde_json::Value::Null),
         place(
             "llm",
@@ -3373,7 +3457,7 @@ fn demo_spell() -> SpellGraph {
             [468.0, 86.0],
             json!({ "provider": "openai", "model": "gpt-4o-mini", "temperature": 0.4, "prompt": default_prompt("ai/generate_text") }),
         ),
-        place("reply", "io/send_message", [692.0, 128.0], json!({ "agent_name": "Support Agent" })),
+        place("reply", "io/send_message", [692.0, 128.0], serde_json::Value::Null),
     ];
     let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
         id: WireId::from(id),

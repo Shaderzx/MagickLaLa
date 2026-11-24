@@ -191,6 +191,12 @@ pub enum DragState {
         anchor: [f32; 2],
         cursor: [f32; 2],
     },
+    PullingWire {
+        held: WireModel,
+        base: [f32; 2],
+        cursor: [f32; 2],
+        detached: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

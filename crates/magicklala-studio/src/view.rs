@@ -1976,6 +1976,8 @@ fn editor_caption(field: &str) -> &'static str {
     match field {
         "script" => "Script",
         "template" => "Template",
+        "name" => "Variable",
+        "text" => "Text",
         SUBGRAPH_SPELL_FIELD => "Spell ID",
         _ => "Prompt",
     }
@@ -2228,6 +2230,33 @@ fn trace_display_kind(kind: &str) -> &str {
     }
 }
 
+fn undo_pill(app: &StudioApp, t: &HearthPalette) -> Option<El> {
+    let undo_msg = app.undo_banner.as_ref()?;
+    Some(
+        row()
+            .key("undo-banner")
+            .gap(7.0)
+            .px(9.0)
+            .py(3.0)
+            .radius(9.0)
+            .items_center()
+            .min_w(0.0)
+            .fill(t.card)
+            .border(1.0, t.rule_2)
+            .child(label(undo_msg, 11.2, 600.0, t.ink).truncate())
+            .child(
+                row()
+                    .key("undo-action")
+                    .px(7.0)
+                    .py(1.5)
+                    .radius(6.5)
+                    .fill(t.primary_bg)
+                    .child(label("Undo", 10.5, 700.0, t.primary_ink))
+                    .on_press(StudioApp::undo),
+            ),
+    )
+}
+
 fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
     let light = app.theme == Theme::Light;
     let idle = app.trace.is_empty() && !app.is_running();
@@ -2253,29 +2282,8 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
             .child(canvas(brand_cauldron_mark(light)).key("trace-bobbin").size(34.0, 28.0))
             .child(heading("Cauldron Log", 13.0, 800.0, t.ink))
             .child(label(run_hint, 12.0, 450.0, t.mute));
-        if let Some(undo_msg) = &app.undo_banner {
-            bar = bar.child(
-                row()
-                    .key("undo-banner")
-                    .gap(7.0)
-                    .px(9.0)
-                    .py(3.0)
-                    .radius(9.0)
-                    .items_center()
-                    .fill(t.card)
-                    .border(1.0, t.rule_2)
-                    .child(label(undo_msg, 11.2, 600.0, t.ink))
-                    .child(
-                        row()
-                            .key("undo-action")
-                            .px(7.0)
-                            .py(1.5)
-                            .radius(6.5)
-                            .fill(t.primary_bg)
-                            .child(label("Undo", 10.5, 700.0, t.primary_ink))
-                            .on_press(StudioApp::undo),
-                    ),
-            );
+        if let Some(pill) = undo_pill(app, t) {
+            bar = bar.child(pill);
         }
         if let Some(badge) = status_badge(app, t) {
             bar = bar.child(el().grow(1.0).min_w(0.0)).child(badge);
@@ -2334,6 +2342,9 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
                 .child(chevron)
                 .on_press(|app: &mut StudioApp| app.trace_expanded = !app.trace_expanded),
         );
+    }
+    if let Some(pill) = undo_pill(app, t).filter(|_| !app.is_running()) {
+        header = header.child(pill);
     }
     if let Some(badge) = status_badge(app, t) {
         header = header.child(el().grow(1.0).min_w(0.0)).child(badge);
@@ -2505,6 +2516,7 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
 
 fn log_result(app: &StudioApp, t: &HearthPalette) -> Option<(El, f32)> {
     if app.trace_stale {
+        let checked = matches!(app.validation, ValidationState::Valid);
         let ink = if t.light { t.broth_deep } else { t.broth_foam };
         let chip = row()
             .key("log-result")
@@ -2516,8 +2528,8 @@ fn log_result(app: &StudioApp, t: &HearthPalette) -> Option<(El, f32)> {
             .items_center()
             .fill(t.card)
             .border(1.0, t.rule_2)
-            .child(el().size(7.0, 7.0).radius(3.5).fill(t.broth_mid))
-            .child(label("Checked", 11.5, 750.0, ink));
+            .child(el().size(7.0, 7.0).radius(3.5).fill(if checked { t.broth_mid } else { t.mute }))
+            .child(label(if checked { "Checked" } else { "Edited" }, 11.5, 750.0, if checked { ink } else { t.ink_2 }));
         return Some((chip, 90.0));
     }
     let last = app.trace.iter().rev().find(|line| matches!(line.kind, "RunFinished" | "RunCancelled" | "RunTimedOut"))?;

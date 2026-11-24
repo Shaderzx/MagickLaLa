@@ -5147,7 +5147,12 @@ fn words_of(rt: &Runtime<StudioApp>, key: &str) -> String {
     text_lines_under(rt, key).into_iter().map(|(line, _)| line).collect::<Vec<_>>().join(" ")
 }
 fn workbench_truths(db_path: &Path) -> Result<serde_json::Value, String> {
-    let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position: [x * 260.0, 0.0], config };
+    let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
+        id: NodeId::from(id),
+        kind: kind.to_owned(),
+        position: [x * 260.0, 0.0],
+        config,
+    };
     let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
         id: WireId::from(id),
         from_node: NodeId::from(from.0),
@@ -5171,7 +5176,8 @@ fn workbench_truths(db_path: &Path) -> Result<serde_json::Value, String> {
     let _ = click(&mut undoing, "undo-action");
     let echo_back = !undoing.state.canvas.is_shelved(&NodeId::from("echo"));
     let mut lone_aside = SpellGraph::new("Loner");
-    lone_aside.nodes = vec![place("trigger", "event/on_message", 0.0, serde_json::Value::Null), place("note", "text/template", 1.0, json!({ "template": "x" }))];
+    lone_aside.nodes =
+        vec![place("trigger", "event/on_message", 0.0, serde_json::Value::Null), place("note", "text/template", 1.0, json!({ "template": "x" }))];
     let mut loner = runtime_for(lone_aside);
     loner.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("note"))));
     let lone_undo = !loner.state.undo_stack.is_empty();
@@ -5183,13 +5189,15 @@ fn workbench_truths(db_path: &Path) -> Result<serde_json::Value, String> {
         .nodes
         .iter()
         .filter_map(|node| node.config.as_object().map(|map| (node.kind.clone(), map.keys().cloned().collect::<Vec<_>>())))
-        .flat_map(|(kind, keys)| keys.into_iter().filter(move |key| (kind == "memory/search" && key == "max_memories") || (kind == "io/send_message" && key == "agent_name")))
+        .flat_map(|(kind, keys)| {
+            keys.into_iter().filter(move |key| (kind == "memory/search" && key == "max_memories") || (kind == "io/send_message" && key == "agent_name"))
+        })
         .collect();
 
     let mut vars = runtime_for(tasting_spell());
     vars.update(|app, _| app.add_variable());
     let first_var = vars.state.spell.variables.first().map(|variable| variable.name.clone()).unwrap_or_default();
-    let getter = spawned(&mut vars, "var/get").ok_or("no var/get")?;
+    let getter = spawned(&mut vars, "var/set").ok_or("no var/set")?;
     let seeded = vars.state.spell.node(&getter).and_then(|node| node.config.get("name").and_then(serde_json::Value::as_str).map(str::to_owned));
     let picked = getter.clone();
     vars.update(move |app, _| {
@@ -5291,7 +5299,10 @@ fn workbench_truths(db_path: &Path) -> Result<serde_json::Value, String> {
     loops.wires = vec![wire("l1", ("left", "text"), ("right", "content")), wire("l2", ("right", "text"), ("left", "content"))];
     let mut looped = runtime_for(loops);
     let loop_bottle = spawned(&mut looped, "io/send_message");
-    let loop_role = loop_bottle.and_then(|id| role_of(&looped.state, &id.0));
+    let loop_role = loop_bottle.and_then(|id| {
+        let source = looped.state.canvas.wires.iter().find(|wire| wire.to_node == id && wire.to_socket == "content").map(|wire| wire.from_node.0.clone());
+        role_of(&looped.state, &id.0).map(|role| json!({ "role": role, "wordsFrom": source }))
+    });
 
     let mut stale = runtime_for(tasting_spell());
     run_once(&mut stale)?;

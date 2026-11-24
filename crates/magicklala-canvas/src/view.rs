@@ -538,6 +538,7 @@ pub fn grimoire_lanes(state: &CanvasState) -> Vec<(magicklala_graph::WireId, i8)
     lanes
 }
 
+const PULL_SLOP: f32 = 4.0;
 pub(crate) const DETAIL_ZOOM: f32 = 0.6;
 const KIND_ZOOM: f32 = DETAIL_ZOOM;
 
@@ -791,6 +792,12 @@ fn wire_shape(state: &CanvasState) -> Shape {
             let from = state.camera.world_to_screen(*anchor);
             let to = state.camera.world_to_screen(*cursor);
             grimoire_wire_shape(shape, from, to, WireStyle { zoom, is_flow: ty.is_flow(), active: true, untaken: false, light: state.light, lane: 0 })
+        }
+        DragState::PullingWire { held, cursor, detached: true, .. } => {
+            let anchor = state.card(&held.from_node).and_then(|card| card.socket_world(&held.from_socket, true)).map_or(held.from, |(point, _)| point);
+            let from = state.camera.world_to_screen(anchor);
+            let to = state.camera.world_to_screen(*cursor);
+            grimoire_wire_shape(shape, from, to, WireStyle { zoom, is_flow: held.ty.is_flow(), active: true, untaken: false, light: state.light, lane: 0 })
         }
         _ => shape,
     }
@@ -1100,24 +1107,31 @@ fn socket_port<S: 'static>(
             match drag.phase {
                 Phase::Down => {
                     let Some(held) = canvas.wires.iter().find(|wire| wire.to_node == into.node && wire.to_socket == into.socket).cloned() else { return };
-                    canvas.wires.retain(|wire| wire.id != held.id);
-                    let from = SocketRef::new(held.from_node.clone(), held.from_socket.clone());
-                    let anchor = canvas.card(&from.node).and_then(|card| card.socket_world(&from.socket, true)).map_or(held.from, |(point, _)| point);
-                    let cursor = canvas.card(&into.node).and_then(|card| card.socket_world(&into.socket, false)).map_or(anchor, |(point, _)| point);
-                    canvas.drag = DragState::ConnectingWire { from, ty: held.ty, anchor: cursor, cursor };
+                    let base = canvas.card(&into.node).and_then(|card| card.socket_world(&into.socket, false)).map_or(held.to, |(point, _)| point);
+                    canvas.drag = DragState::PullingWire { held, base, cursor: base, detached: false };
                 }
                 Phase::Move => {
                     let zoom = canvas.camera.zoom;
-                    if let DragState::ConnectingWire { anchor, cursor, .. } = &mut canvas.drag {
-                        *cursor = [anchor[0] + drag.dx / zoom, anchor[1] + drag.dy / zoom];
+                    let mut lifted = None;
+                    if let DragState::PullingWire { held, base, cursor, detached } = &mut canvas.drag {
+                        *cursor = [base[0] + drag.dx / zoom, base[1] + drag.dy / zoom];
+                        if !*detached && drag.dx.hypot(drag.dy) >= PULL_SLOP {
+                            *detached = true;
+                            lifted = Some(held.id.clone());
+                        }
+                    }
+                    if let Some(id) = lifted {
+                        canvas.wires.retain(|wire| wire.id != id);
                     }
                 }
                 _ => {
-                    if let DragState::ConnectingWire { from, cursor, .. } = canvas.drag.clone()
-                        && !drag.cancelled()
-                        && let Some(target) = canvas.input_socket_at(cursor)
-                    {
-                        canvas.last_connect_error = canvas.connect_sockets(&from, &target).err();
+                    if let DragState::PullingWire { held, cursor, detached: true, .. } = canvas.drag.clone() {
+                        let from = SocketRef::new(held.from_node.clone(), held.from_socket.clone());
+                        if drag.cancelled() {
+                            canvas.wires.push(held);
+                        } else if let Some(target) = canvas.input_socket_at(cursor) {
+                            canvas.last_connect_error = canvas.connect_sockets(&from, &target).err();
+                        }
                     }
                     canvas.drag = DragState::Idle;
                 }
