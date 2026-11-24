@@ -1403,6 +1403,28 @@ test('Studio keeps its promises: a prompt typed over a shelf shortcut stays type
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});test('What you see is what runs: a bottle added to the router stays out of routes it cannot feed, a child potion with a spare reply set aside passes its caller Check, undoing a deleted trigger keeps its place, undo keeps a refused shortcut refused, Check after a brew replaces the old result, Tasting never fires a webhook, a reply with no trigger waits aside, an unpinned sub-spell caller stays live after Save, undo never doubles a socket, and timer and variable triggers brew with sample words', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-runs-'));
+  try {
+    const report = await studioProbe(['true-runs', join(dir, 'studio.sqlite')]);
+
+    expect(report.addedBottle.failed).toEqual([]);
+    expect(report.addedBottle.status).toBe('Succeeded');
+    expect(report.spareChild).toBe('valid');
+    expect(report.undoTrigger).toEqual({ sameOrder: true, live: 1 });
+    expect(report.undoRefusalWired).toBe(false);
+    expect(report.checkAfter.staleLogSaysBrewed).toBe(false);
+    expect(report.checkAfter.staleLogSaysHexed).toBe(true);
+    expect(report.checkAfter.failedPill).not.toContain('Failed');
+    expect(report.checkAfter.failedPlaque).not.toContain('Failed');
+    expect(report.hookChat).toBe(0);
+    expect(report.loneReply).toBe('Aside');
+    expect(report.unpinnedSeal).toEqual({ afterSave: 1, releases: [1, 2] });
+    expect(report.replyContentWires).toBe(1);
+    expect(report.samples).toEqual({ tickEmpty: false, changeEmpty: false });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });test('A brew locks the recipe and the bottles tell the truth: typing, saving, adding, dragging cards and drawing wires all wait until the brew ends and the lit result survives, branch bottles show no step numbers before a brew, a running bottle simmers without a check, a published branch potion shows its sealed version on the bottle, and thirteen-step and thirty-eight-step brews and a many-issue Check keep every log chip and the result inside the log at 960 and 1280', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-locks-'));
   try {

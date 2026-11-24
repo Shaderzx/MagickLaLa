@@ -4440,6 +4440,211 @@ fn close_quarters(db_path: &Path) -> Result<serde_json::Value, String> {
         "menuAttached": attached,
     }))
 }
+fn true_runs(db_path: &Path) -> Result<serde_json::Value, String> {
+    let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
+        id: NodeId::from(id),
+        kind: kind.to_owned(),
+        position: [x * 260.0, 0.0],
+        config,
+    };
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+
+    let mut router = runtime_for(example("webhook_router.json")?);
+    let before: Vec<NodeId> = router.state.canvas.nodes.iter().map(|card| card.id.clone()).collect();
+    router.update(|app, _| {
+        let _ = app.spawn("io/send_message");
+    });
+    let added = router.state.canvas.nodes.iter().map(|card| card.id.clone()).find(|id| !before.contains(id)).ok_or("no new bottle")?;
+    let added_role = role_of(&router.state, &added.0);
+    router.update(|app, _| app.run_payload = json!({ "method": "POST", "path": "/hooks/router", "body": { "type": "order", "id": "42" } }));
+    let order_run = run_once(&mut router)?;
+    let added_bottle = json!({ "role": added_role, "failed": order_run["failedNodes"], "status": order_run["status"] });
+
+    let child_db = db_path.with_extension("child.sqlite");
+    let mut child = SpellGraph::new("Spare Child");
+    child.nodes = vec![
+        place("start", "event/on_start", 0.0, serde_json::Value::Null),
+        place("send", "io/send_message", 1.0, json!({ "content": "child says hi" })),
+        place("spare", "io/send_message", 2.0, serde_json::Value::Null),
+    ];
+    child.wires = vec![wire("cw", ("start", "out"), ("send", "in"))];
+    child.shelf = vec![magicklala_graph::ShelfEntry { node: NodeId::from("spare"), parked: Vec::new(), bridges: Vec::new(), refused: Vec::new() }];
+    StudioStore::open(Some(&child_db)).and_then(|mut store| store.save_draft(&child)).map_err(|error| error.to_string())?;
+    let mut parent = SpellGraph::new("Calling Parent");
+    parent.nodes = vec![
+        place("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        place("call", "flow/subgraph", 1.0, json!({ "spell_id": child.id.0.to_string() })),
+    ];
+    parent.wires = vec![wire("pw", ("trigger", "out"), ("call", "in"))];
+    parent.subgraphs = vec![magicklala_graph::SubgraphRef { node_id: NodeId::from("call"), spell_id: child.id, release_version: None }];
+    let mut caller = studio_at(&child_db)?;
+    caller.update(move |app, _| {
+        app.new_empty_spell();
+        app.load_graph(parent.clone());
+    });
+    click(&mut caller, "validate")?;
+    let spare_child = caller.state.validation.label();
+
+    let mut twins = SpellGraph::new("Twin Doors");
+    twins.nodes = vec![
+        place("a", "event/on_message", 0.0, serde_json::Value::Null),
+        place("b", "event/on_message", 0.0, serde_json::Value::Null),
+        place("say", "io/send_message", 1.0, serde_json::Value::Null),
+    ];
+    twins.wires = vec![wire("t1", ("a", "out"), ("say", "in")), wire("t2", ("b", "out"), ("say", "in")), wire("t3", ("a", "content"), ("say", "content"))];
+    let mut doors = studio_at(db_path)?;
+    doors.update(move |app, _| {
+        app.new_empty_spell();
+        app.load_graph(twins.clone());
+    });
+    click(&mut doors, "publish")?;
+    let order_before: Vec<String> = doors.state.canvas.nodes.iter().map(|card| card.id.0.clone()).collect();
+    doors.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("a")));
+        app.delete_selected_node();
+        app.undo();
+    });
+    let order_after: Vec<String> = doors.state.canvas.nodes.iter().map(|card| card.id.0.clone()).collect();
+    let undo_trigger = json!({ "sameOrder": order_before == order_after, "live": doors.state.active_release_version });
+
+    let mut prompted = SpellGraph::new("Refusing Agent");
+    prompted.nodes = vec![
+        place("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        place("tmpl", "text/template", 1.0, json!({ "template": "Q: {{content}}" })),
+        place("gen", "ai/generate_text", 2.0, serde_json::Value::Null),
+        place("reply", "io/send_message", 3.0, serde_json::Value::Null),
+    ];
+    prompted.wires = vec![
+        wire("p1", ("trigger", "out"), ("gen", "in")),
+        wire("p2", ("gen", "out"), ("reply", "in")),
+        wire("p3", ("trigger", "content"), ("tmpl", "content")),
+        wire("p4", ("tmpl", "text"), ("gen", "prompt")),
+        wire("p5", ("gen", "text"), ("reply", "content")),
+    ];
+    let mut refusing = studio_at(db_path)?;
+    refusing.update(move |app, _| {
+        app.new_empty_spell();
+        app.load_graph(prompted.clone());
+    });
+    refusing.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("tmpl"))));
+    refusing.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("gen")));
+        app.right_tab = RightTab::Inspector;
+    });
+    refusing.frame(1.0);
+    click(&mut refusing, "prompt-unplug")?;
+    refusing.update(|app, _| {
+        app.prompts.insert(NodeId::from("gen"), rune::TextEdit::new("typed words"));
+        app.sync_spell();
+        app.canvas.select(Some(NodeId::from("tmpl")));
+        app.delete_selected_node();
+        app.undo();
+    });
+    click(&mut refusing, "save")?;
+    let reopened = studio_at(db_path)?;
+    let undo_refusal = reopened.state.canvas.wires.iter().any(|wire| wire.to_node.0 == "gen" && wire.to_socket == "prompt");
+
+    let mut stale = runtime_for(tasting_spell());
+    run_once(&mut stale)?;
+    stale.update(|app, _| {
+        app.canvas.wires.retain(|wire| !(wire.to_node.0 == "reply" && wire.to_socket == "content"));
+        app.sync_spell();
+    });
+    click(&mut stale, "validate")?;
+    stale.frame(2.0);
+    let stale_log: Vec<String> = text_lines_under(&stale, "trace-strip").into_iter().map(|(line, _)| line).collect();
+    let mut failed = runtime_for(example("parallel_research.json")?);
+    run_once(&mut failed)?;
+    click(&mut failed, "validate")?;
+    failed.frame(2.0);
+    let pill: Vec<String> = text_lines_under(&failed, "validation-pill").into_iter().map(|(line, _)| line).collect();
+    let plaque: Vec<String> = text_lines_under(&failed, "cauldron-plaque").into_iter().map(|(line, _)| line).collect();
+    let check_after = json!({
+        "staleLogSaysBrewed": stale_log.iter().any(|line| line == "Brewed"),
+        "staleLogSaysHexed": stale_log.iter().any(|line| line.starts_with("Hexed")),
+        "failedPill": pill.join(" "),
+        "failedPlaque": plaque.join(" "),
+    });
+
+    let mut hook_only = runtime_for(example("webhook_router.json")?);
+    click(&mut hook_only, "tab-playground")?;
+    hook_only.update(|app, _| app.chat_input = rune::TextEdit::new("order 123"));
+    let chat_before = hook_only.state.chat.len();
+    hook_only.update(|app, _| app.send_chat());
+    settle(&mut hook_only)?;
+    let hook_chat = hook_only.state.chat.len() - chat_before;
+
+    let mut lonely = SpellGraph::new("Lonely Reply");
+    lonely.nodes = vec![place("reply", "io/send_message", 1.0, serde_json::Value::Null)];
+    let alone = runtime_for(lonely);
+    let lone_reply = role_of(&alone.state, "reply");
+
+    let mut unpinned = SpellGraph::new("Unpinned Caller");
+    unpinned.nodes = vec![
+        place("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        place("call", "flow/subgraph", 1.0, json!({ "spell_id": child.id.0.to_string() })),
+    ];
+    unpinned.wires = vec![wire("uw", ("trigger", "out"), ("call", "in"))];
+    unpinned.subgraphs = vec![magicklala_graph::SubgraphRef { node_id: NodeId::from("call"), spell_id: child.id, release_version: None }];
+    let mut sealed = studio_at(&child_db)?;
+    sealed.update(move |app, _| {
+        app.new_empty_spell();
+        app.load_graph(unpinned.clone());
+    });
+    click(&mut sealed, "publish")?;
+    click(&mut sealed, "save")?;
+    let after_save = sealed.state.active_release_version;
+    sealed.update(|app, _| {
+        let _ = app.publish();
+    });
+    let unpinned_seal = json!({ "afterSave": after_save, "releases": release_versions(&sealed.state) });
+
+    let mut spare_words = echo_spell();
+    spare_words.nodes.push(place("other", "text/template", 1.0, json!({ "template": "other words" })));
+    let mut evict = runtime_for(spare_words);
+    evict.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("echo")));
+        app.delete_selected_node();
+        let _ = app.canvas.connect_sockets(&SocketRef::new(NodeId::from("other"), "text"), &SocketRef::new(NodeId::from("reply"), "content"));
+        app.undo();
+    });
+    let reply_content_wires = evict.state.canvas.wires.iter().filter(|wire| wire.to_node.0 == "reply" && wire.to_socket == "content").count();
+
+    let mut ticking = SpellGraph::new("Ticking Agent");
+    ticking.nodes = vec![place("tick", "event/on_tick", 0.0, serde_json::Value::Null), place("say", "io/send_message", 1.0, serde_json::Value::Null)];
+    ticking.wires = vec![wire("k1", ("tick", "out"), ("say", "in")), wire("k2", ("tick", "at"), ("say", "content"))];
+    let mut tick_rt = runtime_for(ticking);
+    let tick_run = run_once(&mut tick_rt)?;
+    let mut changing = SpellGraph::new("Watching Agent");
+    changing.nodes =
+        vec![place("watch", "event/on_variable_changed", 0.0, serde_json::Value::Null), place("say", "io/send_message", 1.0, serde_json::Value::Null)];
+    changing.wires = vec![wire("v1", ("watch", "out"), ("say", "in")), wire("v2", ("watch", "name"), ("say", "content"))];
+    let mut change_rt = runtime_for(changing);
+    let change_run = run_once(&mut change_rt)?;
+    let empty_reply =
+        |run: &serde_json::Value| run["replies"].as_array().is_none_or(|replies| replies.iter().all(|reply| reply.as_str().is_none_or(str::is_empty)));
+    let samples = json!({ "tickEmpty": empty_reply(&tick_run), "changeEmpty": empty_reply(&change_run) });
+
+    let _ = std::fs::remove_file(&child_db);
+    Ok(json!({
+        "addedBottle": added_bottle,
+        "spareChild": spare_child,
+        "undoTrigger": undo_trigger,
+        "undoRefusalWired": undo_refusal,
+        "checkAfter": check_after,
+        "hookChat": hook_chat,
+        "loneReply": lone_reply,
+        "unpinnedSeal": unpinned_seal,
+        "replyContentWires": reply_content_wires,
+        "samples": samples,
+    }))
+}
 fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
@@ -5338,6 +5543,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("cauldron-truths") => cauldron_truths(),
         Some("plain-sight") => plain_sight(),
         Some("close-quarters") => close_quarters(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("true-runs") => true_runs(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("drawn-truths") => drawn_truths(),
