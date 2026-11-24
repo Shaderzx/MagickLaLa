@@ -245,7 +245,7 @@ const ROOMY: Metrics = Metrics {
     bottle_gap: BOTTLE_GAP,
 };
 const CROWDED: Metrics =
-    Metrics { vial: [160.0, 54.0], pot: [250.0, 242.0], row_gap: 12.0, col_gap: 14.0, shelf_to_pot: 40.0, pot_to_bottles: 44.0, bottle_gap: 10.0 };
+    Metrics { vial: [160.0, 58.0], pot: [250.0, 242.0], row_gap: 12.0, col_gap: 14.0, shelf_to_pot: 40.0, pot_to_bottles: 44.0, bottle_gap: 10.0 };
 const TIGHT: Metrics = Metrics { vial: [160.0, 42.0], ..CROWDED };
 const READABLE: f32 = 0.92;
 const LEGIBLE: f32 = 0.8;
@@ -394,7 +394,8 @@ fn plan_stacked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
     let bottle_size = if bottles.len() > 1 { MULTI_BOTTLE_SIZE } else { SINGLE_BOTTLE_SIZE };
     let pot_block_h = m.pot[1] + PLAQUE_ROOM;
     let lane_band = 14.0 + 6.0 * ingredients.len().min(4) as f32;
-    let shelf_gap = if ingredients.is_empty() { 0.0 } else { 22.0 + lane_band };
+    let hop_room = 14.0 * bottles.len().saturating_sub(1) as f32;
+    let shelf_gap = if ingredients.is_empty() { 0.0 } else { 22.0 + lane_band + hop_room };
     let bottle_count = bottles.len().max(1);
     let shape_for = |rows: usize| {
         let cols = bottle_count.div_ceil(rows);

@@ -122,9 +122,11 @@ fn ribbon_course(plan: &BrewPlan, from: [f32; 2], to: [f32; 2], own: Option<&Nod
     let direct = cubic_samples(from, [from[0] + dx * 0.4, from[1]], [to[0], to[1] - 16.0 * s], to, 44);
     let blocking: Vec<[f32; 4]> = plan.cards.iter().filter(|card| Some(&card.id) != own).map(|card| card.rect).filter(|r| inside(*r, &direct) > 0).collect();
     let lanes_floor = plan.lanes.map_or(f32::MIN, |[shelf_bottom, band]| shelf_bottom + band + 6.0 * s);
-    let ceiling =
-        (blocking.iter().map(|rect| rect[1]).fold(to[1] - 16.0 * s, f32::min) - 6.0 * s - blocking.len().saturating_sub(1) as f32 * 4.0 * s).max(lanes_floor);
-    let climb_x = blocking.iter().map(|rect| rect[0]).fold(to[0], f32::min) - 18.0 * s;
+    let nest = own.and_then(|id| plan.card(id)).map_or(0, |mine| plan.with_role(BrewRole::Bottle).filter(|other| other.rect[0] > mine.rect[0]).count()) as f32;
+    let outer = blocking.len().saturating_sub(1) as f32 - nest.min(blocking.len().saturating_sub(1) as f32);
+    let lowest_top = blocking.iter().map(|rect| rect[1]).fold(to[1] - 16.0 * s, f32::min);
+    let ceiling = (lowest_top - 6.0 * s - outer.max(0.0) * 12.0 * s).max(lanes_floor);
+    let climb_x = blocking.iter().map(|rect| rect[0]).fold(to[0], f32::min) - 18.0 * s + nest * 20.0 * s;
     let mut candidates = vec![direct];
     for (lead, tuck, lift) in [(0.3, 1.0, 10.0), (0.5, 1.0, 10.0), (0.2, 1.6, 14.0), (0.45, 0.0, 12.0), (0.15, 2.4, 6.0)] {
         candidates.push(cubic_samples(from, [from[0] + dx * lead, from[1]], [to[0] - 22.0 * s * tuck, to[1] - lift * s], to, 44));

@@ -573,6 +573,10 @@ impl CanvasState {
         self.running_brew = false;
     }
 
+    pub fn brewed_clean(&self) -> bool {
+        self.has_run() && !self.nodes.iter().any(|card| card.status == ExecutionStatus::Failed)
+    }
+
     pub fn has_run(&self) -> bool {
         self.wires.iter().any(|wire| wire.active) || (self.wires.is_empty() && self.nodes.iter().any(|card| card.status != ExecutionStatus::Idle))
     }

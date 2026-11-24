@@ -128,7 +128,7 @@ impl HearthPalette {
                 off_bg: hex(0xEFE7D8),
                 off_ink: hex(0x56445E),
                 broth_deep: hex(0x0E5C48),
-                broth_mid: hex(0x22A882),
+                broth_mid: hex(0x178366),
                 broth_foam: hex(0x63E6B8),
                 broth_spark: hex(0xCBFFEA),
                 gold: hex(0xC98B2B),
@@ -266,7 +266,28 @@ impl HearthPalette {
     }
 }
 
+pub fn contrast_ratio(ink: Color, ground: Color) -> f32 {
+    let luminance = |c: Color| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    let (a, b) = (luminance(ink), luminance(ground));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+pub fn legible_against(color: Color, toward: Color, ground: Color, ratio: f32) -> Color {
+    (0..=24).map(|step| mix(color, toward, step as f32 / 24.0)).find(|candidate| contrast_ratio(*candidate, ground) >= ratio).unwrap_or(toward)
+}
+
+const OUTLINE_CONTRAST: f32 = 3.15;
+
 pub fn category_tone(category: &str, light: bool) -> CategoryTone {
+    let raw = raw_category_tone(category, light);
+    let ground = if light { hex(0xFAF5EA) } else { hex(0x161022) };
+    let ink = if light { hex(0x2A1A2E) } else { hex(0xF4EEFF) };
+    let leaning = legible_against(raw.border, raw.liquid, ground, OUTLINE_CONTRAST);
+    let border = if contrast_ratio(leaning, ground) >= OUTLINE_CONTRAST { leaning } else { legible_against(leaning, ink, ground, OUTLINE_CONTRAST) };
+    CategoryTone { border, ..raw }
+}
+
+fn raw_category_tone(category: &str, light: bool) -> CategoryTone {
     match category.to_ascii_lowercase().as_str() {
         "events" | "event" => CategoryTone {
             liquid: hex(if light { 0xC73F6E } else { 0xE86391 }),

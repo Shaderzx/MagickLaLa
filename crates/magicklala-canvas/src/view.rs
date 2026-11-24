@@ -279,12 +279,16 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         Some(
             row().px(6.0).py(1.5).radius(7.0).fill(p.card).border(1.0, p.gold).child(text("Simmering").font(TextStyle::new(11.0, 750.0)).color(p.simmer_ink())),
         )
-    } else if dimmed {
+    } else if dimmed && state.brewed_clean() {
+        let branch = |socket: &str| !(socket == "out" || socket.starts_with("out_") || socket == "in");
         let untaken_label = state
             .wires
             .iter()
-            .find(|w| w.from_node == card.id)
-            .and_then(|w| state.wires.iter().find(|fw| fw.to_node == w.to_node && fw.ty.is_flow()))
+            .find(|fw| fw.to_node == card.id && fw.ty.is_flow())
+            .or_else(|| {
+                state.wires.iter().find(|w| w.from_node == card.id).and_then(|w| state.wires.iter().find(|fw| fw.to_node == w.to_node && fw.ty.is_flow()))
+            })
+            .filter(|fw| branch(&fw.from_socket))
             .map_or_else(|| "Untaken".to_owned(), |fw| format!("Untaken · {}", fw.from_socket));
         Some(
             row()
@@ -299,6 +303,8 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         None
     };
 
+    let title_room = dims[0] - 24.0 - 6.0 - 30.0;
+    let wraps = narrow && state.display_title(&card.id).chars().count() as f32 * 7.4 > title_room;
     let top_row = col()
         .w_full()
         .min_w(0.0)
@@ -323,7 +329,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         let words = col().grow(1.0).min_w(0.0).child(top_row);
         let pair = row().w_full().gap(6.0).items_center();
         let pair = if mirrored { pair.child(vial_badge).child(words) } else { pair.child(words).child(vial_badge) };
-        col().grow(1.0).min_w(0.0).gap(2.0).child(pair).child(kind_line)
+        col().grow(1.0).min_w(0.0).gap(if wraps { 0.0 } else { 2.0 }).child(pair).child(kind_line)
     } else {
         side_by_side(col().grow(1.0).min_w(0.0).gap(2.0).child(top_row).child(kind_line), vial_badge, 9.0)
     };
@@ -404,7 +410,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     let [pos_x, pos_y, width] = frame;
     let taken = card.status == ExecutionStatus::Succeeded;
     let simmering = card.status == ExecutionStatus::Running;
-    let untaken = has_run && !taken && !simmering;
+    let untaken = has_run && !taken && !simmering && state.brewed_clean();
     let sealed = state.release_badge.is_some() && !has_run;
     let bottle_mood = if taken {
         CauldronMood::Brewed
@@ -883,7 +889,7 @@ fn grimoire_card_view<S: 'static>(
                 .children((zoom >= DETAIL_ZOOM).then(|| text(&card.kind).font(TextStyle::new(kind_size, 500.0).mono()).color(kind_color).truncate())),
         );
     let perched_badge = status_box(card.status, card.duration_ms, p, zoom).or_else(|| {
-        (dimmed || shelved).then(|| {
+        (shelved || (dimmed && state.brewed_clean())).then(|| {
             let badge_bg = p.untaken_pill_fill();
             let badge_ink = p.untaken_pill_ink();
             row()

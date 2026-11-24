@@ -25,6 +25,7 @@ pub const LEFT_RAIL_WIDTH: f32 = 228.0;
 pub const INSPECTOR_WIDTH: f32 = 296.0;
 pub const TRACE_HEIGHT: f32 = 102.0;
 pub const IDLE_TRACE_HEIGHT: f32 = 46.0;
+pub const OPEN_TRACE_HEIGHT: f32 = 196.0;
 pub const PALETTE_CATEGORY_ORDER: [&str; 13] =
     ["events", "flow", "ai", "memory", "knowledge", "io", "code", "variables", "text", "logic", "json", "network", "time"];
 pub const LEGACY_KIND_PREFIX: &str = "core/";
@@ -1069,7 +1070,13 @@ impl StudioApp {
     }
 
     pub fn trace_height(&self) -> f32 {
-        if self.trace.is_empty() && !self.is_running() { IDLE_TRACE_HEIGHT } else { TRACE_HEIGHT }
+        if self.trace.is_empty() && !self.is_running() {
+            IDLE_TRACE_HEIGHT
+        } else if self.trace_expanded {
+            OPEN_TRACE_HEIGHT
+        } else {
+            TRACE_HEIGHT
+        }
     }
 
     pub fn canvas_size(&self) -> (f32, f32) {
@@ -3097,7 +3104,7 @@ impl StudioApp {
 
     pub fn send_chat(&mut self) {
         let message = self.chat_input.text.trim().to_owned();
-        if message.is_empty() || self.is_running() {
+        if message.is_empty() || self.is_running() || !self.has_recipe_trigger() {
             return;
         }
         self.chat.push(ChatMessage { from_user: true, text: message.clone() });

@@ -4301,8 +4301,9 @@ fn plain_sight() -> Result<serde_json::Value, String> {
     let mut empty = open(SpellGraph::new("Empty Pot"), (1280.0, 800.0));
     click(&mut empty, "tab-playground")?;
     empty.update(|app, _| app.chat_input = rune::TextEdit::new("anyone home"));
+    let chat_before = empty.state.chat.len();
     let _ = click(&mut empty, "chat-send");
-    let chat_on_empty = empty.state.chat.len();
+    let chat_on_empty = empty.state.chat.len() - chat_before;
 
     let mut twins = SpellGraph::new("Twin Watchers");
     twins.nodes = vec![

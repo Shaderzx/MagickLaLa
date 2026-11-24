@@ -8,8 +8,8 @@ use rune::{Color, Cx, El, ScrollSpec, TextEdit, TextStyle, canvas, col, el, row,
 
 use crate::{
     COMPACT_INSPECTOR_BELOW, COMPACT_PROMPT_EDITOR_HEIGHT, COMPACT_RUN_SLOT_WIDTH, CONTEXT_MENU_SIZE, ChatMessage, IDLE_TRACE_HEIGHT, LeftTab,
-    PROMPT_EDITOR_HEIGHT, PROMPT_EDITOR_PADDING, QUICK_ADD_KIND, RUN_SLOT_WIDTH, RightTab, SUBGRAPH_SPELL_FIELD, StudioApp, TOOLBAR_HEIGHT, TRACE_HEIGHT,
-    Theme, TraceLine, ValidationState, editable_field, palette_categories,
+    PROMPT_EDITOR_HEIGHT, PROMPT_EDITOR_PADDING, QUICK_ADD_KIND, RUN_SLOT_WIDTH, RightTab, SUBGRAPH_SPELL_FIELD, StudioApp, TOOLBAR_HEIGHT, Theme, TraceLine,
+    ValidationState, editable_field, palette_categories,
 };
 
 fn tones(theme: Theme) -> HearthPalette {
@@ -163,17 +163,25 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<El> {
     let quick_add = format!("Add {quick_add_title}");
     let title_label = selected_title.as_deref().unwrap_or("Cauldron");
     let delete = "Remove";
-    let header = row().w_full().h(24.0).px(8.0).items_center().justify_between().child(label(title_label, 10.5, 700.0, t.mute)).child(
-        row()
-            .key("context-dismiss")
-            .size(20.0, 20.0)
-            .radius(6.0)
-            .items_center()
-            .justify_center()
-            .fill(t.wash_2)
-            .child(label("×", 12.5, 700.0, t.ink_2))
-            .on_press(StudioApp::close_context_menu),
-    );
+    let header = row()
+        .w_full()
+        .h(24.0)
+        .px(8.0)
+        .gap(6.0)
+        .items_center()
+        .justify_between()
+        .child(label(title_label, 10.5, 700.0, t.mute).truncate().shrink().min_w(0.0))
+        .child(
+            row()
+                .key("context-dismiss")
+                .size(20.0, 20.0)
+                .radius(6.0)
+                .items_center()
+                .justify_center()
+                .fill(t.wash_2)
+                .child(label("×", 12.5, 700.0, t.ink_2))
+                .on_press(StudioApp::close_context_menu),
+        );
     let mut card = col()
         .key("context-menu")
         .w(CONTEXT_MENU_SIZE.0)
@@ -972,7 +980,7 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             .child(row().pt(2.0).child(button_el(
                 "empty-publish",
                 "Publish",
-                if spell_invalid { ButtonKind::Disabled } else { ButtonKind::Secondary },
+                if spell_invalid || app.canvas.nodes.is_empty() || app.is_running() { ButtonKind::Disabled } else { ButtonKind::Secondary },
                 14.0,
                 t,
                 |app| {
@@ -1457,9 +1465,24 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
                             if checked_only { t.card } else { t.primary_ink },
                         )),
                     )
-                    .child(if checked_only { label(&line.detail, 12.0, 550.0, t.ink).wrap() } else { label(&line.detail, 12.0, 550.0, t.ink).truncate() }),
+                    .child(if checked_only {
+                        label(&line.detail, 12.0, 550.0, t.ink).wrap()
+                    } else {
+                        let (name, took) = step_name_and_time(app, line);
+                        col()
+                            .grow(1.0)
+                            .min_w(0.0)
+                            .gap(1.0)
+                            .child(label(name, 12.0, 600.0, t.ink).wrap())
+                            .children(took.map(|took| text(took).font(font(10.5, 550.0).mono().features("'tnum' 1")).color(t.mute)))
+                    }),
             )
-            .child(row().px(7.0).py(2.5).radius(7.0).fill(t.wash_2).border(1.0, t.rule).child(label("Inspect ›", 10.5, 650.0, t.ink_2)));
+            .child(row().px(7.0).py(2.5).radius(7.0).fill(t.wash_2).border(1.0, t.rule).child(label(
+                if app.compact_toolbar() { "›" } else { "Inspect ›" },
+                10.5,
+                650.0,
+                t.ink_2,
+            )));
         if let Some(node_id) = target {
             item = item.on_press(move |app: &mut StudioApp| {
                 app.canvas.select(Some(node_id.clone()));
@@ -1477,10 +1500,82 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
         .child(steps)
 }
 
+fn step_name_and_time(app: &StudioApp, line: &TraceLine) -> (String, Option<String>) {
+    let (head, took) = match line.detail.rsplit_once(" · ") {
+        Some((head, took)) if took.ends_with("ms") || took.ends_with('s') => (head.to_owned(), Some(took.to_owned())),
+        _ => (line.detail.clone(), None),
+    };
+    (line.node.as_ref().filter(|id| app.canvas.card(id).is_some()).map_or(head, |id| app.canvas.display_title(id)), took)
+}
+
+fn recipe_overview(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
+    use magicklala_canvas::BrewRole;
+    let plan = magicklala_canvas::brew_plan(&app.canvas, app.canvas_size());
+    let order = magicklala_canvas::recipe_order(&app.canvas);
+    let group = |role: BrewRole| -> Vec<&magicklala_canvas::NodeCardModel> {
+        order.iter().filter(|id| plan.card(id).is_some_and(|placed| placed.role == role)).filter_map(|id| app.canvas.card(id)).collect()
+    };
+    let (ingredients, bottles, aside) = (group(BrewRole::Ingredient), group(BrewRole::Bottle), group(BrewRole::Aside));
+    let mut counts = vec![plural(ingredients.len(), "ingredient", "ingredients"), plural(bottles.len(), "bottle", "bottles")];
+    if !aside.is_empty() {
+        counts.push(format!("{} aside", aside.len()));
+    }
+    let header = col()
+        .key("recipe-overview-head")
+        .w_full()
+        .px(12.0)
+        .py(10.0)
+        .gap(2.0)
+        .radius(13.0)
+        .continuous_corners()
+        .fill(t.card)
+        .border(1.2, t.rule_2)
+        .child(heading(&app.spell.name, 15.5, 800.0, t.ink).wrap())
+        .child(label(counts.join(" · "), 11.0, 500.0, t.summary_ink()));
+    let entry = |card: &magicklala_canvas::NodeCardModel| {
+        let id = card.id.clone();
+        let (word, ink) = match card.status {
+            ExecutionStatus::Succeeded => (Some("Brewed"), if light { t.broth_deep } else { t.broth_foam }),
+            ExecutionStatus::Failed => (Some("Hexed"), t.hex),
+            ExecutionStatus::Running => (Some("Simmering"), t.ink_2),
+            ExecutionStatus::Idle if app.canvas.brewed_clean() && !app.canvas.is_shelved(&card.id) => (Some("Untaken"), t.mute),
+            ExecutionStatus::Idle => (None, t.mute),
+        };
+        row()
+            .key(format!("recipe-row-{}", card.id.0))
+            .w_full()
+            .min_h(32.0)
+            .px(9.0)
+            .py(5.0)
+            .gap(8.0)
+            .radius(10.0)
+            .continuous_corners()
+            .items_center()
+            .fill(t.card)
+            .border(1.0, t.rule)
+            .child(canvas(mini_vial_icon(&card.category, light, 16.0)).size(16.0, 16.0))
+            .child(label(app.canvas.display_title(&card.id), 12.0, 600.0, t.ink).wrap().grow(1.0).min_w(0.0))
+            .children(word.map(|word| label(word, 10.5, 700.0, ink)))
+            .on_press(move |app: &mut StudioApp| app.canvas.select(Some(id.clone())))
+    };
+    let section = |title: &str, cards: &[&magicklala_canvas::NodeCardModel]| {
+        (!cards.is_empty()).then(|| cards.iter().fold(col().w_full().gap(5.0).child(inspector_section_heading(title, t)), |list, card| list.child(entry(card))))
+    };
+    col()
+        .key("recipe-overview")
+        .w_full()
+        .gap(10.0)
+        .pt(12.0)
+        .child(header)
+        .children(section("In the pot", &ingredients))
+        .children(section("Bottles", &bottles))
+        .children(section("Set aside", &aside))
+}
+
 fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     let Some(card) = app.canvas.selected_card() else {
-        if !app.trace.is_empty() {
-            return run_summary_inspector(app, t);
+        if !app.canvas.nodes.is_empty() {
+            return recipe_overview(app, light, t);
         }
         return col()
             .key("inspector-empty")
@@ -1582,19 +1677,14 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         })
     });
     let wired_editor = wired_source.map(|(source, wire)| {
-        col()
-            .key("prompt-field")
-            .w_full()
-            .gap(8.0)
-            .padding(PROMPT_EDITOR_PADDING)
-            .radius(12.0)
-            .continuous_corners()
-            .fill(t.card)
-            .border(1.2, t.rule_2)
-            .child(label(source, 12.5, 650.0, t.ink).wrap())
-            .child(row().child(
-                sized_button("prompt-unplug", "Type it instead", false, false, 10.0, t, |_| {}).on_press(move |app: &mut StudioApp| app.unplug_wire(&wire)),
-            ))
+        let unplug =
+            sized_button("prompt-unplug", "Type it instead", false, false, 10.0, t, |_| {}).on_press(move |app: &mut StudioApp| app.unplug_wire(&wire));
+        let shell = if compact {
+            row().gap(8.0).items_center().child(label(source, 12.0, 650.0, t.ink).truncate().grow(1.0).min_w(0.0)).child(unplug)
+        } else {
+            col().gap(8.0).child(label(source, 12.5, 650.0, t.ink).wrap()).child(row().child(unplug))
+        };
+        shell.key("prompt-field").w_full().padding(PROMPT_EDITOR_PADDING).radius(12.0).continuous_corners().fill(t.card).border(1.2, t.rule_2)
     });
     let editor = field.filter(|_| wired_editor.is_none()).and_then(|field| app.prompts.get(&card.id).map(|edit| (field, edit))).map(|(field, edit)| {
         let input = text_input(edit, prompt_font()).key("prompt-field").label(format!("{} {field}", card.title)).w_full().color(t.ink).on_edit(
@@ -1673,6 +1763,18 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                 .child(label(headline, 12.0, 750.0, t.hex).wrap())
                 .child(actions.child(button_el("inspector-open-grimoire", "Grimoire", ButtonKind::Secondary, 8.0, t, StudioApp::open_grimoire))),
         );
+    }
+    let mut prompt_block = match (field, editor, wired_editor) {
+        (Some(field), Some(editor), _) => {
+            Some(col().w_full().gap(if compact { 6.0 } else { 9.0 }).child(inspector_section_heading(editor_caption(field), t)).child(editor))
+        }
+        (Some(field), None, Some(wired)) => {
+            Some(col().w_full().gap(if compact { 6.0 } else { 9.0 }).child(inspector_section_heading(editor_caption(field), t)).child(wired))
+        }
+        _ => None,
+    };
+    if has_error {
+        column = column.children(prompt_block.take());
     }
     let mut column = column.child(inspector_section_heading("Sockets", t)).child(sockets);
     if matches!(card.kind.as_str(), "ai/generate_text" | "ai/stream_text") {
@@ -1782,12 +1884,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             column = column.child(menu);
         }
     }
-    let column = column.pb(if compact { 4.0 } else { 8.0 });
-    let column = match (field, editor, wired_editor) {
-        (Some(field), Some(editor), _) => column.child(inspector_section_heading(editor_caption(field), t)).child(editor),
-        (Some(field), None, Some(wired)) => column.child(inspector_section_heading(editor_caption(field), t)).child(wired),
-        _ => column,
-    };
+    let column = column.pb(if compact { 4.0 } else { 8.0 }).children(prompt_block);
     match release_version_editor(app, card, t) {
         Some(version) => column.child(inspector_section_heading("Release version", t)).child(version),
         None => column,
@@ -1912,6 +2009,7 @@ fn playground_panel(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             list.child(turn_row)
         })
     };
+    let can_send = !app.is_running() && app.has_recipe_trigger();
     let send_btn = row()
         .key("chat-send")
         .h(34.0)
@@ -1920,9 +2018,9 @@ fn playground_panel(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         .continuous_corners()
         .items_center()
         .justify_center()
-        .fill(t.primary_bg)
-        .child(label("Send", 12.0, 700.0, t.primary_ink))
-        .on_press(StudioApp::send_chat);
+        .fill(if can_send { t.primary_bg } else { t.off_bg })
+        .child(label("Send", 12.0, 700.0, if can_send { t.primary_ink } else { t.off_ink }));
+    let send_btn = if can_send { send_btn.on_press(StudioApp::send_chat) } else { send_btn };
     let input_el = text_input(&app.chat_input, font(13.0, 450.0))
         .single_line()
         .key("chat-input")
@@ -1993,7 +2091,38 @@ enum ChipShape {
     More(usize),
 }
 
-fn log_chips<'a>(lines: &[&'a TraceLine], compact: bool, room_for_dots: usize) -> Vec<(&'a TraceLine, ChipShape)> {
+fn chip_width(line: &TraceLine, shape: &ChipShape) -> f32 {
+    match shape {
+        ChipShape::Dot => 22.0 + 10.0,
+        ChipShape::Span(_) => 46.0 + 10.0,
+        ChipShape::More(_) => 120.0 + 16.0,
+        ChipShape::Full => 18.0 + 6.0 + 17.0 + 16.0 + line.detail.chars().count() as f32 * 6.6,
+    }
+}
+
+fn log_chips<'a>(lines: &[&'a TraceLine], compact: bool, room_for_dots: usize, budget: f32) -> Vec<(&'a TraceLine, ChipShape)> {
+    let mut chips = log_chips_by_count(lines, compact, room_for_dots);
+    if !compact {
+        return chips;
+    }
+    let spent = |chips: &[(&TraceLine, ChipShape)]| chips.iter().map(|(line, shape)| chip_width(line, shape)).sum::<f32>();
+    let last_step = chips.iter().rposition(|(line, _)| line.kind == "NodeFinished");
+    let mut cursor = 0;
+    while spent(&chips) > budget && cursor < chips.len() {
+        if chips[cursor].0.kind == "NodeFinished" && matches!(chips[cursor].1, ChipShape::Full) && Some(cursor) != last_step {
+            chips[cursor].1 = ChipShape::Dot;
+        }
+        cursor += 1;
+    }
+    if spent(&chips) > budget
+        && let Some(last) = last_step.filter(|_| chips.len() > 1)
+    {
+        chips[last].1 = ChipShape::Dot;
+    }
+    chips
+}
+
+fn log_chips_by_count<'a>(lines: &[&'a TraceLine], compact: bool, room_for_dots: usize) -> Vec<(&'a TraceLine, ChipShape)> {
     let steps = lines.iter().filter(|line| line.kind == "NodeFinished").count();
     let last_step = lines.iter().rposition(|line| line.kind == "NodeFinished");
     let issues: Vec<usize> = lines.iter().enumerate().filter(|(_, line)| matches!(line.kind, "NodeFailed" | "RunRejected")).map(|(index, _)| index).collect();
@@ -2158,7 +2287,12 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
         header = header.child(el().grow(1.0).min_w(0.0)).child(badge);
     }
     let run_done = !app.is_running();
-    let chips = log_chips(&milestones, !app.trace_expanded, ((app.size.0 - 420.0) / 32.0).max(0.0) as usize);
+    let pinned = (!app.trace_expanded && run_done && !blocked_pre_run).then(|| log_result(app, t)).flatten();
+    let pinned_room = pinned.as_ref().map_or(0.0, |(_, width)| *width + 16.0);
+    let budget = (app.size.0 - 32.0 - pinned_room).max(120.0);
+    let shown: Vec<&TraceLine> =
+        if pinned.is_some() { milestones.iter().copied().filter(|line| line.kind == "NodeFinished").collect() } else { milestones.clone() };
+    let chips = log_chips(&shown, !app.trace_expanded, ((app.size.0 - 420.0) / 32.0).max(0.0) as usize, budget);
     let total = chips.len();
     let mut step_num = 0usize;
     let body = chips.iter().enumerate().fold(row().gap(0.0).items_center(), |list, (index, (line, shape))| {
@@ -2292,10 +2426,20 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
         };
         list.child(unit)
     });
+    let lane = if app.trace_expanded {
+        col().key("trace-scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: true }).child(log_list(app, t))
+    } else {
+        let steps = row().key("trace-scroll").grow(1.0).min_w(0.0).h_full().items_center().scroll_x().child(body);
+        let mut lane = row().w_full().grow(1.0).min_h(0.0).gap(16.0).items_center().child(steps);
+        if let Some((result, _)) = pinned {
+            lane = lane.child(result);
+        }
+        lane
+    };
     col()
         .key("trace-strip")
         .w_full()
-        .h(TRACE_HEIGHT)
+        .h(app.trace_height())
         .min_h(0.0)
         .px(16.0)
         .pt(13.0)
@@ -2304,5 +2448,92 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
         .fill(t.shelf)
         .border_sides([1.0, 0.0, 0.0, 0.0], t.rule)
         .child(header)
-        .child(col().key("trace-scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: true }).child(body))
+        .child(lane)
+}
+
+fn log_result(app: &StudioApp, t: &HearthPalette) -> Option<(El, f32)> {
+    let last = app.trace.iter().rev().find(|line| matches!(line.kind, "RunFinished" | "RunCancelled" | "RunTimedOut"))?;
+    let failed: Vec<&TraceLine> = app.trace.iter().filter(|line| line.kind == "NodeFailed").collect();
+    let light = t.light;
+    let time = if last.at_ms == 0 { "<1ms".to_owned() } else { format!("{}ms", last.at_ms) };
+    let first_failed = failed.first().and_then(|line| line.node.clone());
+    let (word, name) = match failed.first() {
+        Some(line) => (
+            "Hexed".to_owned(),
+            line.node.as_ref().map_or_else(|| line.detail.split(':').next().unwrap_or_default().to_owned(), |id| app.canvas.display_title(id)),
+        ),
+        None if last.kind == "RunFinished" && (last.detail == "Succeeded" || last.detail.is_empty()) => {
+            ((if app.active_release_version.is_some() { "Draft brewed" } else { "Brewed" }).to_owned(), String::new())
+        }
+        None => (trace_display_kind(last.kind).to_owned(), if last.kind == "RunFinished" { last.detail.clone() } else { String::new() }),
+    };
+    let more = failed.len().saturating_sub(1);
+    let sour = last.status == ExecutionStatus::Failed || !failed.is_empty();
+    let ink = if sour {
+        t.hex
+    } else if light {
+        t.broth_deep
+    } else {
+        t.broth_foam
+    };
+    let name = if more > 0 { format!("{name} +{more}") } else { name };
+    let width = 9.0 * 2.0 + 7.0 + 6.0 * 3.0 + (word.chars().count() as f32 * 7.4) + (name.chars().count() as f32 * 6.6) + 30.0;
+    let mut chip = row()
+        .key("log-result")
+        .h(29.0)
+        .px(9.0)
+        .gap(6.0)
+        .radius(10.0)
+        .continuous_corners()
+        .items_center()
+        .fill(if sour { t.hex_tint } else { t.card })
+        .border(1.0, if sour { t.hex } else { t.rule_2 })
+        .child(el().size(7.0, 7.0).radius(3.5).fill(if sour { t.hex } else { t.broth_mid }))
+        .child(label(word, 11.5, 750.0, ink));
+    if !name.is_empty() {
+        chip = chip.child(label(name, 11.5, 600.0, t.ink));
+    }
+    chip = chip.child(text(time).font(font(10.5, 550.0).mono().features("'tnum' 1")).color(if light { t.ink_2 } else { hex(0xD4CEE6) }));
+    if let Some(node) = first_failed {
+        chip = chip.on_press(move |app: &mut StudioApp| {
+            app.canvas.select(Some(node.clone()));
+            app.right_tab = RightTab::Inspector;
+        });
+    }
+    Some((chip, width))
+}
+
+fn log_list(app: &StudioApp, t: &HearthPalette) -> El {
+    app.trace.iter().enumerate().fold(col().w_full().gap(3.0), |list, (index, line)| {
+        let sour = line.status == ExecutionStatus::Failed;
+        let dot = match line.status {
+            ExecutionStatus::Failed => t.hex,
+            ExecutionStatus::Running if app.is_running() => t.gold,
+            ExecutionStatus::Running | ExecutionStatus::Succeeded => t.broth_mid,
+            ExecutionStatus::Idle => t.mute,
+        };
+        let mut item = row()
+            .key(format!("log-line-{index}"))
+            .w_full()
+            .min_h(22.0)
+            .px(8.0)
+            .py(2.0)
+            .gap(8.0)
+            .radius(7.0)
+            .items_center()
+            .fill(if sour { t.hex_tint } else { Color::TRANSPARENT })
+            .child(
+                text(if line.at_ms == 0 { "<1ms".to_owned() } else { format!("{}ms", line.at_ms) })
+                    .font(font(10.5, 550.0).mono().features("'tnum' 1"))
+                    .color(t.mute)
+                    .w(44.0),
+            )
+            .child(el().size(7.0, 7.0).radius(3.5).fill(dot))
+            .child(label(trace_display_kind(line.kind), 11.5, 700.0, if sour { t.hex } else { t.ink }).w(78.0))
+            .child(label(&line.detail, 11.5, 450.0, t.ink_2).wrap().grow(1.0).min_w(0.0));
+        if let Some(node) = line.node.clone() {
+            item = item.on_press(move |app: &mut StudioApp| app.canvas.select(Some(node.clone())));
+        }
+        list.child(item)
+    })
 }
