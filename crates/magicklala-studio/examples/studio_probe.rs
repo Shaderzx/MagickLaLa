@@ -1473,27 +1473,12 @@ fn capture_surfaces(out_dir: &Path) -> Result<serde_json::Value, String> {
         if dark {
             invalid.toggle_theme();
         }
-        invalid.canvas.wires.retain(|wire| !(wire.to_node.0 == "llm" && wire.to_socket == "prompt"));
-        invalid.prompts.insert(NodeId::from("llm"), rune::TextEdit::new(""));
+        invalid.canvas.wires.retain(|wire| !(wire.to_node.0 == "recall" && wire.to_socket == "query"));
         invalid.sync_spell();
+        invalid.canvas.select(Some(NodeId::from("recall")));
         invalid.left_tab = LeftTab::Agents;
-        invalid.validation = ValidationState::Invalid(vec!["Generate Text: missing required input \"prompt\"".to_owned()]);
-        invalid.canvas.invalid_brew = true;
-        invalid.canvas.brew_summary = Some("Hexed · missing \"prompt\"".to_owned());
-        if let Some(card) = invalid.canvas.nodes.iter_mut().find(|card| card.kind == "ai/generate_text") {
-            card.status = ExecutionStatus::Failed;
-            if let Some(socket) = card.inputs.iter_mut().find(|socket| socket.name == "prompt") {
-                socket.flagged = true;
-            }
-        }
         invalid.runs = 0;
-        invalid.trace = vec![magicklala_studio::TraceLine {
-            at_ms: 0,
-            kind: "RunRejected",
-            detail: "Generate Text: missing required input \"prompt\"".to_owned(),
-            status: ExecutionStatus::Failed,
-            node: Some(NodeId::from("llm")),
-        }];
+        invalid.validate();
         let viewport = invalid.canvas_size();
         invalid.canvas.fit(viewport);
         invalid
@@ -1612,7 +1597,25 @@ fn hex_report(spell: SpellGraph) -> Result<serde_json::Value, String> {
         .filter(|card| card.status == ExecutionStatus::Failed)
         .map(|card| json!({ "node": card.id.0, "sockets": card.inputs.iter().filter(|socket| socket.flagged).map(|socket| socket.name.clone()).collect::<Vec<_>>() }))
         .collect();
-    Ok(json!({ "validation": rt.state.validation.label(), "flagged": flagged, "plaque": rt.state.canvas.brew_summary }))
+    let log: Vec<String> = rt.state.trace.iter().filter(|line| line.kind == "RunRejected").map(|line| line.detail.clone()).collect();
+    Ok(json!({ "validation": rt.state.validation.label(), "flagged": flagged, "plaque": rt.state.canvas.brew_summary, "log": log }))
+}
+
+fn hex_mend(spell: SpellGraph, broken: &NodeId) -> Result<serde_json::Value, String> {
+    let mut rt = headless(StudioApp::with_spell(spell.clone(), registry_specs()));
+    click(&mut rt, "validate")?;
+    rt.update(|app, _| app.canvas.select(Some(broken.clone())));
+    rt.frame(0.0);
+    click(&mut rt, "inspector-fix")?;
+    let added: Vec<serde_json::Value> = rt
+        .state
+        .spell
+        .wires
+        .iter()
+        .filter(|wire| !spell.wires.iter().any(|before| before.from_node == wire.from_node && before.from_socket == wire.from_socket && before.to_node == wire.to_node && before.to_socket == wire.to_socket))
+        .map(|wire| json!({ "from_node": wire.from_node.0, "from_socket": wire.from_socket, "to_node": wire.to_node.0, "to_socket": wire.to_socket }))
+        .collect();
+    Ok(json!({ "validation": rt.state.validation.label(), "added": added }))
 }
 
 fn hex_pinpoint() -> Result<serde_json::Value, String> {
@@ -1620,6 +1623,8 @@ fn hex_pinpoint() -> Result<serde_json::Value, String> {
     let mut missing_query = demo.clone();
     let cut = missing_query.wires.iter().position(|wire| wire.to_socket == "query").ok_or("demo spell has no query wire")?;
     let removed = missing_query.wires.remove(cut);
+    let broken_title = registry_specs().iter().find(|spec| missing_query.nodes.iter().any(|node| node.id == removed.to_node && node.kind == spec.kind)).map(|spec| spec.title.clone());
+    let mend = hex_mend(missing_query.clone(), &removed.to_node)?;
     let mut twin_ids = demo.clone();
     let reply = twin_ids.nodes.iter().find(|node| node.kind == "io/send_message").ok_or("demo spell has no reply")?.clone();
     let flow_into_reply = twin_ids.wires.iter().find(|wire| wire.to_node == reply.id && wire.to_socket == "in").ok_or("reply has no flow wire")?.clone();
@@ -1632,7 +1637,11 @@ fn hex_pinpoint() -> Result<serde_json::Value, String> {
     });
     twin_ids.wires.push(Wire { id: WireId::from("twin_flow"), to_node: twin.clone(), ..flow_into_reply });
     Ok(json!({
-        "missingQuery": { "removed": { "node": removed.to_node.0, "socket": removed.to_socket }, "report": hex_report(missing_query)? },
+        "missingQuery": {
+            "removed": { "node": removed.to_node.0, "socket": removed.to_socket, "from_node": removed.from_node.0, "from_socket": removed.from_socket, "title": broken_title },
+            "report": hex_report(missing_query)?,
+            "mend": mend,
+        },
         "twinIds": { "twin": twin.0, "lookalike": reply.id.0, "report": hex_report(twin_ids)? },
     }))
 }

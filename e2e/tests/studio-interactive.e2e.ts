@@ -811,10 +811,19 @@ test('Check pins a hex on the exact ingredient and input that are broken: a miss
   expect(missing.report.validation).toBe('invalid');
   expect(missing.report.flagged).toEqual([{ node: missing.removed.node, sockets: [missing.removed.socket] }]);
   expect(missing.report.plaque).toBe(`Hexed · missing "${missing.removed.socket}"`);
+  expect(missing.report.log).toEqual([`${missing.removed.title}: missing required input "${missing.removed.socket}"`]);
 
   const twins = report.twinIds;
   expect(twins.report.validation).toBe('invalid');
   expect(twins.report.flagged).toEqual([{ node: twins.twin, sockets: ['content'] }]);
   expect(twins.report.flagged.map((entry: { node: string }) => entry.node)).not.toContain(twins.lookalike);
   expect(twins.report.plaque).toBe('Hexed · missing "content"');
+});
+
+test('The hex fix button on a node missing a required input pours the matching upstream output back into that input, so the spell checks valid with exactly that one wire restored', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['hex-pinpoint']);
+  const { removed, mend } = report.missingQuery;
+
+  expect(mend.added).toEqual([{ from_node: removed.from_node, from_socket: removed.from_socket, to_node: removed.node, to_socket: removed.socket }]);
+  expect(mend.validation).toBe('valid');
 });
