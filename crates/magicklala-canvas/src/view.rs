@@ -472,6 +472,11 @@ pub(crate) fn branch_bottle_view<S: 'static>(
         .on_press(move |s: &mut S| lens(s).select(Some(select_id.clone())))
 }
 
+pub fn bottle_art_mood(state: &CanvasState, output: &NodeCardModel) -> CauldronMood {
+    let mood = cauldron_mood(state);
+    if mood == CauldronMood::Brewed && !crate::cauldron::bottle_filled(state, output) { CauldronMood::Ready } else { mood }
+}
+
 fn bottle_hex_pill(card: &NodeCardModel, p: &HearthPalette) -> Option<El> {
     let caption = match card.inputs.iter().find(|socket| socket.flagged) {
         Some(socket) if socket.mistyped => format!("Wrong type \"{}\"", socket.name),
@@ -508,7 +513,7 @@ pub(crate) fn potion_stand_view<S: 'static>(
     let bottled = state.release_badge.is_some();
     let sealed_vintage = bottled && !matches!(mood, CauldronMood::Brewed | CauldronMood::Simmering | CauldronMood::Hexed | CauldronMood::Empty);
     let bottle_h = 104.0;
-    let art_mood = if mood == CauldronMood::Brewed && !crate::cauldron::bottle_filled(state, output) { CauldronMood::Ready } else { mood };
+    let art_mood = bottle_art_mood(state, output);
     let bottle_art = canvas(potion_bottle_shape(art_mood, state.light, width, bottle_h, bottled, tint)).key("hero-potion-bottle").size(width, bottle_h);
     let spell_label = if state.spell_name.is_empty() { "Potion" } else { state.spell_name.as_str() };
     let out_title = primary_output.map_or("Bottled Potion", |c| c.title.as_str());

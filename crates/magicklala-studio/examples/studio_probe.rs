@@ -2815,6 +2815,139 @@ fn carbon_r4b() -> Result<serde_json::Value, String> {
         "menu": { "setAside": set_aside, "afterAside": after_aside, "pourIn": pour_in, "afterPour": after_pour },
     }))
 }
+fn sol_r4(db_path: &Path) -> Result<serde_json::Value, String> {
+    let place = |id: &str, kind: &str, x: f32| NodeInstance {
+        id: NodeId::from(id),
+        kind: kind.to_owned(),
+        position: [x * 260.0, 0.0],
+        config: serde_json::Value::Null,
+    };
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let config = StudioConfig { db_path: Some(db_path.to_path_buf()), ..StudioConfig::default() };
+
+    let mut spare = tasting_spell();
+    spare.name = "Spare Agent".to_owned();
+    spare.nodes.push(place("spare_reply", "io/send_message", 3.0));
+    let mut app = StudioApp::open(&config).map_err(|error| error.to_string())?;
+    app.load_graph(spare);
+    let mut pub_rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    pub_rt.frame(0.0);
+    click(&mut pub_rt, "validate")?;
+    let spare_check = pub_rt.state.validation.label();
+    let spare_role = role_of(&pub_rt.state, "spare_reply");
+    click(&mut pub_rt, "publish")?;
+    let release = pub_rt.state.last_published.as_ref().map(|release| release.graph.clone()).ok_or("nothing published")?;
+    let release_valid = SpellValidator::new(registry_specs()).validate(&release).is_ok();
+    let release_has_spare = release.nodes.iter().any(|node| node.id.0 == "spare_reply");
+    click(&mut pub_rt, "save")?;
+    let draft_keeps_spare = pub_rt.state.spell.nodes.iter().any(|node| node.id.0 == "spare_reply");
+
+    pub_rt.update(|app, _| {
+        app.request_open_sample("Research Agent");
+        app.confirm_switch();
+    });
+    click(&mut pub_rt, "tab-agents")?;
+    pub_rt.frame(1.0);
+    click(&mut pub_rt, "spell-spare-agent")?;
+    pub_rt.update(|app, _| app.confirm_switch());
+    pub_rt.frame(2.0);
+    let reopened = json!({ "name": pub_rt.state.spell.name, "live": pub_rt.state.active_release_version, "releases": pub_rt.state.releases.len() });
+
+    let mut names = Vec::new();
+    for _ in 0..2 {
+        pub_rt.update(|app, _| {
+            app.new_empty_spell();
+            app.spawn("event/on_message");
+        });
+        click(&mut pub_rt, "save")?;
+        names.push(json!({ "name": pub_rt.state.spell.name, "saved": pub_rt.state.store_error.is_none() }));
+    }
+
+    let mut hook = runtime_for(example("webhook_router.json")?);
+    hook.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("route"))));
+    let route_bridges = hook.state.spell.wires.iter().filter(|wire| wire.to_socket == "in" && wire.to_node.0.ends_with("_reply")).count();
+
+    let mut join = SpellGraph::new("Join");
+    join.nodes = vec![
+        place("trigger", "event/on_message", 0.0),
+        place("a", "time/delay", 1.0),
+        place("b", "time/delay", 1.0),
+        place("join", "flow/wait_for_all", 2.0),
+        place("reply", "io/send_message", 3.0),
+    ];
+    join.wires = vec![
+        wire("w1", ("trigger", "out"), ("a", "in")),
+        wire("w2", ("trigger", "out"), ("b", "in")),
+        wire("w3", ("a", "out"), ("join", "in")),
+        wire("w4", ("b", "out"), ("join", "in")),
+        wire("w5", ("join", "out"), ("reply", "in")),
+        wire("w6", ("trigger", "content"), ("reply", "content")),
+    ];
+    let mut join_rt = runtime_for(join);
+    let into_join = |app: &StudioApp| app.spell.wires.iter().filter(|wire| wire.to_node.0 == "join").count();
+    let join_before = into_join(&join_rt.state);
+    join_rt.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("join"))));
+    join_rt.update(|app, _| app.undo());
+    let join_after = into_join(&join_rt.state);
+
+    let mut dangling = StudioApp::from_registry().spell.clone();
+    dangling.nodes.push(place("nap", "time/delay", 2.0));
+    let trigger = dangling.nodes.iter().find(|node| node.kind == "event/on_message").map(|node| node.id.clone()).ok_or("no trigger")?;
+    dangling.wires.push(Wire {
+        id: WireId::from("nap_in"),
+        from_node: trigger,
+        from_socket: "out".to_owned(),
+        to_node: NodeId::from("nap"),
+        to_socket: "in".to_owned(),
+    });
+    dangling.nodes.push(place("loose_reply", "io/send_message", 4.0));
+    let dangling_rt = runtime_for(dangling);
+    let shelf = json!({ "wiredDelay": role_of(&dangling_rt.state, "nap"), "looseSend": role_of(&dangling_rt.state, "loose_reply") });
+
+    let mut tray = headless(StudioApp::with_spell(SpellGraph::new("Tray"), registry_specs()));
+    tray.update(|app, _| app.palette_query = rune::TextEdit::new("On Message"));
+    tray.frame(1.0);
+    tray.frame(3.0);
+    let key = "palette-event-on_message";
+    let row = tray.find(key).ok_or("no pantry row")?;
+    let board = tray.presented("canvas").map(|(rect, _)| rect).ok_or("no canvas")?;
+    drag(&mut tray, key, (board[0] + 60.0 - row.0, board[1] + board[3] - 30.0 - row.1))?;
+    let dropped = tray.state.spell.nodes.first().map(|node| node.id.0.clone()).ok_or("nothing dropped")?;
+    let tray_role = role_of(&tray.state, &dropped);
+    click(&mut tray, "run-spell")?;
+    let tray_brewed = tray.state.runs;
+
+    let mut slow = slow_runtime(1_500, Duration::from_secs(600));
+    click_at(&mut slow, "run-spell", 0.5)?;
+    slow.update(|app, _| {
+        app.wait_until(SETTLE, delay_started);
+    });
+    slow.frame(1.0);
+    let reply = slow.state.canvas.card(&NodeId::from("reply")).cloned().ok_or("no reply")?;
+    let bottle_mood = format!("{:?}", magicklala_canvas::view::bottle_art_mood(&slow.state.canvas, &reply));
+    let mut refused = String::new();
+    slow.update(|app, _| {
+        refused = app.publish().err().map(|error| error.to_string()).unwrap_or_default();
+    });
+    live_finish(&mut slow)?;
+
+    Ok(json!({
+        "spare": { "check": spare_check, "role": spare_role, "releaseValid": release_valid, "releaseHasSpare": release_has_spare, "draftKeepsSpare": draft_keeps_spare },
+        "reopened": reopened,
+        "newNames": names,
+        "routeBridges": route_bridges,
+        "join": { "before": join_before, "after": join_after },
+        "shelf": shelf,
+        "tray": { "role": tray_role, "brews": tray_brewed },
+        "midBrew": { "bottle": bottle_mood, "publish": refused },
+    }))
+}
 fn pull_middle() -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32| NodeInstance {
         id: NodeId::from(id),
@@ -3047,6 +3180,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("r4-look") => r4_look(),
         Some("carbon-r4") => carbon_r4(),
         Some("carbon-r4b") => carbon_r4b(),
+        Some("sol-r4") => sol_r4(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("tray-drop") => tray_drop(),
         Some("sol-r3") => sol_r3(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),

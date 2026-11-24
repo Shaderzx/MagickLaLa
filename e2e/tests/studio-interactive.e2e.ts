@@ -1163,3 +1163,24 @@ test('Studio mends and guards the recipe around every step: pulling the model ou
   expect(report.dozenLanes).toEqual({ crossing: [], strands: 12, pours: 12 });
   expect(report.menu).toEqual({ setAside: true, afterAside: 'Aside', pourIn: true, afterPour: 'Ingredient' });
 });
+
+test('What Studio shows, brews and publishes is the same recipe: a spare reply stays on the shelf and out of the release while the draft keeps it, a reopened potion keeps its live release, new potions get their own names, setting aside a Switch never opens every route, undo brings back every wire, a wired Delay sits in the pot, a trigger dropped on the shelf never brews, and mid-brew the bottle stays empty and Publish waits', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-one-recipe-'));
+  try {
+    const report = await studioProbe(['sol-r4', join(dir, 'studio.sqlite')]);
+
+    expect(report.spare).toEqual({ check: 'valid', role: 'Aside', releaseValid: true, releaseHasSpare: false, draftKeepsSpare: true });
+    expect(report.reopened).toEqual({ name: 'Spare Agent', live: 1, releases: 1 });
+    expect(report.newNames[0].saved).toBe(true);
+    expect(report.newNames[1].saved).toBe(true);
+    expect(report.newNames[0].name).not.toBe(report.newNames[1].name);
+    expect(report.routeBridges).toBe(0);
+    expect(report.join.after).toBe(report.join.before);
+    expect(report.shelf).toEqual({ wiredDelay: 'Ingredient', looseSend: 'Aside' });
+    expect(report.tray).toEqual({ role: 'Aside', brews: 0 });
+    expect(report.midBrew.bottle).toBe('Ready');
+    expect(report.midBrew.publish).toMatch(/brewing/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
