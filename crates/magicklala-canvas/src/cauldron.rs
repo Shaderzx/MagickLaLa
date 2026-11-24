@@ -239,7 +239,11 @@ fn plaque_text(state: &CanvasState, mood: CauldronMood, plan: &BrewPlan) -> Stri
             let time = if ms == 0 { "<1ms".to_owned() } else { format!("{ms}ms") };
             let bottles: Vec<&BrewCard> = plan.with_role(BrewRole::Bottle).collect();
             let filled = bottles.iter().filter(|placed| state.card(&placed.id).is_some_and(|card| card.status == ExecutionStatus::Succeeded)).count();
-            if bottles.len() > 1 { format!("Brewed · {time} · {filled} of {} bottles", bottles.len()) } else { format!("Brewed · {time}") }
+            match (bottles.len(), filled) {
+                (0 | 1, 0) => format!("Brewed · {time} · bottle empty"),
+                (0 | 1, _) => format!("Brewed · {time}"),
+                (count, _) => format!("Brewed · {time} · {filled} of {count} bottles"),
+            }
         }
         CauldronMood::Ready => match &state.release_badge {
             Some(badge) => format!("Published {badge} · {ingredients} {word}{aside_part}"),

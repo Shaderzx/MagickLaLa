@@ -669,9 +669,25 @@ pub struct Release {
 
 #[derive(Debug, Clone)]
 pub enum UndoEntry {
-    Aside { id: NodeId, wires: Vec<(SocketRef, SocketRef)> },
-    Node { card: NodeCardModel, prompt: Option<TextEdit>, version: Option<TextEdit>, config: Option<serde_json::Value>, wires: Vec<WireModel> },
-    Variable { index: usize, variable: VariableDef, name_edit: TextEdit, default_edit: TextEdit },
+    Aside {
+        id: NodeId,
+        wires: Vec<(SocketRef, SocketRef)>,
+        bridges: Vec<(SocketRef, SocketRef)>,
+    },
+    Node {
+        card: NodeCardModel,
+        prompt: Option<TextEdit>,
+        version: Option<TextEdit>,
+        config: Option<serde_json::Value>,
+        wires: Vec<WireModel>,
+        bridges: Vec<(SocketRef, SocketRef)>,
+    },
+    Variable {
+        index: usize,
+        variable: VariableDef,
+        name_edit: TextEdit,
+        default_edit: TextEdit,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -700,6 +716,7 @@ pub struct StudioApp {
     pub var_default_edits: Vec<TextEdit>,
     pub undo_stack: Vec<UndoEntry>,
     pub aside_wires: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
+    pub aside_bridges: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
     pub pantry_drag: Option<PantryDrag>,
     pub undo_banner: Option<String>,
     pub dirty: bool,
@@ -815,6 +832,7 @@ impl StudioApp {
             var_default_edits: Vec::new(),
             undo_stack: Vec::new(),
             aside_wires: HashMap::new(),
+            aside_bridges: HashMap::new(),
             pantry_drag: None,
             undo_banner: None,
             dirty: false,
@@ -1131,6 +1149,7 @@ impl StudioApp {
         let light = self.theme == Theme::Light;
         self.stop_active_run();
         self.aside_wires.clear();
+        self.aside_bridges.clear();
         self.spell = graph;
         self.canvas = CanvasState::from_graph(&self.spell, &self.specs);
         self.canvas.mode = mode;
@@ -1434,14 +1453,18 @@ impl StudioApp {
                 if removed.is_empty() {
                     return;
                 }
-                self.canvas.set_aside(&id);
+                let bridges = self.bridge_around(&id);
                 let title = self.canvas.card(&id).map(|card| card.title.clone()).unwrap_or_default();
                 self.aside_wires.insert(id.clone(), removed.clone());
-                self.undo_stack.push(UndoEntry::Aside { id, wires: removed });
+                self.aside_bridges.insert(id.clone(), bridges.clone());
+                self.undo_stack.push(UndoEntry::Aside { id, wires: removed, bridges });
                 self.undo_banner = Some(format!("Set aside {title}"));
             }
             magicklala_canvas::Toss::IntoPot(id) => {
                 let stash = self.aside_wires.remove(&id).unwrap_or_default();
+                if let Some(bridges) = self.aside_bridges.remove(&id) {
+                    self.drop_bridges(&bridges);
+                }
                 let mut restored = 0;
                 for (from, to) in &stash {
                     let open = !self.is_fed(&to.node, &to.socket) && self.canvas.card(&from.node).is_some() && self.canvas.card(&to.node).is_some();
@@ -1797,6 +1820,56 @@ impl StudioApp {
             .collect()
     }
 
+    pub fn brew_graph(&self) -> SpellGraph {
+        let mut graph = self.spell.clone();
+        if graph.wires.is_empty() {
+            return graph;
+        }
+        let wired = |id: &NodeId| graph.wires.iter().any(|wire| &wire.from_node == id || &wire.to_node == id);
+        let known = |kind: &str| self.specs.iter().any(|spec| spec.kind == kind);
+        let loose: Vec<NodeId> = graph.nodes.iter().filter(|node| !wired(&node.id) && known(&node.kind)).map(|node| node.id.clone()).collect();
+        graph.nodes.retain(|node| !loose.contains(&node.id));
+        graph
+    }
+
+    fn bridge_around(&mut self, id: &NodeId) -> Vec<(SocketRef, SocketRef)> {
+        let sources: Vec<SocketRef> = self
+            .canvas
+            .wires
+            .iter()
+            .filter(|wire| &wire.to_node == id && wire.ty.is_flow())
+            .map(|wire| SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()))
+            .collect();
+        let targets: Vec<SocketRef> = self
+            .canvas
+            .wires
+            .iter()
+            .filter(|wire| &wire.from_node == id && wire.ty.is_flow())
+            .map(|wire| SocketRef::new(wire.to_node.clone(), wire.to_socket.clone()))
+            .collect();
+        self.canvas.set_aside(id);
+        let mut bridges = Vec::new();
+        for target in &targets {
+            if self.is_fed(&target.node, &target.socket) {
+                continue;
+            }
+            for source in &sources {
+                if self.canvas.connect_sockets(source, target).is_ok() {
+                    bridges.push((source.clone(), target.clone()));
+                }
+            }
+        }
+        bridges
+    }
+
+    fn drop_bridges(&mut self, bridges: &[(SocketRef, SocketRef)]) {
+        self.canvas.wires.retain(|wire| {
+            !bridges
+                .iter()
+                .any(|(from, to)| wire.from_node == from.node && wire.from_socket == from.socket && wire.to_node == to.node && wire.to_socket == to.socket)
+        });
+    }
+
     fn hex_findings_for_spell(&self) -> Vec<HexFinding> {
         let version_findings: Vec<HexFinding> = self
             .spell
@@ -1814,7 +1887,7 @@ impl StudioApp {
             return version_findings;
         }
         let validator = SpellValidator::new(self.specs.clone());
-        if let Err(errors) = validator.validate(&self.spell) {
+        if let Err(errors) = validator.validate(&self.brew_graph()) {
             let title_of = |id: &NodeId| self.canvas.card(id).map_or_else(|| id.0.clone(), |card| card.title.clone());
             return errors.iter().map(|error| HexFinding::from_validation(error, &self.spell, &title_of)).collect();
         }
@@ -1825,7 +1898,7 @@ impl StudioApp {
             Ok(resolver) => resolver,
             Err(error) => return vec![HexFinding::loose(error.to_string())],
         };
-        match resolve_subgraphs_from(&self.spell, self.root_subgraph(), &resolver, &validator) {
+        match resolve_subgraphs_from(&self.brew_graph(), self.root_subgraph(), &resolver, &validator) {
             Ok(_) => Vec::new(),
             Err(error) => vec![HexFinding::loose(error.to_string())],
         }
@@ -1837,12 +1910,12 @@ impl StudioApp {
             return Err(version_errors);
         }
         let validator = SpellValidator::new(self.specs.clone());
-        validator.validate(&self.spell).map_err(|errors| errors.iter().map(ToString::to_string).collect::<Vec<_>>())?;
+        validator.validate(&self.brew_graph()).map_err(|errors| errors.iter().map(ToString::to_string).collect::<Vec<_>>())?;
         if self.spell.subgraphs.is_empty() {
             return Ok(());
         }
         let resolver = self.subgraph_resolver().map_err(|error| vec![error.to_string()])?;
-        resolve_subgraphs_from(&self.spell, root, &resolver, &validator).map(drop).map_err(|error| vec![error.to_string()])
+        resolve_subgraphs_from(&self.brew_graph(), root, &resolver, &validator).map(drop).map_err(|error| vec![error.to_string()])
     }
 
     pub fn validate(&mut self) -> &ValidationState {
@@ -1972,7 +2045,7 @@ impl StudioApp {
             engine.with_subgraph_resolver(Arc::new(self.subgraph_resolver().map_err(|error| error.to_string())?))
         };
         let emitter: Arc<dyn EventEmitter> = Arc::new(channel.clone());
-        let graph = self.spell.clone();
+        let graph = self.brew_graph();
         let deadline = self.run_timeout;
         let token = CancellationToken::new();
         let cancellation = token.clone();
@@ -2197,13 +2270,16 @@ impl StudioApp {
         self.close_context_menu();
         let Some(selected_id) = self.canvas.selection.clone() else { return };
         let attached_wires: Vec<WireModel> = self.canvas.wires.iter().filter(|w| w.from_node == selected_id || w.to_node == selected_id).cloned().collect();
+        let bridges = self.bridge_around(&selected_id);
+        self.canvas.select(Some(selected_id.clone()));
         if let Some(removed) = self.canvas.remove_selected_node() {
             self.aside_wires.remove(&removed.id);
+            self.aside_bridges.remove(&removed.id);
             let prompt = self.prompts.remove(&removed.id);
             let version = self.versions.remove(&removed.id);
             let config = self.configs.remove(&removed.id);
             let title = removed.title.clone();
-            self.undo_stack.push(UndoEntry::Node { card: removed, prompt, version, config, wires: attached_wires });
+            self.undo_stack.push(UndoEntry::Node { card: removed, prompt, version, config, wires: attached_wires, bridges });
             self.undo_banner = Some(format!("Removed {title}"));
             self.validation = ValidationState::Unchecked;
             self.dirty = true;
@@ -2215,7 +2291,9 @@ impl StudioApp {
         let Some(entry) = self.undo_stack.pop() else { return };
         self.undo_banner = None;
         match entry {
-            UndoEntry::Aside { id, wires } => {
+            UndoEntry::Aside { id, wires, bridges } => {
+                self.drop_bridges(&bridges);
+                self.aside_bridges.remove(&id);
                 for (from, to) in &wires {
                     if !self.is_fed(&to.node, &to.socket) {
                         let _ = self.canvas.connect_sockets(from, to);
@@ -2225,7 +2303,8 @@ impl StudioApp {
                 self.validation = ValidationState::Unchecked;
                 self.sync_spell();
             }
-            UndoEntry::Node { card, prompt, version, config, wires } => {
+            UndoEntry::Node { card, prompt, version, config, wires, bridges } => {
+                self.drop_bridges(&bridges);
                 let id = card.id.clone();
                 if let Some(prompt) = prompt {
                     self.prompts.insert(id.clone(), prompt);
