@@ -178,6 +178,10 @@ pub enum DragState {
     Panning {
         origin: [f32; 2],
     },
+    LiftingVial {
+        node: NodeId,
+        offset: [f32; 2],
+    },
     ConnectingWire {
         from: SocketRef,
         ty: SocketType,
@@ -222,6 +226,7 @@ pub enum CanvasEvent {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CanvasState {
     pub camera: Camera,
+    pub brew_camera: Camera,
     pub nodes: Vec<NodeCardModel>,
     pub wires: Vec<WireModel>,
     pub selection: Option<NodeId>,
@@ -237,6 +242,8 @@ pub struct CanvasState {
     pub validated: bool,
     pub invalid_brew: bool,
     pub running_brew: bool,
+    pub toss_count: u32,
+    pub pot_hover: bool,
     next_id: u64,
 }
 
@@ -449,12 +456,42 @@ impl CanvasState {
         }
     }
 
+    pub fn set_aside(&mut self, id: &NodeId) -> usize {
+        let before = self.wires.len();
+        self.wires.retain(|wire| &wire.from_node != id && &wire.to_node != id);
+        before - self.wires.len()
+    }
+
+    pub fn apply_toss(&mut self, toss: &crate::Toss) {
+        if let crate::Toss::Aside(id) = toss {
+            self.set_aside(id);
+        }
+    }
+
+    pub fn active_camera(&self) -> &Camera {
+        match self.mode {
+            WorkbenchMode::Cauldron => &self.brew_camera,
+            WorkbenchMode::Grimoire => &self.camera,
+        }
+    }
+
+    pub fn zoom_active(&mut self, factor: f32, pivot: [f32; 2]) {
+        match self.mode {
+            WorkbenchMode::Cauldron => self.brew_camera.zoom_about_origin(factor),
+            WorkbenchMode::Grimoire => self.camera.zoom_by(factor, pivot),
+        }
+    }
+
     pub fn has_run(&self) -> bool {
         self.wires.iter().any(|wire| wire.active)
     }
 
     pub fn fit(&mut self, viewport: (f32, f32)) {
-        if self.nodes.is_empty() || self.mode == WorkbenchMode::Cauldron {
+        if self.mode == WorkbenchMode::Cauldron {
+            self.brew_camera.reset();
+            return;
+        }
+        if self.nodes.is_empty() {
             self.camera.reset();
             return;
         }

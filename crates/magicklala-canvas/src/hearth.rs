@@ -195,6 +195,40 @@ impl HearthPalette {
     }
 }
 
+impl HearthPalette {
+    pub fn broth_ink(&self) -> Color {
+        if self.light { self.broth_deep } else { self.broth_foam }
+    }
+
+    pub fn route_taken_fill(&self) -> Color {
+        if self.light { hex(0xE6F6EF) } else { with_alpha(self.broth_mid, 0.24) }
+    }
+
+    pub fn untaken_ink(&self) -> Color {
+        if self.light { hex(0x5E5470) } else { hex(0xA499C4) }
+    }
+
+    pub fn untaken_fill(&self) -> Color {
+        if self.light { hex(0xF1EFF6) } else { hex(0x1E192D) }
+    }
+
+    pub fn untaken_border(&self) -> Color {
+        if self.light { hex(0x9890AA) } else { hex(0x5E547D) }
+    }
+
+    pub fn untaken_title(&self) -> Color {
+        if self.light { hex(0x3A3248) } else { hex(0xDFD9F0) }
+    }
+
+    pub fn untaken_sub(&self) -> Color {
+        if self.light { hex(0x524963) } else { hex(0xC2B9D9) }
+    }
+
+    pub fn simmer_ink(&self) -> Color {
+        if self.light { hex(0x7A4E0C) } else { self.gold_hi }
+    }
+}
+
 pub fn category_tone(category: &str, light: bool) -> CategoryTone {
     match category.to_ascii_lowercase().as_str() {
         "events" | "event" => CategoryTone {

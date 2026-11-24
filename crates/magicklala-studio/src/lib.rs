@@ -697,6 +697,8 @@ pub struct StudioApp {
     pub var_name_edits: Vec<TextEdit>,
     pub var_default_edits: Vec<TextEdit>,
     pub undo_stack: Vec<UndoEntry>,
+    pub aside_wires: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
+    pub pantry_drag: Option<PantryDrag>,
     pub undo_banner: Option<String>,
     pub dirty: bool,
     pub palette_query: TextEdit,
@@ -727,6 +729,12 @@ pub struct StudioApp {
     active: Option<ActiveRun>,
     stopping: Vec<tokio::task::JoinHandle<()>>,
     waker: Option<Waker>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PantryDrag {
+    pub kind: String,
+    pub at: [f32; 2],
 }
 
 impl StudioApp {
@@ -804,6 +812,8 @@ impl StudioApp {
             var_name_edits: Vec::new(),
             var_default_edits: Vec::new(),
             undo_stack: Vec::new(),
+            aside_wires: HashMap::new(),
+            pantry_drag: None,
             undo_banner: None,
             dirty: false,
             palette_query: TextEdit::new(""),
@@ -1296,48 +1306,277 @@ impl StudioApp {
     }
 
     pub fn spawn_at(&mut self, kind: &str, screen: [f32; 2]) -> Option<NodeId> {
+        let wire_in = self.canvas.mode == WorkbenchMode::Cauldron;
+        self.place_ingredient(kind, screen, wire_in)
+    }
+
+    fn place_ingredient(&mut self, kind: &str, screen: [f32; 2], wire_in: bool) -> Option<NodeId> {
         let spec = self.specs.iter().find(|spec| spec.kind == kind)?.clone();
         let center = self.canvas.camera.screen_to_world(screen);
         let id = self.canvas.add_node_from_spec(&spec, center);
         self.track_config(id.clone(), kind, serde_json::Value::Null);
-        if self.canvas.mode == WorkbenchMode::Cauldron && kind != SUBGRAPH_KIND {
+        if wire_in && kind != SUBGRAPH_KIND {
             self.auto_wire_cauldron_ingredient(&id, &spec);
+            self.canvas.toss_count += 1;
         }
         self.validation = ValidationState::Unchecked;
         self.sync_spell();
         Some(id)
     }
 
-    fn auto_wire_cauldron_ingredient(&mut self, id: &NodeId, spec: &NodeSpec) {
-        if spec.is_trigger {
-            return;
+    pub fn canvas_origin(&self) -> [f32; 2] {
+        [self.left_rail_width(), TOOLBAR_HEIGHT]
+    }
+
+    pub fn pantry_drag_point(&self) -> Option<[f32; 2]> {
+        let drag = self.pantry_drag.as_ref()?;
+        let origin = self.canvas_origin();
+        let local = [drag.at[0] - origin[0], drag.at[1] - origin[1]];
+        let size = self.canvas_size();
+        (local[0] >= 0.0 && local[1] >= 0.0 && local[0] <= size.0 && local[1] <= size.1).then_some(local)
+    }
+
+    pub fn pantry_drag_over_pot(&self) -> bool {
+        self.canvas.mode == WorkbenchMode::Cauldron
+            && self.pantry_drag_point().is_some_and(|point| magicklala_canvas::brew_plan(&self.canvas, self.canvas_size()).is_over_pot(point))
+    }
+
+    pub fn pantry_drag_move(&mut self, kind: &str, at: [f32; 2]) {
+        self.pantry_drag = Some(PantryDrag { kind: kind.to_owned(), at });
+        self.canvas.pot_hover = self.pantry_drag_over_pot();
+    }
+
+    pub fn pantry_drop(&mut self, cancelled: bool) -> Option<NodeId> {
+        let point = self.pantry_drag_point();
+        let over_pot = self.pantry_drag_over_pot();
+        let drag = self.pantry_drag.take()?;
+        self.canvas.pot_hover = false;
+        if cancelled {
+            return None;
         }
-        let has_flow_in = spec.inputs.iter().any(|s| s.ty.is_flow());
-        let has_flow_out = spec.outputs.iter().any(|s| s.ty.is_flow());
-        if has_flow_in {
-            let source = self
-                .canvas
-                .nodes
-                .iter()
-                .find(|card| card.id != *id && card.kind == "event/on_message")
-                .or_else(|| self.canvas.nodes.iter().find(|card| card.id != *id && card.outputs.iter().any(|s| s.ty.is_flow())))
-                .and_then(|card| card.outputs.iter().find(|s| s.ty.is_flow()).map(|s| (card.id.clone(), s.name.clone())));
-            if let (Some((from_id, from_sock)), Some(to_sock)) = (source, spec.inputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone())) {
-                let _ = self
+        let point = point?;
+        match self.canvas.mode {
+            WorkbenchMode::Cauldron => {
+                let view = self.canvas_size();
+                let count = self.canvas.nodes.len() as f32;
+                self.place_ingredient(&drag.kind, [view.0 * 0.5 - 100.0 + count * 12.0, view.1 * 0.62 + count * 8.0], over_pot)
+            }
+            WorkbenchMode::Grimoire => self.place_ingredient(&drag.kind, [point[0] - magicklala_canvas::CARD_WIDTH * 0.5, point[1] - 14.0], false),
+        }
+    }
+
+    pub fn toss(&mut self, toss: magicklala_canvas::Toss) {
+        match toss {
+            magicklala_canvas::Toss::Aside(id) => {
+                let removed: Vec<(SocketRef, SocketRef)> = self
                     .canvas
-                    .connect_sockets(&magicklala_canvas::SocketRef::new(from_id, from_sock), &magicklala_canvas::SocketRef::new(id.clone(), to_sock));
+                    .wires
+                    .iter()
+                    .filter(|wire| wire.from_node == id || wire.to_node == id)
+                    .map(|wire| {
+                        (SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()), SocketRef::new(wire.to_node.clone(), wire.to_socket.clone()))
+                    })
+                    .collect();
+                if removed.is_empty() {
+                    return;
+                }
+                self.canvas.set_aside(&id);
+                self.aside_wires.insert(id, removed);
+            }
+            magicklala_canvas::Toss::IntoPot(id) => {
+                let stash = self.aside_wires.remove(&id).unwrap_or_default();
+                let restored = stash.iter().filter(|(from, to)| self.canvas.connect_sockets(from, to).is_ok()).count();
+                if restored == 0 {
+                    let Some(kind) = self.canvas.card(&id).map(|card| card.kind.clone()) else { return };
+                    let Some(spec) = self.specs.iter().find(|spec| spec.kind == kind).cloned() else { return };
+                    self.auto_wire_cauldron_ingredient(&id, &spec);
+                }
+                self.canvas.toss_count += 1;
             }
         }
-        if has_flow_out && spec.kind != "io/send_message" {
-            let target = self
-                .canvas
-                .nodes
-                .iter()
-                .find(|card| card.id != *id && (card.kind == "ai/generate_text" || card.kind == "io/send_message"))
-                .and_then(|card| card.inputs.iter().find(|s| s.ty.is_flow()).map(|s| (card.id.clone(), s.name.clone())));
-            if let (Some(from_sock), Some((to_id, to_sock))) = (spec.outputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone()), target) {
-                let _ =
-                    self.canvas.connect_sockets(&magicklala_canvas::SocketRef::new(id.clone(), from_sock), &magicklala_canvas::SocketRef::new(to_id, to_sock));
+        self.validation = ValidationState::Unchecked;
+        self.sync_spell();
+    }
+
+    fn spec_of(&self, node: &NodeId) -> Option<NodeSpec> {
+        let kind = &self.canvas.card(node)?.kind;
+        self.specs.iter().find(|spec| &spec.kind == kind).cloned()
+    }
+
+    fn downstream_of(&self, id: &NodeId) -> std::collections::HashSet<NodeId> {
+        let mut seen = std::collections::HashSet::from([id.clone()]);
+        let mut queue = VecDeque::from([id.clone()]);
+        while let Some(node) = queue.pop_front() {
+            for wire in self.canvas.wires.iter().filter(|wire| wire.from_node == node) {
+                if seen.insert(wire.to_node.clone()) {
+                    queue.push_back(wire.to_node.clone());
+                }
+            }
+        }
+        seen
+    }
+
+    fn feeds(&self, node: &NodeId, socket: &str) -> bool {
+        self.canvas.wires.iter().any(|wire| &wire.from_node == node && wire.from_socket == socket)
+    }
+
+    fn is_fed(&self, node: &NodeId, socket: &str) -> bool {
+        self.canvas.wires.iter().any(|wire| &wire.to_node == node && wire.to_socket == socket)
+    }
+
+    fn connect(&mut self, from: (&NodeId, &str), to: (&NodeId, &str)) -> bool {
+        self.canvas.connect_sockets(&SocketRef::new(from.0.clone(), from.1.to_owned()), &SocketRef::new(to.0.clone(), to.1.to_owned())).is_ok()
+    }
+
+    fn feed_from(&mut self, sources: &[NodeId], target: &NodeId, socket: &str, ty: SocketType) -> bool {
+        let banned = self.downstream_of(target);
+        for exact in [true, false] {
+            for source in sources.iter().filter(|source| !banned.contains(*source)) {
+                let Some(card) = self.canvas.card(source) else { continue };
+                let outs: Vec<String> = card
+                    .outputs
+                    .iter()
+                    .filter(|out| !out.ty.is_flow() && if exact { out.ty == ty } else { out.ty != ty })
+                    .map(|out| out.name.clone())
+                    .collect();
+                for out in outs {
+                    if self.connect((source, &out), (target, socket)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn auto_wire_cauldron_ingredient(&mut self, id: &NodeId, spec: &NodeSpec) {
+        let order: Vec<NodeId> = magicklala_canvas::recipe_order(&self.canvas).into_iter().filter(|node| node != id).collect();
+        let bottle = |app: &Self, node: &NodeId| app.canvas.card(node).is_some_and(magicklala_canvas::brew::is_bottle);
+        let flow_out_of =
+            |app: &Self, node: &NodeId| app.canvas.card(node).and_then(|card| card.outputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone()));
+        let flow_in_of = |app: &Self, node: &NodeId| app.canvas.card(node).and_then(|card| card.inputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone()));
+        let my_flow_in = spec.inputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone());
+        let my_flow_out = spec.outputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone());
+        let mut sources: Vec<NodeId> = Vec::new();
+
+        if spec.is_trigger {
+            if let Some(out) = &my_flow_out {
+                let head = order.iter().find(|node| flow_in_of(self, node).is_some_and(|input| !self.is_fed(node, &input))).cloned();
+                if let Some(head) = head {
+                    let input = flow_in_of(self, &head).unwrap_or_default();
+                    self.connect((id, out), (&head, &input));
+                    let wanted: Vec<(String, SocketType)> = self
+                        .spec_of(&head)
+                        .map(|spec| spec.inputs.iter().filter(|s| s.required && !s.ty.is_flow()).map(|s| (s.name.clone(), s.ty)).collect())
+                        .unwrap_or_default();
+                    for (name, ty) in wanted {
+                        if !self.is_fed(&head, &name) {
+                            self.feed_from(std::slice::from_ref(id), &head, &name, ty);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        if let Some(input) = &my_flow_in {
+            let free_tail =
+                order.iter().rev().filter(|node| !bottle(self, node)).find(|node| flow_out_of(self, node).is_some_and(|out| !self.feeds(node, &out))).cloned();
+            let before_bottle = order.iter().rev().find_map(|node| {
+                let out = flow_out_of(self, node)?;
+                self.canvas
+                    .wires
+                    .iter()
+                    .find(|wire| &wire.from_node == node && wire.from_socket == out && bottle(self, &wire.to_node))
+                    .map(|wire| (node.clone(), wire.id.clone(), wire.to_node.clone(), wire.to_socket.clone()))
+            });
+            match (free_tail, before_bottle) {
+                (Some(tail), _) => {
+                    let out = flow_out_of(self, &tail).unwrap_or_default();
+                    if self.connect((&tail, &out), (id, input)) {
+                        sources.push(tail);
+                    }
+                }
+                (None, Some((prev, wire, next, next_in))) if !bottle(self, id) && my_flow_out.is_some() => {
+                    let out = flow_out_of(self, &prev).unwrap_or_default();
+                    self.canvas.wires.retain(|candidate| candidate.id != wire);
+                    if self.connect((&prev, &out), (id, input)) {
+                        sources.push(prev.clone());
+                    }
+                    let mine = my_flow_out.clone().unwrap_or_default();
+                    self.connect((id, &mine), (&next, &next_in));
+                    let handed: Vec<(WireModel, String)> = self
+                        .canvas
+                        .wires
+                        .iter()
+                        .filter(|wire| wire.from_node == prev && wire.to_node == next && !wire.ty.is_flow())
+                        .filter_map(|wire| spec.outputs.iter().find(|out| out.ty == wire.ty).map(|out| (wire.clone(), out.name.clone())))
+                        .collect();
+                    for (wire, out) in handed {
+                        self.canvas.wires.retain(|candidate| candidate.id != wire.id);
+                        if !self.connect((id, &out), (&next, &wire.to_socket)) {
+                            let _ = self.canvas.connect_sockets(
+                                &SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()),
+                                &SocketRef::new(wire.to_node.clone(), wire.to_socket.clone()),
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    let any = order.iter().rev().filter(|node| !bottle(self, node)).find(|node| flow_out_of(self, node).is_some()).cloned();
+                    if let Some(prev) = any {
+                        let out = flow_out_of(self, &prev).unwrap_or_default();
+                        if self.connect((&prev, &out), (id, input)) {
+                            sources.push(prev);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(out) = &my_flow_out
+            && !bottle(self, id)
+            && !self.feeds(id, out)
+            && let Some(next) = order.iter().find(|node| bottle(self, node) && flow_in_of(self, node).is_some_and(|input| !self.is_fed(node, &input))).cloned()
+        {
+            let input = flow_in_of(self, &next).unwrap_or_default();
+            self.connect((id, out), (&next, &input));
+        }
+
+        let rest: Vec<NodeId> = order.iter().rev().filter(|node| !sources.contains(node)).cloned().collect();
+        sources.extend(rest);
+        for socket in spec.inputs.iter().filter(|s| s.required && !s.ty.is_flow()) {
+            if !self.is_fed(id, &socket.name) {
+                self.feed_from(&sources, id, &socket.name, socket.ty);
+            }
+        }
+
+        if my_flow_in.is_none() && my_flow_out.is_none() {
+            let downstream = self.downstream_of(id);
+            let consumers: Vec<NodeId> = order.iter().filter(|node| !downstream.contains(*node) && flow_in_of(self, node).is_some()).cloned().collect();
+            let outs: Vec<(String, SocketType)> = spec.outputs.iter().filter(|s| !s.ty.is_flow()).map(|s| (s.name.clone(), s.ty)).collect();
+            'outer: for required_first in [true, false] {
+                for exact in [true, false] {
+                    for consumer in consumers.iter().rev() {
+                        let open: Vec<(String, SocketType)> = self
+                            .spec_of(consumer)
+                            .map(|spec| {
+                                spec.inputs
+                                    .iter()
+                                    .filter(|s| !s.ty.is_flow() && s.required == required_first && !self.is_fed(consumer, &s.name))
+                                    .map(|s| (s.name.clone(), s.ty))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        for (input, in_ty) in open {
+                            for (out, out_ty) in &outs {
+                                if (*out_ty == in_ty) == exact && self.connect((id, out), (consumer, &input)) {
+                                    break 'outer;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

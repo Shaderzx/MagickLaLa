@@ -868,12 +868,30 @@ test('Tossing On Message, Generate Text and Send Message into an empty cauldron 
   expect(validation).toBe('valid');
 });
 
-test('Dragging a pantry ingredient onto the cauldron adds exactly one node of that kind and wires it into the recipe', { timeout: 900_000 }, async () => {
+test('Dragging Generate Text from the pantry onto a full support cauldron pours it in just before the reply bottle: the old model now flows into it, it flows into the reply, and its prompt is fed by the old model text', { timeout: 900_000 }, async () => {
   const { pantryDrop } = await studioProbe(['toss']);
+  const fresh = pantryDrop.id as string;
+  const wires = pantryDrop.wiresAfter as string[][];
+  const has = (wire: string[]) => wires.some((candidate) => candidate.join('|') === wire.join('|'));
 
   expect(pantryDrop.nodesAfter).toBe(pantryDrop.nodesBefore + 1);
-  expect(pantryDrop.id).not.toBeNull();
-  expect(pantryDrop.wires.length).toBeGreaterThan(0);
+  expect(fresh).toEqual(expect.any(String));
+  expect(pantryDrop.role).toBe('Ingredient');
+  expect(has(['llm', 'out', fresh, 'in'])).toBe(true);
+  expect(has([fresh, 'out', 'reply', 'in'])).toBe(true);
+  expect(has(['llm', 'out', 'reply', 'in'])).toBe(false);
+  expect(has(['llm', 'text', fresh, 'prompt'])).toBe(true);
+  expect(has([fresh, 'text', 'reply', 'content'])).toBe(true);
+  expect(has(['llm', 'text', 'reply', 'content'])).toBe(false);
+  expect(pantryDrop.ghostDuringDrag).toBe(false);
+});
+
+test('Dragging a Template onto a cauldron whose every input is already fed adds it set aside and leaves every existing wire untouched', { timeout: 900_000 }, async () => {
+  const { pantryFull } = await studioProbe(['toss']);
+
+  expect(pantryFull.nodesAfter).toBe(pantryFull.nodesBefore + 1);
+  expect(pantryFull.role).toBe('Aside');
+  expect([...pantryFull.wiresAfter].sort()).toEqual([...pantryFull.wiresBefore].sort());
 });
 
 test('Dragging a vial off the cauldron sets it aside with every wire removed, dragging it back pours it in again, and no cauldron drag ever moves a node in the Grimoire', { timeout: 900_000 }, async () => {

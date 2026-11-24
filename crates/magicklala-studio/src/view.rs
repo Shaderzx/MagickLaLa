@@ -252,7 +252,43 @@ pub fn studio_view(app: &StudioApp, _: &mut Cx<StudioApp>) -> El {
         .child(left_rail(app, &t))
         .child(el().key("center").grow(1.0).min_w(0.0).h_full().child(canvas_with_menu(app, &t)))
         .child(inspector(app, &t));
-    col().key("studio").w_full().h_full().fill(t.paper).child(toolbar(app, &t)).child(middle).child(trace_strip(app, &t))
+    let studio = col().key("studio").w_full().h_full().fill(t.paper).child(toolbar(app, &t)).child(middle).child(trace_strip(app, &t));
+    let root = el().key("studio-root").w_full().h_full().child(studio);
+    match pantry_ghost(app, &t) {
+        Some(ghost) => root.child(ghost),
+        None => root,
+    }
+}
+
+fn pantry_ghost(app: &StudioApp, t: &HearthPalette) -> Option<El> {
+    let drag = app.pantry_drag.as_ref()?;
+    let spec = app.specs.iter().find(|spec| spec.kind == drag.kind)?;
+    let light = app.theme == Theme::Light;
+    let tone = category_tone(&spec.category, light);
+    let over = app.pantry_drag_over_pot();
+    let hint = match (app.canvas.mode, over, app.pantry_drag_point().is_some()) {
+        (WorkbenchMode::Cauldron, true, _) => "Drop to stir in",
+        (WorkbenchMode::Cauldron, false, true) => "Drop to set aside",
+        (WorkbenchMode::Grimoire, _, true) => "Drop to place",
+        _ => "Drag onto the cauldron",
+    };
+    Some(
+        row()
+            .key("pantry-ghost")
+            .gap(7.0)
+            .px(9.0)
+            .py(6.0)
+            .radius(14.0)
+            .continuous_corners()
+            .items_center()
+            .fill(t.card)
+            .border(if over { 2.0 } else { 1.3 }, if over { t.gold_hi } else { tone.border })
+            .shadow(6.0, 18.0, t.shadow_card)
+            .opacity(0.94)
+            .absolute(drag.at[0] + 12.0, drag.at[1] + 10.0)
+            .child(canvas(mini_vial_icon(&spec.category, light, 20.0)).size(20.0, 20.0))
+            .child(col().gap(1.0).child(label(&spec.title, 12.0, 700.0, t.ink)).child(label(hint, 10.0, 550.0, if over { t.simmer_ink() } else { t.mute }))),
+    )
 }
 
 fn empty_canvas_overlay(app: &StudioApp, t: &HearthPalette) -> El {
@@ -281,7 +317,7 @@ fn empty_canvas_overlay(app: &StudioApp, t: &HearthPalette) -> El {
 }
 
 fn canvas_with_menu(app: &StudioApp, t: &HearthPalette) -> El {
-    let mut board = interactive_canvas_view::<StudioApp>(&app.canvas, app.canvas_size(), |app| &mut app.canvas);
+    let mut board = interactive_canvas_view::<StudioApp>(&app.canvas, app.canvas_size(), |app| &mut app.canvas, StudioApp::toss);
     if app.canvas.nodes.is_empty() {
         board = board.child(empty_canvas_overlay(app, t));
     }
@@ -307,11 +343,16 @@ fn toolbar(app: &StudioApp, t: &HearthPalette) -> El {
         .gap(3.0)
         .items_center()
         .child(button_el("zoom-out", "−", ButtonKind::Subtle, if compact { 6.0 } else { 8.0 }, t, |app| {
-            app.canvas.camera.zoom_by(1.0 / 1.2, [app.canvas_size().0 / 2.0, app.canvas_size().1 / 2.0]);
+            app.canvas.zoom_active(1.0 / 1.2, [app.canvas_size().0 / 2.0, app.canvas_size().1 / 2.0]);
         }))
-        .child(row().key("zoom-readout").w(readout).justify_center().child(figure(format!("{}%", app.canvas.camera.zoom_percent()), 11.5, 600.0, t.ink_2)))
+        .child(row().key("zoom-readout").w(readout).justify_center().child(figure(
+            format!("{}%", app.canvas.active_camera().zoom_percent()),
+            11.5,
+            600.0,
+            t.ink_2,
+        )))
         .child(button_el("zoom-in", "+", ButtonKind::Subtle, if compact { 6.0 } else { 8.0 }, t, |app| {
-            app.canvas.camera.zoom_by(1.2, [app.canvas_size().0 / 2.0, app.canvas_size().1 / 2.0]);
+            app.canvas.zoom_active(1.2, [app.canvas_size().0 / 2.0, app.canvas_size().1 / 2.0]);
         }))
         .child(button_el("zoom-fit", "Fit", ButtonKind::Subtle, if compact { 6.0 } else { 9.0 }, t, StudioApp::fit_view));
     let bottle_count = app.canvas.nodes.iter().filter(|card| card.kind == "io/send_message" || card.category.eq_ignore_ascii_case("io")).count();
@@ -594,6 +635,7 @@ fn left_rail(app: &StudioApp, t: &HearthPalette) -> El {
                         .child(figure(entries.len().to_string(), 10.5, 600.0, t.mute));
                     entries.into_iter().fold(list.child(heading), |list, spec| {
                         let kind = spec.kind.clone();
+                        let drag_kind = spec.kind.clone();
                         let in_pot = app.canvas.nodes.iter().any(|card| card.kind == spec.kind);
                         let mut right_actions = row().gap(4.0).items_center();
                         if in_pot {
@@ -659,6 +701,17 @@ fn left_rail(app: &StudioApp, t: &HearthPalette) -> El {
                             .child(right_actions)
                             .on_press(move |app: &mut StudioApp| {
                                 app.spawn(&kind);
+                            })
+                            .on_drag(move |app: &mut StudioApp, drag, tx| {
+                                tx.instant();
+                                match drag.phase {
+                                    rune::Phase::Down => app.pantry_drag = None,
+                                    rune::Phase::Move if drag.dx.hypot(drag.dy) >= 6.0 => app.pantry_drag_move(&drag_kind, drag.window_point()),
+                                    rune::Phase::Move => {}
+                                    rune::Phase::Up => {
+                                        app.pantry_drop(drag.cancelled());
+                                    }
+                                }
                             });
                         list.child(item)
                     })

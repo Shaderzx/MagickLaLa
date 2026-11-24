@@ -1,10 +1,11 @@
 use magicklala_graph::SocketType;
 use rune::{Color, El, Phase, Shape, TextStyle, canvas, col, el, row, text};
 
+use crate::brew::BrewPlan;
+use crate::cauldron::{Toss, TossHook, cauldron_workbench_view};
 use crate::hearth::{
-    CauldronMood, HearthPalette, StreamStyle, WireStyle, brand_cauldron_mark, category_tone, distillation_point, distillation_ribbon_shape, fill_circle,
-    fill_star4, ghost_potion_bottle_shape, grimoire_wire_shape, hero_cauldron_shape, hex, mini_vial_icon, potion_bottle_shape, pouring_stream_shape,
-    sparkle_connector_h, stream_ink, tabletop_circle_shape, with_alpha,
+    CauldronMood, HearthPalette, WireStyle, brand_cauldron_mark, category_tone, fill_circle, fill_star4, grimoire_wire_shape, hex, mini_vial_icon,
+    potion_bottle_shape, sparkle_connector_h, tabletop_circle_shape, with_alpha,
 };
 use crate::model::{CARD_HEADER, SOCKET_ROW};
 use crate::{CanvasState, DragState, ExecutionStatus, NodeCardModel, SocketModel, SocketRef, WorkbenchMode};
@@ -80,17 +81,17 @@ pub fn status_color(status: ExecutionStatus) -> Color {
 }
 
 pub fn canvas_view(state: &CanvasState, size: (f32, f32)) -> El {
-    interactive_canvas_view::<CanvasState>(state, size, |state| state)
+    interactive_canvas_view::<CanvasState>(state, size, |state| state, |state, toss| state.apply_toss(&toss))
 }
 
-pub fn interactive_canvas_view<S: 'static>(state: &CanvasState, size: (f32, f32), lens: fn(&mut S) -> &mut CanvasState) -> El {
+pub fn interactive_canvas_view<S: 'static>(state: &CanvasState, size: (f32, f32), lens: fn(&mut S) -> &mut CanvasState, toss: TossHook<S>) -> El {
     match state.mode {
-        WorkbenchMode::Cauldron => cauldron_workbench_view(state, size, lens),
+        WorkbenchMode::Cauldron => cauldron_workbench_view(state, size, lens, toss),
         WorkbenchMode::Grimoire => grimoire_graph_view(state, size, lens),
     }
 }
 
-fn cauldron_mood(state: &CanvasState) -> CauldronMood {
+pub(crate) fn cauldron_mood(state: &CanvasState) -> CauldronMood {
     if state.nodes.is_empty() {
         return CauldronMood::Empty;
     }
@@ -106,11 +107,7 @@ fn cauldron_mood(state: &CanvasState) -> CauldronMood {
     CauldronMood::Ready
 }
 
-fn is_potion_output(card: &NodeCardModel) -> bool {
-    card.kind == "io/send_message" || card.category.eq_ignore_ascii_case("io")
-}
-
-fn mode_switcher<S: 'static>(state: &CanvasState, p: &HearthPalette, lens: fn(&mut S) -> &mut CanvasState) -> El {
+pub(crate) fn mode_switcher<S: 'static>(state: &CanvasState, p: &HearthPalette, lens: fn(&mut S) -> &mut CanvasState) -> El {
     let is_cauldron = state.mode == WorkbenchMode::Cauldron;
     let pill = |key: &str, caption: &str, active: bool, target: WorkbenchMode| {
         row()
@@ -143,552 +140,18 @@ fn mode_switcher<S: 'static>(state: &CanvasState, p: &HearthPalette, lens: fn(&m
         .child(pill("mode-grimoire", "Grimoire", !is_cauldron, WorkbenchMode::Grimoire))
 }
 
-fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32), lens: fn(&mut S) -> &mut CanvasState) -> El {
-    let p = HearthPalette::for_theme(state.light);
-    let mood = cauldron_mood(state);
-    let compact = size.0 < 690.0 || size.1 < 570.0;
-    let zoom = state.camera.zoom.clamp(0.65, 1.5);
-    let ox = size.0 * 0.5;
-    let oy = size.1 * 0.5;
-    let pan_x = state.camera.pan_x;
-    let pan_y = state.camera.pan_y;
-    let map_pt = |pt: [f32; 2]| -> [f32; 2] { [ox + (pt[0] - ox) * zoom + pan_x, oy + (pt[1] - oy) * zoom + pan_y] };
-    let outputs: Vec<&NodeCardModel> = state.nodes.iter().filter(|card| is_potion_output(card)).collect();
-    let multi_outputs = outputs.len() > 1;
-    let base_cx = if state.nodes.is_empty() {
-        size.0 * 0.50
-    } else if multi_outputs {
-        size.0 * 0.47
-    } else {
-        size.0 * 0.52
-    };
-    let base_cy = if state.nodes.is_empty() {
-        size.1 * 0.39
-    } else if compact {
-        (size.1 * 0.49).clamp(228.0, 276.0)
-    } else {
-        320.0
-    };
-    let [cx, cy] = map_pt([base_cx, base_cy]);
-    let cauldron_w: f32 = (if compact { 206.0 } else { 256.0 }) * zoom;
-    let cauldron_h: f32 = (if compact { 200.0 } else { 248.0 }) * zoom;
-    let u = (cauldron_w.min(cauldron_h) / 240.0).clamp(0.45, 1.55);
-    let rim_y = cy - cauldron_h * 0.54 + cauldron_h * 0.56 - 30.0 * u;
-    let circle_r = (if compact { 140.0 } else { 172.0 }) * zoom;
-
-    let glow_color = match mood {
-        CauldronMood::Hexed => with_alpha(p.hex, if state.light { 0.12 } else { 0.18 }),
-        CauldronMood::Empty => Color::TRANSPARENT,
-        CauldronMood::Ready => with_alpha(p.broth_mid, 0.08),
-        CauldronMood::Simmering | CauldronMood::Brewed => with_alpha(p.broth_foam, if state.light { 0.24 } else { 0.20 }),
-    };
-    let hearth_glow = el()
-        .size(size.0, size.1)
-        .radial_gradient(
-            [(cx / size.0).clamp(0.0, 1.0), (cy / size.1).clamp(0.0, 1.0)],
-            [circle_r * 1.45, circle_r * 1.25],
-            [(0.0, glow_color), (0.65, with_alpha(glow_color, 0.04)), (1.0, Color::TRANSPARENT)],
-        )
-        .absolute(0.0, 0.0);
-
-    let backdrop = canvas(apothecary_dots(state, size, &p, [cx, cy], circle_r)).key("canvas-dots").size(size.0, size.1).absolute(0.0, 0.0);
-
-    let all_non_outputs: Vec<&NodeCardModel> = state.nodes.iter().filter(|card| !is_potion_output(card)).collect();
-    let mut branch_helpers: Vec<(&NodeCardModel, magicklala_graph::NodeId)> = Vec::new();
-    let mut ingredients: Vec<&NodeCardModel> = Vec::new();
-    for card in &all_non_outputs {
-        let outgoing: Vec<&crate::WireModel> = state.wires.iter().filter(|w| w.from_node == card.id).collect();
-        let single_out_target = if multi_outputs && !outgoing.is_empty() && outgoing.iter().all(|w| outputs.iter().any(|o| o.id == w.to_node)) {
-            let first = &outgoing[0].to_node;
-            outgoing.iter().all(|w| &w.to_node == first).then(|| first.clone())
-        } else {
-            None
-        };
-        if let Some(target_out) = single_out_target {
-            branch_helpers.push((*card, target_out));
-        } else {
-            ingredients.push(*card);
-        }
-    }
-    let has_run = state.has_run();
-
-    let vial_w = (if compact { 180.0 } else { 196.0 }) * zoom;
-    let vial_h = (if compact { 50.0 } else { 58.0 }) * zoom;
-    let left_x = if compact { 20.0 } else { 24.0 };
-    let left_count = ingredients.len().min(4);
-    let gap_y = if compact { 16.0 } else { 22.0 };
-    let base_vial_h = if compact { 50.0 } else { 58.0 };
-    let stack_h = if left_count > 0 { left_count as f32 * base_vial_h + (left_count - 1) as f32 * gap_y } else { 0.0 };
-    let start_y = if compact {
-        ((size.1 - stack_h) * 0.5 - 2.0).max(52.0)
-    } else if left_count <= 3 {
-        ((base_cy - stack_h * 0.5) - 6.0).max(120.0)
-    } else {
-        150.0
-    };
-
-    let mut placed_ingredients: Vec<(&NodeCardModel, [f32; 2])> = Vec::with_capacity(ingredients.len());
-    for (idx, card) in ingredients.iter().enumerate() {
-        let base_pos = if idx < 4 {
-            [left_x, start_y + idx as f32 * (base_vial_h + gap_y)]
-        } else {
-            let extra = (idx - 4) as f32;
-            [(base_cx - 98.0 + (extra - 0.5) * 210.0).clamp(16.0, size.0 - 212.0), 54.0]
-        };
-        placed_ingredients.push((*card, map_pt(base_pos)));
-    }
-
-    let potion_w = (if compact { 126.0 } else { 148.0 }) * zoom;
-    let base_potion_w = if compact { 126.0 } else { 148.0 };
-    let base_potion_x = (size.0 - base_potion_w - if compact { 16.0 } else { 22.0 }).max(base_cx + (if compact { 103.0 } else { 128.0 }) + 16.0);
-    let base_potion_y = (base_cy - 78.0).max(58.0);
-    let [potion_x, potion_y] = map_pt([base_potion_x, base_potion_y]);
-    let sealed_vintage =
-        state.release_badge.is_some() && !matches!(mood, CauldronMood::Brewed | CauldronMood::Simmering | CauldronMood::Hexed | CauldronMood::Empty);
-    let bottle_neck = [potion_x + potion_w * 0.5, potion_y + (if sealed_vintage { 14.0 } else { 29.0 }) * zoom];
-
-    let mut streams = Shape::new();
-    let count_f = placed_ingredients.len().max(1) as f32;
-    for (idx, (card, pos)) in placed_ingredients.iter().enumerate() {
-        let tone = category_tone(&card.category, state.light);
-        let from = [pos[0] + vial_w, pos[1] + vial_h * 0.5];
-        let spread = if count_f > 1.0 { idx as f32 / (count_f - 1.0) } else { 0.5 };
-        let target_x = cx + 12.0 * u - spread * (56.0 * u);
-        let target_y = rim_y + 4.0 * u;
-        let hexed = card.status == ExecutionStatus::Failed || card.inputs.iter().any(|s| s.flagged);
-        let blocked_by_hex = mood == CauldronMood::Hexed && !hexed;
-        let untaken = has_run && card.status == ExecutionStatus::Idle && !hexed && !blocked_by_hex;
-        let active = card.status == ExecutionStatus::Succeeded || card.status == ExecutionStatus::Running;
-        let idle = !active && !untaken && !blocked_by_hex && !hexed;
-        let stream_color = if hexed {
-            p.hex
-        } else if blocked_by_hex {
-            p.mute
-        } else if idle {
-            stream_ink(&card.category, state.light)
-        } else {
-            tone.liquid
-        };
-        let stream_glow = if hexed { p.hex } else { tone.glow };
-        let arch_lift = match idx {
-            0 => 56.0,
-            1 => 34.0,
-            2 => 14.0,
-            _ => 0.0,
-        };
-        streams = pouring_stream_shape(
-            streams,
-            from,
-            [target_x, target_y],
-            StreamStyle { color: stream_color, glow: stream_glow, active, idle, untaken, blocked: blocked_by_hex, hexed, light: state.light, arch_lift },
-        );
-    }
-
-    let dist_active = matches!(mood, CauldronMood::Brewed | CauldronMood::Simmering);
-    let mut visible_outputs: Vec<&NodeCardModel> = outputs.clone();
-    if visible_outputs.len() > 3 {
-        visible_outputs.sort_by_key(|card| match card.status {
-            ExecutionStatus::Succeeded | ExecutionStatus::Running => 0,
-            ExecutionStatus::Failed => 1,
-            ExecutionStatus::Idle => 2,
-        });
-    }
-    let overflow_bottles = visible_outputs.len().saturating_sub(3);
-    let base_multi_w = if compact { 126.0 } else { 150.0 };
-    let multi_bottle_w = base_multi_w * zoom;
-    let base_multi_x = (size.0 - base_multi_w - if compact { 14.0 } else { 20.0 }).max(base_cx + (if compact { 103.0 } else { 128.0 }) + 16.0);
-    let base_multi_step = if compact { 120.0 } else { 152.0 };
-    let base_multi_start = if compact { 60.0 } else { 86.0 };
-    let dist_from = [cx + 66.0 * u, rim_y - 3.0 * u];
-    if !state.nodes.is_empty() {
-        if multi_outputs {
-            for (idx, out_card) in visible_outputs.iter().take(3).enumerate() {
-                let [bx, by] = map_pt([base_multi_x, base_multi_start + idx as f32 * base_multi_step]);
-                let taken = out_card.status == ExecutionStatus::Succeeded || out_card.status == ExecutionStatus::Running;
-                let untaken = has_run && !taken;
-                let out_mood = if taken { CauldronMood::Brewed } else { CauldronMood::Ready };
-                streams = distillation_ribbon_shape(streams, dist_from, [bx + multi_bottle_w * 0.5, by + 24.0 * zoom], out_mood, state.light, taken, untaken);
-            }
-        } else {
-            streams = distillation_ribbon_shape(streams, dist_from, bottle_neck, mood, state.light, dist_active, false);
-        }
-    } else {
-        let ghost_x = (cx + cauldron_w * 0.5 + 32.0 * zoom).min(size.0 - 144.0);
-        let ghost_y = (cy - 68.0 * zoom).max(56.0);
-        streams = distillation_ribbon_shape(streams, dist_from, [ghost_x + 64.0, ghost_y + 29.0], CauldronMood::Empty, state.light, false, false);
-    }
-
-    let streams_el = canvas(streams).key("canvas-wires").size(size.0, size.1).absolute(0.0, 0.0);
-
-    let cauldron_art = canvas(hero_cauldron_shape(mood, state.light, cauldron_w, cauldron_h)).key("hero-cauldron").size(cauldron_w, cauldron_h);
-    let primary_target = state.nodes.iter().find(|card| card.kind == "ai/generate_text").or_else(|| ingredients.first().copied()).map(|card| card.id.clone());
-    let cauldron_box =
-        el().key("cauldron-center").size(cauldron_w, cauldron_h).absolute(cx - cauldron_w * 0.5, cy - cauldron_h * 0.54).child(cauldron_art).on_press(
-            move |s: &mut S| {
-                if let Some(id) = primary_target.clone() {
-                    lens(s).select(Some(id));
-                }
-            },
-        );
-
-    let total_ingredients = all_non_outputs.len();
-    let taken_ingredients = all_non_outputs.iter().filter(|card| card.status == ExecutionStatus::Succeeded).count();
-    let taken_outputs = outputs.iter().filter(|card| card.status == ExecutionStatus::Succeeded).count();
-    let sum_ms: u64 = state.nodes.iter().filter_map(|card| card.duration_ms).sum();
-    let time_part = if sum_ms == 0 { "<1ms".to_owned() } else { format!("{sum_ms}ms") };
-    let plaque_text = if let Some(summary) = &state.brew_summary {
-        summary.clone()
-    } else if state.nodes.is_empty() {
-        "Empty cauldron".to_owned()
-    } else if mood == CauldronMood::Hexed {
-        "Hexed · check crimson vial".to_owned()
-    } else if mood == CauldronMood::Brewed && multi_outputs {
-        format!("Brewed · {time_part} · {taken_ingredients} of {total_ingredients} ingredients · {taken_outputs} of {} outputs", outputs.len())
-    } else if mood == CauldronMood::Brewed {
-        format!("Brewed · {time_part}")
-    } else if let Some(badge) = &state.release_badge {
-        let word = if total_ingredients == 1 { "ingredient" } else { "ingredients" };
-        format!("Published {badge} · {total_ingredients} {word}")
-    } else if state.validated {
-        let word = if total_ingredients == 1 { "ingredient" } else { "ingredients" };
-        format!("Checked · {total_ingredients} {word}")
-    } else {
-        let word = if total_ingredients == 1 { "ingredient" } else { "ingredients" };
-        format!("Draft · {total_ingredients} {word}")
-    };
-    let plaque_dot = match mood {
-        CauldronMood::Hexed => p.hex,
-        CauldronMood::Simmering => p.gold,
-        CauldronMood::Brewed => p.broth_mid,
-        CauldronMood::Ready if state.validated || state.release_badge.is_some() => p.broth_mid,
-        CauldronMood::Ready => p.gold,
-        CauldronMood::Empty => p.mute,
-    };
-    let plaque_w = 344.0;
-    let plaque = row()
-        .key("cauldron-plaque")
-        .h(28.0)
-        .px(12.0)
-        .gap(7.0)
-        .radius(14.0)
-        .continuous_corners()
-        .items_center()
-        .justify_center()
-        .fill(if mood == CauldronMood::Hexed { p.hex_tint } else { p.card })
-        .border(1.2, if mood == CauldronMood::Hexed { p.hex } else { p.rule_2 })
-        .shadow(3.0, 10.0, p.shadow_card)
-        .child(el().size(7.0, 7.0).radius(3.5).fill(plaque_dot))
-        .child(text(plaque_text).font(TextStyle::new(11.5, 650.0)).color(if mood == CauldronMood::Hexed { p.hex } else { p.ink }));
-    let plaque_wrap = row().w(plaque_w).justify_center().absolute(cx - plaque_w * 0.5, cy + cauldron_h * 0.42).child(plaque);
-
-    let mut hit_rects: Vec<(magicklala_graph::NodeId, [f32; 4])> =
-        placed_ingredients.iter().map(|(c, pos)| (c.id.clone(), [pos[0], pos[1], vial_w, vial_h])).collect();
-    if !state.nodes.is_empty() {
-        if multi_outputs {
-            for (idx, out_card) in visible_outputs.iter().take(3).enumerate() {
-                let [bx, by] = map_pt([base_multi_x, base_multi_start + idx as f32 * base_multi_step]);
-                hit_rects.push((out_card.id.clone(), [bx, by, multi_bottle_w, 128.0 * zoom]));
-            }
-        } else if let Some(primary) = outputs.first() {
-            hit_rects.push((primary.id.clone(), [potion_x, potion_y, potion_w, 178.0 * zoom]));
-        }
-    }
-
-    let mut board = el()
-        .key("canvas")
-        .size(size.0, size.1)
-        .fill(p.paper)
-        .clip_rounded(0.0)
-        .on_drag(move |s: &mut S, drag, tx| {
-            tx.instant();
-            let canvas = lens(s);
-            match drag.phase {
-                Phase::Down => {
-                    canvas.select(None);
-                    canvas.drag = DragState::Panning { origin: [canvas.camera.pan_x, canvas.camera.pan_y] };
-                }
-                Phase::Move => {
-                    if let DragState::Panning { origin } = canvas.drag {
-                        canvas.camera.pan_x = origin[0] + drag.dx;
-                        canvas.camera.pan_y = origin[1] + drag.dy;
-                    }
-                }
-                _ => canvas.drag = DragState::Idle,
-            }
-        })
-        .on_secondary_press_local(move |s: &mut S, press, tx| {
-            tx.instant();
-            let canvas = lens(s);
-            let hit = hit_rects
-                .iter()
-                .rev()
-                .find_map(|(id, r)| (press.x >= r[0] && press.x <= r[0] + r[2] && press.y >= r[1] && press.y <= r[1] + r[3]).then(|| id.clone()));
-            if hit.is_some() {
-                canvas.select(hit);
-            }
-            canvas.context_menu = Some([press.x, press.y]);
-        })
-        .child(hearth_glow)
-        .child(backdrop)
-        .child(streams_el)
-        .child(cauldron_box);
-
-    if !state.nodes.is_empty() {
-        board = board.child(plaque_wrap);
-    }
-
-    for (card, pos) in placed_ingredients {
-        let step_num = if has_run { card.step_order } else { None };
-        board = board.child(ingredient_vial_card(state, card, step_num, pos, [vial_w, vial_h], &p, lens));
-    }
-
-    if !state.nodes.is_empty() {
-        if multi_outputs {
-            for (idx, out_card) in visible_outputs.iter().take(3).enumerate() {
-                let [bx, by] = map_pt([base_multi_x, base_multi_start + idx as f32 * base_multi_step]);
-                let bottle_target = [bx + multi_bottle_w * 0.5, by + 24.0 * zoom];
-                let step = if has_run { out_card.step_order } else { None };
-                let route_name = state
-                    .wires
-                    .iter()
-                    .find(|w| w.to_node == out_card.id && w.ty.is_flow())
-                    .map(|w| w.from_socket.clone())
-                    .unwrap_or_else(|| out_card.id.0.strip_suffix("_reply").unwrap_or(&out_card.id.0).to_owned());
-                let taken = out_card.status == ExecutionStatus::Succeeded || out_card.status == ExecutionStatus::Running;
-                let pill_t = match idx {
-                    0 => 0.44,
-                    1 => 0.48,
-                    _ => 0.36,
-                };
-                let curve_pt = distillation_point(dist_from, bottle_target, pill_t);
-                let tag_x = match idx {
-                    0 | 1 => (curve_pt[0] - 26.0).clamp(cx + 46.0 * u, bx - 48.0),
-                    _ => (curve_pt[0] + 10.0).clamp(cx + 88.0 * u, bx - 54.0),
-                };
-                let tag_y = match idx {
-                    0 => (curve_pt[1] - 24.0).max(58.0),
-                    1 => curve_pt[1] - 24.0,
-                    _ => curve_pt[1] - 18.0,
-                };
-                let route_pill = row()
-                    .px(6.5)
-                    .py(1.5)
-                    .radius(7.0)
-                    .fill(if taken { if state.light { hex(0xE6F6EF) } else { with_alpha(p.broth_mid, 0.24) } } else { p.card })
-                    .border(1.0, if taken { p.broth_mid } else { p.rule_2 })
-                    .absolute(tag_x, tag_y)
-                    .child(text(route_name).font(TextStyle::new(10.0, if taken { 700.0 } else { 600.0 }).mono()).color(if taken {
-                        if state.light { p.broth_deep } else { p.broth_foam }
-                    } else {
-                        p.ink_2
-                    }));
-                board = board.child(route_pill);
-                if let Some((helper, _)) = branch_helpers.iter().find(|(_, target)| *target == out_card.id) {
-                    let helper_pt = distillation_point(dist_from, bottle_target, 0.68);
-                    let hw = 128.0 * zoom;
-                    let hh = 42.0 * zoom;
-                    let hx = (bx - hw - 14.0).max(cx + 96.0 * u);
-                    let hy = (helper_pt[1] + 22.0).max(cy + cauldron_h * 0.42 + 44.0).min(size.1 - hh - 38.0);
-                    let tone = category_tone(&helper.category, state.light);
-                    let helper_untaken = has_run && helper.status == ExecutionStatus::Idle;
-                    let h_bg = if helper_untaken { if state.light { hex(0xF1EFF6) } else { hex(0x1E192D) } } else { p.card };
-                    let h_border = if helper.selected {
-                        tone.liquid
-                    } else if helper_untaken {
-                        if state.light { hex(0x9890AA) } else { hex(0x5E547D) }
-                    } else {
-                        tone.border
-                    };
-                    let h_title = if helper_untaken { if state.light { hex(0x3A3248) } else { hex(0xDFD9F0) } } else { p.ink };
-                    let h_sub = if helper_untaken { if state.light { hex(0x524963) } else { hex(0xC2B9D9) } } else { p.mute };
-                    let hid = helper.id.clone();
-                    let chip = row()
-                        .key(format!("node-{}-header", helper.id.0))
-                        .size(hw, hh)
-                        .px(7.0)
-                        .gap(6.0)
-                        .radius(14.0)
-                        .continuous_corners()
-                        .items_center()
-                        .fill(h_bg)
-                        .border(if helper.selected { 1.8 } else { 1.1 }, h_border)
-                        .child(
-                            el().size(26.0 * zoom, 26.0 * zoom)
-                                .radius(13.0 * zoom)
-                                .fill(tone.tint)
-                                .border(1.0, tone.border)
-                                .center()
-                                .child(canvas(mini_vial_icon(&helper.category, state.light, 20.0 * zoom)).size(20.0 * zoom, 20.0 * zoom)),
-                        )
-                        .child(
-                            col()
-                                .grow(1.0)
-                                .min_w(0.0)
-                                .gap(1.0)
-                                .child(text(&helper.title).font(TextStyle::new(10.8, 750.0)).color(h_title).truncate())
-                                .child(text(&helper.kind).font(TextStyle::new(8.8, 500.0).mono()).color(h_sub).truncate()),
-                        )
-                        .on_press(move |s: &mut S| lens(s).select(Some(hid.clone())));
-                    let mut chip_shell = el().key(format!("node-{}", helper.id.0)).size(hw, hh).absolute(hx, hy).child(chip);
-                    if helper_untaken {
-                        let u_badge = row()
-                            .px(5.0)
-                            .py(1.0)
-                            .radius(6.5)
-                            .fill(if state.light { hex(0xF5F2FA) } else { hex(0x2B243F) })
-                            .border(1.0, h_border)
-                            .child(text("Untaken").font(TextStyle::new(8.8, 700.0)).color(h_title));
-                        chip_shell = chip_shell.child(row().w(hw).px(6.0).justify_end().absolute(0.0, -10.0).child(u_badge));
-                    }
-                    board = board.child(chip_shell);
-                }
-                board = board.child(branch_bottle_view(state, out_card, step, [bx, by, multi_bottle_w], has_run, &p, lens));
-            }
-            if overflow_bottles > 0 {
-                let [ox_over, over_y] = map_pt([base_multi_x, base_multi_start + 3.0 * base_multi_step - 6.0]);
-                let over_label = if overflow_bottles == 1 { "+1 more bottle".to_owned() } else { format!("+{overflow_bottles} more bottles") };
-                board = board.child(
-                    row()
-                        .w(multi_bottle_w)
-                        .h(26.0)
-                        .radius(9.0)
-                        .items_center()
-                        .justify_center()
-                        .fill(p.card)
-                        .border(1.0, p.rule_2)
-                        .absolute(ox_over, over_y)
-                        .child(text(over_label).font(TextStyle::new(10.5, 650.0)).color(p.ink_2))
-                        .on_press(move |s: &mut S| {
-                            lens(s).mode = WorkbenchMode::Grimoire;
-                        }),
-                );
-            }
-        } else {
-            let bottle_step = outputs.iter().find_map(|c| c.step_order);
-            board = board.child(potion_stand_view(state, &outputs, bottle_step, [potion_x, potion_y, potion_w], mood, &p, lens));
-        }
-    } else {
-        let ghost_x = (cx + cauldron_w * 0.5 + 32.0 * zoom).min(size.0 - 144.0);
-        let ghost_y = (cy - 68.0 * zoom).max(56.0);
-        let ghost = col()
-            .w(128.0)
-            .gap(4.0)
-            .items_center()
-            .absolute(ghost_x, ghost_y)
-            .child(canvas(ghost_potion_bottle_shape(state.light, 128.0, 96.0)).size(128.0, 96.0))
-            .child(text("Distills here").font(TextStyle::new(10.5, 600.0)).color(p.mute));
-        board = board.child(ghost);
-    }
-
-    board = board.child(mode_switcher(state, &p, lens));
-
-    if !state.nodes.is_empty() && size.0 >= 420.0 && size.1 >= 260.0 {
-        let mut dot_colors: Vec<Color> = Vec::new();
-        for card in &ingredients {
-            let col = stream_ink(&card.category, state.light);
-            if !dot_colors.contains(&col) && dot_colors.len() < 4 {
-                dot_colors.push(col);
-            }
-        }
-        if dot_colors.is_empty() {
-            dot_colors.push(p.broth_mid);
-        }
-        let mut legend = row()
-            .key("canvas-legend")
-            .gap(12.0)
-            .px(11.0)
-            .py(6.0)
-            .radius(10.0)
-            .continuous_corners()
-            .items_center()
-            .fill(p.card)
-            .border(1.0, p.rule)
-            .shadow(2.0, 8.0, p.shadow_card)
-            .absolute(14.0, (size.1 - 38.0).max(12.0));
-        if mood != CauldronMood::Hexed {
-            let swatch = if dist_active {
-                row()
-                    .size(14.0, 14.0)
-                    .radius(7.0)
-                    .items_center()
-                    .justify_center()
-                    .fill(p.primary_bg)
-                    .child(text("1").font(TextStyle::new(8.8, 750.0).features("'tnum' 1")).color(p.primary_ink))
-            } else {
-                dot_colors.into_iter().fold(row().gap(2.5).items_center(), |r, c| r.child(el().w(5.0).h(2.0).radius(1.0).fill(c)))
-            };
-            legend = legend.child(
-                row().gap(6.0).items_center().child(swatch).child(
-                    text(if dist_active { format!("Run order 1–{}", taken_ingredients + taken_outputs) } else { "Ingredient streams".to_owned() })
-                        .font(TextStyle::new(10.5, 600.0))
-                        .color(p.ink),
-                ),
-            );
-        }
-        legend = legend.child(if mood == CauldronMood::Simmering {
-            row()
-                .gap(6.0)
-                .items_center()
-                .child(canvas(sparkle_connector_h(16.0, 6.0, state.light)).size(16.0, 6.0))
-                .child(text("Distilling").font(TextStyle::new(10.5, 600.0)).color(p.ink))
-        } else if mood == CauldronMood::Brewed {
-            row()
-                .gap(6.0)
-                .items_center()
-                .child(canvas(sparkle_connector_h(16.0, 6.0, state.light)).size(16.0, 6.0))
-                .child(text("Distilled").font(TextStyle::new(10.5, 600.0)).color(p.ink))
-        } else if mood == CauldronMood::Hexed {
-            let blocked_col = if state.light { hex(0x655B78) } else { hex(0x9A8FB8) };
-            row()
-                .gap(3.5)
-                .items_center()
-                .child(el().size(3.0, 3.0).radius(1.5).fill(blocked_col))
-                .child(el().size(3.0, 3.0).radius(1.5).fill(blocked_col))
-                .child(el().size(3.0, 3.0).radius(1.5).fill(blocked_col))
-                .child(text("Blocked").font(TextStyle::new(10.5, 600.0)).color(p.ink_2))
-        } else {
-            let dist_col = if state.light { hex(0x137B60) } else { hex(0x3AD6A6) };
-            row()
-                .gap(5.0)
-                .items_center()
-                .child(el().w(5.0).h(2.0).fill(dist_col))
-                .child(el().w(5.0).h(2.0).fill(dist_col))
-                .child(text("Distillation path").font(TextStyle::new(10.5, 550.0)).color(p.ink_2))
-        });
-        if mood == CauldronMood::Hexed {
-            legend = legend.child(
-                row()
-                    .gap(5.0)
-                    .items_center()
-                    .child(el().w(6.0).h(2.0).fill(p.hex))
-                    .child(el().w(6.0).h(2.0).fill(p.hex))
-                    .child(text("Hexed").font(TextStyle::new(10.5, 650.0)).color(p.hex)),
-            );
-        } else if multi_outputs && has_run {
-            let untaken_col = if state.light { hex(0x6D637E) } else { hex(0x9489B0) };
-            legend = legend.child(
-                row()
-                    .gap(5.0)
-                    .items_center()
-                    .child(el().w(5.0).h(2.0).fill(untaken_col))
-                    .child(el().w(5.0).h(2.0).fill(untaken_col))
-                    .child(text("Untaken").font(TextStyle::new(10.5, 600.0)).color(p.ink_2)),
-            );
-        }
-        board = board.child(legend);
-    }
-
-    board
-}
-
-fn ingredient_vial_card<S: 'static>(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ingredient_vial_card<S: 'static>(
     state: &CanvasState,
     card: &NodeCardModel,
     step_num: Option<usize>,
     pos: [f32; 2],
     dims: [f32; 2],
+    aside: bool,
     p: &HearthPalette,
     lens: fn(&mut S) -> &mut CanvasState,
+    toss: TossHook<S>,
+    plan: BrewPlan,
 ) -> El {
     let tone = category_tone(&card.category, state.light);
     let hexed = card.status == ExecutionStatus::Failed || card.inputs.iter().any(|s| s.flagged);
@@ -834,26 +297,33 @@ fn ingredient_vial_card<S: 'static>(
         .on_press(move |s: &mut S| lens(s).select(Some(select_id.clone())))
         .on_drag(move |s: &mut S, drag, tx| {
             tx.instant();
-            let canvas = lens(s);
             match drag.phase {
                 Phase::Down => {
+                    let canvas = lens(s);
                     canvas.select(Some(node_id.clone()));
-                    let origin = canvas.card(&node_id).map_or([0.0, 0.0], |card| card.position);
-                    canvas.drag = DragState::DraggingNode { node: node_id.clone(), origin };
+                    canvas.drag = DragState::LiftingVial { node: node_id.clone(), offset: [0.0, 0.0] };
                 }
                 Phase::Move => {
-                    if let DragState::DraggingNode { node, origin } = canvas.drag.clone() {
-                        let zoom = canvas.camera.zoom;
-                        canvas.move_node(&node, [origin[0] + drag.dx / zoom, origin[1] + drag.dy / zoom]);
+                    let canvas = lens(s);
+                    if matches!(&canvas.drag, DragState::LiftingVial { node, .. } if node == &node_id) {
+                        canvas.drag = DragState::LiftingVial { node: node_id.clone(), offset: [drag.dx, drag.dy] };
                     }
                 }
-                _ => {
-                    if drag.cancelled()
-                        && let DragState::DraggingNode { node, origin } = canvas.drag.clone()
-                    {
-                        canvas.move_node(&node, origin);
-                    }
+                Phase::Up => {
+                    let canvas = lens(s);
+                    let lifted = matches!(&canvas.drag, DragState::LiftingVial { node, .. } if node == &node_id);
                     canvas.drag = DragState::Idle;
+                    if !lifted || drag.cancelled() || drag.dx.hypot(drag.dy) < 6.0 {
+                        return;
+                    }
+                    let Some(placed) = plan.card(&node_id) else { return };
+                    let dropped_at = [placed.rect[0] + placed.rect[2] * 0.5 + drag.dx, placed.rect[1] + placed.rect[3] * 0.5 + drag.dy];
+                    let over_pot = plan.is_over_pot(dropped_at);
+                    if over_pot && aside {
+                        toss(s, Toss::IntoPot(node_id.clone()));
+                    } else if !over_pot && !aside {
+                        toss(s, Toss::Aside(node_id.clone()));
+                    }
                 }
             }
         });
@@ -868,7 +338,7 @@ fn ingredient_vial_card<S: 'static>(
     shell
 }
 
-fn branch_bottle_view<S: 'static>(
+pub(crate) fn branch_bottle_view<S: 'static>(
     state: &CanvasState,
     card: &NodeCardModel,
     step_num: Option<usize>,
@@ -963,9 +433,9 @@ fn branch_bottle_view<S: 'static>(
         .on_press(move |s: &mut S| lens(s).select(Some(select_id.clone())))
 }
 
-fn potion_stand_view<S: 'static>(
+pub(crate) fn potion_stand_view<S: 'static>(
     state: &CanvasState,
-    outputs: &[&NodeCardModel],
+    output: &NodeCardModel,
     step_num: Option<usize>,
     frame: [f32; 3],
     mood: CauldronMood,
@@ -974,7 +444,7 @@ fn potion_stand_view<S: 'static>(
 ) -> El {
     let [pos_x, pos_y, width] = frame;
     let pos = [pos_x, pos_y];
-    let primary_output = outputs.iter().find(|c| c.status == ExecutionStatus::Succeeded).or_else(|| outputs.first()).copied();
+    let primary_output = Some(output);
     let bottled = state.release_badge.is_some();
     let sealed_vintage = bottled && !matches!(mood, CauldronMood::Brewed | CauldronMood::Simmering | CauldronMood::Hexed | CauldronMood::Empty);
     let bottle_h = 104.0;
@@ -1052,31 +522,12 @@ fn potion_stand_view<S: 'static>(
     let mut stand = col().key("potion-stand").w(width).gap(4.0).items_center().absolute(pos[0], pos[1]).child(bottle_art).child(tag_card);
 
     if let Some(id) = select_id {
-        let header_key = format!("node-{}-header", id.0);
-        let drag_id = id.clone();
-        stand = stand.key(header_key).on_press(move |s: &mut S| lens(s).select(Some(id.clone()))).on_drag(move |s: &mut S, drag, tx| {
-            tx.instant();
-            let canvas = lens(s);
-            match drag.phase {
-                Phase::Down => {
-                    canvas.select(Some(drag_id.clone()));
-                    let origin = canvas.card(&drag_id).map_or([0.0, 0.0], |card| card.position);
-                    canvas.drag = DragState::DraggingNode { node: drag_id.clone(), origin };
-                }
-                Phase::Move => {
-                    if let DragState::DraggingNode { node, origin } = canvas.drag.clone() {
-                        let zoom = canvas.camera.zoom;
-                        canvas.move_node(&node, [origin[0] + drag.dx / zoom, origin[1] + drag.dy / zoom]);
-                    }
-                }
-                _ => canvas.drag = DragState::Idle,
-            }
-        });
+        stand = stand.key(format!("node-{}-header", id.0)).on_press(move |s: &mut S| lens(s).select(Some(id.clone())));
     }
     stand
 }
 
-fn apothecary_dots(state: &CanvasState, size: (f32, f32), p: &HearthPalette, center: [f32; 2], circle_r: f32) -> Shape {
+pub(crate) fn apothecary_dots(state: &CanvasState, size: (f32, f32), p: &HearthPalette, center: [f32; 2], circle_r: f32) -> Shape {
     let spacing = DOT_SPACING;
     let columns = (size.0 / spacing).ceil() as usize + 1;
     let rows = (size.1 / spacing).ceil() as usize + 1;

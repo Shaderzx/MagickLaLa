@@ -1827,26 +1827,9 @@ fn toss() -> Result<serde_json::Value, String> {
 
     let mut rt = headless(StudioApp::from_registry());
     let positions_before: Vec<[f32; 2]> = rt.state.canvas.nodes.iter().map(|card| card.position).collect();
-    let pot = rt.presented("cauldron-center").map(|(rect, _)| [rect[0] + rect[2] * 0.5, rect[1] + rect[3] * 0.5]).ok_or("no cauldron")?;
-    let row = rt.find("palette-memory-recall").or_else(|| rt.find("palette-text-template")).ok_or("no pantry row")?;
-    let kind_dragged = if rt.find("palette-memory-recall").is_some() { "memory/recall" } else { "text/template" };
-    let nodes_before = rt.state.spell.nodes.len();
-    drag(&mut rt, &format!("palette-{}", kind_dragged.replace('/', "-")), (pot[0] - row.0, pot[1] - row.1))?;
-    let dropped = node_of_kind(&rt.state, kind_dragged);
-    let dropped_wires: Vec<serde_json::Value> = dropped
-        .as_ref()
-        .map(|id| {
-            rt.state
-                .spell
-                .wires
-                .iter()
-                .filter(|wire| &wire.from_node.0 == id || &wire.to_node.0 == id)
-                .map(|wire| json!([wire.from_node.0, wire.from_socket, wire.to_node.0, wire.to_socket]))
-                .collect()
-        })
-        .unwrap_or_default();
-    let pantry_drop =
-        json!({ "kind": kind_dragged, "nodesBefore": nodes_before, "nodesAfter": rt.state.spell.nodes.len(), "id": dropped, "wires": dropped_wires });
+    let pantry_drop = pantry_toss(&mut rt, "ai/generate_text", "Generate Text")?;
+    let mut full_rt = headless(StudioApp::from_registry());
+    let pantry_full = pantry_toss(&mut full_rt, "text/template", "Template")?;
 
     let mut aside_rt = headless(StudioApp::from_registry());
     let target = "recall";
@@ -1876,7 +1859,34 @@ fn toss() -> Result<serde_json::Value, String> {
         "positionsBefore": positions_before,
         "positionsAfter": positions_after,
     });
-    Ok(json!({ "built": built_report, "pantryDrop": pantry_drop, "setAside": set_aside }))
+    Ok(json!({ "built": built_report, "pantryDrop": pantry_drop, "pantryFull": pantry_full, "setAside": set_aside }))
+}
+
+fn pantry_toss(rt: &mut Runtime<StudioApp>, kind: &str, query: &str) -> Result<serde_json::Value, String> {
+    rt.update(|app, _| app.palette_query = rune::TextEdit::new(query));
+    rt.frame(1.0);
+    rt.frame(3.0);
+    let pot = rt.presented("cauldron-center").map(|(rect, _)| [rect[0] + rect[2] * 0.5, rect[1] + rect[3] * 0.5]).ok_or("no cauldron")?;
+    let key = format!("palette-{}", kind.replace('/', "-"));
+    let row = rt.find(&key).ok_or("no pantry row")?;
+    let nodes_before = rt.state.spell.nodes.len();
+    let wires_before = wire_list(&rt.state);
+    drag(rt, &key, (pot[0] - row.0, pot[1] - row.1))?;
+    let existing: Vec<String> = rt.state.spell.nodes.iter().take(nodes_before).map(|node| node.id.0.clone()).collect();
+    let dropped = rt.state.spell.nodes.iter().find(|node| node.kind == kind && !existing.contains(&node.id.0)).map(|node| node.id.0.clone());
+    let role = dropped.as_ref().and_then(|id| {
+        magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size()).card(&NodeId::from(id.as_str())).map(|card| format!("{:?}", card.role))
+    });
+    Ok(json!({
+        "kind": kind,
+        "nodesBefore": nodes_before,
+        "nodesAfter": rt.state.spell.nodes.len(),
+        "id": dropped,
+        "role": role,
+        "wiresBefore": wires_before,
+        "wiresAfter": wire_list(&rt.state),
+        "ghostDuringDrag": rt.state.pantry_drag.is_some(),
+    }))
 }
 
 fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
