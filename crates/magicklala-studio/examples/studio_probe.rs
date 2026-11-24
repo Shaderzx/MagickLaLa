@@ -4120,6 +4120,222 @@ fn drawn_truths() -> Result<serde_json::Value, String> {
         "hookBrew": hook_brew,
     }))
 }
+fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
+    let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
+        id: NodeId::from(id),
+        kind: kind.to_owned(),
+        position: [x * 260.0, 0.0],
+        config,
+    };
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let fed = |app: &StudioApp, node: &str, socket: &str| app.canvas.wires.iter().any(|wire| wire.to_node.0 == node && wire.to_socket == socket);
+
+    let mut prompted = SpellGraph::new("Typed Agent");
+    prompted.nodes = vec![
+        place("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        place("tmpl", "text/template", 1.0, json!({ "template": "Q: {{content}}" })),
+        place("gen", "ai/generate_text", 2.0, serde_json::Value::Null),
+        place("reply", "io/send_message", 3.0, serde_json::Value::Null),
+    ];
+    prompted.wires = vec![
+        wire("p1", ("trigger", "out"), ("gen", "in")),
+        wire("p2", ("gen", "out"), ("reply", "in")),
+        wire("p3", ("trigger", "content"), ("tmpl", "content")),
+        wire("p4", ("tmpl", "text"), ("gen", "prompt")),
+        wire("p5", ("gen", "text"), ("reply", "content")),
+    ];
+    let mut typing = studio_at(db_path)?;
+    typing.update(move |app, _| {
+        app.new_empty_spell();
+        app.load_graph(prompted.clone());
+    });
+    typing.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("tmpl"))));
+    let bridged = fed(&typing.state, "gen", "prompt");
+    typing.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("gen")));
+        app.right_tab = RightTab::Inspector;
+    });
+    typing.frame(1.0);
+    click(&mut typing, "prompt-unplug")?;
+    typing.update(|app, _| {
+        app.prompts.insert(NodeId::from("gen"), rune::TextEdit::new("typed words"));
+        app.sync_spell();
+    });
+    click(&mut typing, "save")?;
+    let reopened = studio_at(db_path)?;
+    let typed = json!({
+        "bridged": bridged,
+        "wired": fed(&reopened.state, "gen", "prompt"),
+        "prompt": prompt_of(&reopened.state, &NodeId::from("gen")),
+    });
+
+    let callee_db = db_path.with_extension("callee.sqlite");
+    let mut callee = SpellGraph::new("Callee Spell");
+    callee.nodes = vec![
+        studio_node("start", "event/on_start", 0.0, serde_json::Value::Null),
+        studio_node("send", "io/send_message", 280.0, json!({ "content": "from callee" })),
+    ];
+    callee.wires = vec![studio_wire("cw", ("start", "out"), ("send", "in"))];
+    StudioStore::open(Some(&callee_db)).and_then(|mut store| store.publish(&callee)).map_err(|error| error.to_string())?;
+    let mut caller = SpellGraph::new("Caller Spell");
+    caller.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("call", "flow/subgraph", 280.0, json!({ "spell_id": callee.id.0.to_string(), "release_version": 1 })),
+    ];
+    caller.wires = vec![studio_wire("cc", ("trigger", "out"), ("call", "in"))];
+    caller.subgraphs = vec![magicklala_graph::SubgraphRef { node_id: NodeId::from("call"), spell_id: callee.id, release_version: Some(1) }];
+    let mut calling = studio_at(&callee_db)?;
+    calling.update(move |app, _| {
+        app.new_empty_spell();
+        app.load_graph(caller.clone());
+    });
+    calling.update(|app, _| {
+        let _ = app.publish();
+        let _ = app.publish();
+    });
+    let caller_releases = release_versions(&calling.state);
+    click(&mut calling, "save")?;
+    let calling_again = studio_at(&callee_db)?;
+    let sub_spell = json!({ "releases": caller_releases, "liveAfterReopen": calling_again.state.active_release_version });
+
+    let mut routes = SpellGraph::new("Two Door Agent");
+    routes.nodes = vec![
+        place("chat", "event/on_message", 0.0, serde_json::Value::Null),
+        place("said", "io/send_message", 1.0, serde_json::Value::Null),
+        place("hook", "event/on_webhook", 0.0, serde_json::Value::Null),
+        place("hooked", "io/send_message", 1.0, json!({ "content": "hooked" })),
+    ];
+    routes.wires =
+        vec![wire("r1", ("chat", "out"), ("said", "in")), wire("r2", ("chat", "content"), ("said", "content")), wire("r3", ("hook", "out"), ("hooked", "in"))];
+    let mut doors = runtime_for(routes);
+    let door_run = run_once(&mut doors)?;
+    let two_doors = json!({ "replies": door_run["replies"], "sent": doors.state.run_payload["content"] });
+
+    let mut numbers = studio_at(db_path)?;
+    numbers.update(|app, _| {
+        app.new_empty_spell();
+        app.load_graph(tasting_spell());
+        app.add_variable();
+    });
+    let slot = numbers.state.spell.variables.len() - 1;
+    let set_default = move |rt: &mut Runtime<StudioApp>, text: &'static str| {
+        rt.update(move |app, _| {
+            if let Some(edit) = app.var_default_edits.get_mut(slot) {
+                *edit = rune::TextEdit::new(text);
+            }
+            app.sync_spell();
+        });
+    };
+    numbers.update(move |app, _| app.set_variable_type_at(slot, SocketType::Int));
+    set_default(&mut numbers, "5");
+    click(&mut numbers, "publish")?;
+    let live_before = numbers.state.active_release_version;
+    set_default(&mut numbers, "nope");
+    let while_bad = json!({ "live": numbers.state.active_release_version, "dirty": numbers.state.dirty, "badge": numbers.state.canvas.release_badge });
+    click(&mut numbers, "validate")?;
+    let hexed = numbers.state.validation.label();
+    set_default(&mut numbers, "5");
+    numbers.frame(1.0);
+    let mended_number = json!({
+        "liveBefore": live_before,
+        "whileBad": while_bad,
+        "hexed": hexed,
+        "after": numbers.state.validation.label(),
+        "brewLocked": numbers.state.canvas.invalid_brew,
+    });
+    numbers.update(|app, _| {
+        app.add_variable();
+        app.add_variable();
+    });
+    let names = numbers.state.spell.variables.len();
+    numbers.update(move |app, _| {
+        for idx in [names - 2, names - 1] {
+            if let Some(edit) = app.var_name_edits.get_mut(idx) {
+                *edit = rune::TextEdit::new("twin");
+            }
+        }
+        app.sync_spell();
+        app.canvas.select(None);
+        app.right_tab = RightTab::Variables;
+    });
+    numbers.frame(1.0);
+    click(&mut numbers, "validate")?;
+    let duplicate_check = numbers.state.validation.label();
+    let type_keys = (0..names).filter(|idx| numbers.find(&format!("var-type-{idx}")).is_some()).count();
+    numbers.update(move |app, _| {
+        if let Some(edit) = app.var_name_edits.get_mut(names - 1) {
+            *edit = rune::TextEdit::new("");
+        }
+        app.sync_spell();
+    });
+    click(&mut numbers, "validate")?;
+    let blank_check = numbers.state.validation.label();
+    let names_report = json!({ "duplicate": duplicate_check, "blank": blank_check, "typeKeys": type_keys, "rows": names });
+
+    let mut lonely = SpellGraph::new("Lonely Agent");
+    lonely.nodes = vec![place("trigger", "event/on_message", 0.0, serde_json::Value::Null), place("reply", "io/send_message", 1.0, serde_json::Value::Null)];
+    let mut alone = runtime_for(lonely);
+    click(&mut alone, "validate")?;
+    let lone = json!({ "trigger": role_of(&alone.state, "trigger"), "reply": role_of(&alone.state, "reply"), "check": alone.state.validation.label() });
+
+    let mut restoring = studio_at(db_path)?;
+    restoring.update(|app, _| {
+        app.new_empty_spell();
+        app.load_graph(tasting_spell());
+    });
+    click(&mut restoring, "publish")?;
+    restoring.update(|app, _| {
+        app.request_restore_release(1);
+        app.confirm_restore_to_draft();
+    });
+    let restored = json!({ "live": restoring.state.active_release_version, "badge": restoring.state.canvas.release_badge });
+
+    let mut once = SpellGraph::new("Once Agent");
+    once.nodes = vec![
+        place("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        place("once", "flow/do_once", 1.0, serde_json::Value::Null),
+        place("reply", "io/send_message", 2.0, serde_json::Value::Null),
+    ];
+    once.wires = vec![
+        wire("o1", ("trigger", "out"), ("once", "in")),
+        wire("o2", ("once", "out"), ("reply", "in")),
+        wire("o3", ("trigger", "content"), ("reply", "content")),
+    ];
+    let mut grim = runtime_for(once);
+    grim.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("once"))));
+    click(&mut grim, "mode-grimoire")?;
+    grim.frame(1.0);
+    let socket_drag = |rt: &mut Runtime<StudioApp>, from: &str, to: &str| -> Result<(), String> {
+        let (start, end) = (rt.find(from).ok_or(format!("no {from}"))?, rt.find(to).ok_or(format!("no {to}"))?);
+        drag(rt, from, (end.0 - start.0, end.1 - start.1))
+    };
+    socket_drag(&mut grim, "socket-trigger-out-out", "socket-once-in-in")?;
+    socket_drag(&mut grim, "socket-once-out-out", "socket-reply-in-in")?;
+    let mut flow_into_reply: Vec<String> = feeders_of(&grim.state, "reply").into_iter().filter(|line| line.ends_with("->in")).collect();
+    flow_into_reply.sort();
+    let _ = socket_drag(&mut grim, "socket-trigger-out-out", "socket-reply-in-content");
+    grim.frame(2.0);
+    let refusal = all_texts(&grim).into_iter().find(|line| line.contains("cannot meet") || line.contains("does not fit"));
+    let live_drag = json!({ "flowIntoReply": flow_into_reply, "refusalShown": refusal.is_some() });
+
+    let _ = std::fs::remove_file(&callee_db);
+    Ok(json!({
+        "typed": typed,
+        "subSpell": sub_spell,
+        "twoDoors": two_doors,
+        "number": mended_number,
+        "names": names_report,
+        "lone": lone,
+        "restored": restored,
+        "liveDrag": live_drag,
+    }))
+}
 fn one_voice(db_path: &Path) -> Result<serde_json::Value, String> {
     let words = |rt: &Runtime<StudioApp>, key: &str| text_lines_under(rt, key).into_iter().map(|(line, _)| line).collect::<Vec<_>>().join(" ");
     let mut sealed = studio_at(db_path)?;
@@ -4793,6 +5009,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("shelf-keeps") => shelf_keeps(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("shelf-exact") => shelf_exact(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("cauldron-truths") => cauldron_truths(),
+        Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("drawn-truths") => drawn_truths(),
         Some("honest-state") => honest_state(Path::new(args.get(1).ok_or("missing database path")?)),

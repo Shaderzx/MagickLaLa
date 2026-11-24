@@ -1350,7 +1350,29 @@ test('One voice for status: a published potion set aside and poured back still r
     await rm(dir, { recursive: true, force: true });
   }
 });
-test('A brew locks the recipe and the bottles tell the truth: typing, saving, adding, dragging cards and drawing wires all wait until the brew ends and the lit result survives, branch bottles show no step numbers before a brew, a running bottle simmers without a check, a published branch potion shows its sealed version on the bottle, and thirteen-step and thirty-eight-step brews and a many-issue Check keep every log chip and the result inside the log at 960 and 1280', { timeout: 900_000 }, async () => {
+test('Studio keeps its promises: a prompt typed over a shelf shortcut stays typed after reopen, a sub-spell caller publishes once and reopens live, a chat route replies beside a webhook route, a mended number unlocks Brew and a bad one drops the seal, twin or blank variable names fail Check, a lone trigger stays while an unfed reply is set aside, restoring the live release keeps it live, and hand-drawn Grimoire wires drop the shortcut and say why one was refused', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-promises-'));
+  try {
+    const report = await studioProbe(['kept-promises', join(dir, 'studio.sqlite')]);
+
+    expect(report.typed).toEqual({ bridged: true, wired: false, prompt: 'typed words' });
+    expect(report.subSpell).toEqual({ releases: [1], liveAfterReopen: 1 });
+    expect(JSON.stringify(report.twoDoors.replies)).toContain(report.twoDoors.sent);
+    expect(report.number.liveBefore).toBe(1);
+    expect(report.number.whileBad).toEqual({ live: null, dirty: true, badge: null });
+    expect(report.number.hexed).toBe('invalid');
+    expect(report.number.after).toBe('unchecked');
+    expect(report.number.brewLocked).toBe(false);
+    expect(report.names.duplicate).toBe('invalid');
+    expect(report.names.blank).toBe('invalid');
+    expect(report.names.typeKeys).toBe(report.names.rows);
+    expect(report.lone).toEqual({ trigger: 'Ingredient', reply: 'Aside', check: 'valid' });
+    expect(report.restored).toEqual({ live: 1, badge: 'v1' });
+    expect(report.liveDrag).toEqual({ flowIntoReply: ['once.out->in'], refusalShown: true });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});test('A brew locks the recipe and the bottles tell the truth: typing, saving, adding, dragging cards and drawing wires all wait until the brew ends and the lit result survives, branch bottles show no step numbers before a brew, a running bottle simmers without a check, a published branch potion shows its sealed version on the bottle, and thirteen-step and thirty-eight-step brews and a many-issue Check keep every log chip and the result inside the log at 960 and 1280', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-locks-'));
   try {
     const report = await studioProbe(['brew-locks', join(dir, 'studio.sqlite')]);
