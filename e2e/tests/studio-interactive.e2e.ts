@@ -1116,7 +1116,7 @@ test('Dropping a pantry ingredient on the set-aside tray adds it set aside with 
   expect(report).toEqual({ added: 1, role: 'Aside', wires: 0 });
 });
 
-test('Every step keeps one name and every card keeps its words: ingredient titles never run under their vial at 960 by 640 or 1280 by 800, the cauldron, Grimoire and Cauldron Log name each branch bottle by its route, look-alike bottles without routes are numbered, the log icon sits clear of the first step, and the empty pot has its heading and button centred beneath it', { timeout: 900_000 }, async () => {
+test('Every step keeps one name and every card keeps its words: ingredient titles never run under their vial at 960 by 640 or 1280 by 800, the cauldron, Grimoire and Cauldron Log name each branch bottle by its route, look-alike bottles without routes are numbered, the log icon sits clear of the first step, and the empty pot has its heading centred beneath it while its triggers are offered in one place only', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['one-name']);
 
   expect(report.titleMisfits).toEqual([]);
@@ -1128,7 +1128,7 @@ test('Every step keeps one name and every card keeps its words: ingredient title
   expect(report.logGap).toBeGreaterThanOrEqual(4);
   expect(report.logIcons).toEqual([[34, 28], [34, 28]]);
   expect(report.empty.headingOffset).toBeLessThanOrEqual(2);
-  expect(report.empty.buttonOffset).toBeLessThanOrEqual(2);
+  expect(report.empty.secondAdd).toBe(false);
   expect(report.empty.belowPot).toBeGreaterThanOrEqual(24);
 });
 test('Studio fits and counts honestly at 960 by 640: variable names keep their own line, the hex card keeps its buttons inside, the empty pot leaves room for its heading, the opened pantry can be folded away again, the Grimoire draws its checkmarks and chevrons instead of font glyphs, the recipe panel uses the same bottle name as the cauldron, the toolbar counts ingredients, set-aside cards and bottles the way the pot does, and a Check before any brew never reads Brew #0', { timeout: 900_000 }, async () => {
@@ -1255,10 +1255,14 @@ test('Set-aside steps come back exactly as they left: the shelf survives a resta
     await rm(dir, { recursive: true, force: true });
   }
 });
-test('The cauldron draws only what is true: every potion leaves through the brass tap, no bottle ribbon runs behind a card, no legend chip explains the drawing, the set-aside shelf is a drawn plank with no caption, the plaque never covers a card or the shelf when zoomed out, a dozen ingredients keep both shelves after Check and Brew, Brew is disabled when no trigger is in the recipe, an all-shelved pot goes cold, and the potion stand carries no Test pill', { timeout: 900_000 }, async () => {
+test('The cauldron draws only what is true: every potion leaves through the brass tap, no bottle ribbon runs behind a card or turns sharply, the plaque shows the brew total, zooming out stops while text stays readable, a routed brew reads 1 bottle filled, no legend chip explains the drawing, the set-aside shelf is a drawn plank with no caption, the plaque never covers a card or the shelf when zoomed out, a dozen ingredients keep both shelves after Check and Brew, Brew is disabled when no trigger is in the recipe, an all-shelved pot goes cold, and the potion stand carries no Test pill', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['cauldron-truths']);
 
   expect(report.offTap).toEqual([]);
+  expect(report.sharpTurns).toEqual([]);
+  for (const brew of report.plaqueTime) expect(brew.plaque).toContain(brew.total);
+  expect(report.farScale).toBeGreaterThanOrEqual(0.6);
+  expect(report.routedPlaque).toContain('1 bottle filled');
   expect(report.throughCards).toEqual([]);
   expect(report.legends).toEqual([false, false, false]);
   expect(report.shelfWords).toEqual([]);

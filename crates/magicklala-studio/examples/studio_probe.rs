@@ -2552,7 +2552,7 @@ fn one_name_per_step() -> Result<serde_json::Value, String> {
     let overlay = layout_rect(&empty, "empty-canvas").ok_or("no empty overlay")?;
     let empty_heading =
         text_lines_under(&empty, "empty-canvas").into_iter().find(|(line, _)| line == "Start a new potion").map(|(_, rect)| rect).ok_or("no heading")?;
-    let button = layout_rect(&empty, "empty-add-trigger").ok_or("no add button")?;
+    let second_add = layout_rect(&empty, "empty-add-trigger").is_some();
     let centre = |rect: [f32; 4]| rect[0] + rect[2] * 0.5;
 
     Ok(json!({
@@ -2565,7 +2565,7 @@ fn one_name_per_step() -> Result<serde_json::Value, String> {
         "logIcons": log_icons,
         "empty": {
             "headingOffset": (centre(empty_heading) - centre(pot)).abs().round(),
-            "buttonOffset": (centre(button) - centre(pot)).abs().round(),
+            "secondAdd": second_add,
             "belowPot": (overlay[1] - (pot[1] + pot[3])).round(),
         },
     }))
@@ -3368,6 +3368,7 @@ fn cauldron_truths() -> Result<serde_json::Value, String> {
         rt.accessibility_tree().nodes.iter().filter(|(_, node)| node.is_disabled()).filter_map(|(_, node)| node.label().map(str::to_owned)).collect()
     };
     let mut through_cards = Vec::new();
+    let mut sharp_turns = Vec::new();
     let mut off_tap = Vec::new();
     let mut flank_after = Vec::new();
     let spells = [
@@ -3387,6 +3388,18 @@ fn cauldron_truths() -> Result<serde_json::Value, String> {
                 let start = points.first().copied().unwrap_or_default();
                 if start[0] < pot[0] + pot[2] * 0.75 || start[1] < pot[1] + pot[3] * 0.5 {
                     off_tap.push(format!("{name}@{}: ribbon {index} starts at {:?}", size.0, start));
+                }
+                let steps: Vec<[f32; 2]> =
+                    points.windows(2).map(|pair| [pair[1][0] - pair[0][0], pair[1][1] - pair[0][1]]).filter(|step| step[0].hypot(step[1]) > 0.01).collect();
+                let sharpest = steps
+                    .windows(2)
+                    .map(|pair| {
+                        let dot = pair[0][0] * pair[1][0] + pair[0][1] * pair[1][1];
+                        (dot / (pair[0][0].hypot(pair[0][1]) * pair[1][0].hypot(pair[1][1]))).clamp(-1.0, 1.0).acos().to_degrees()
+                    })
+                    .fold(0.0_f32, f32::max);
+                if sharpest > 75.0 {
+                    sharp_turns.push(format!("{name}@{}: ribbon {index} turns {}deg", size.0, sharpest.round()));
                 }
                 let body = &points[..points.len().saturating_sub(points.len() / 8)];
                 for card in plan.cards.iter().filter(|card| Some(&card.id) != own.as_ref()) {
@@ -3468,7 +3481,68 @@ fn cauldron_truths() -> Result<serde_json::Value, String> {
     tasted.frame(3.0);
     let stand_words: Vec<String> = all_texts(&tasted);
 
+    let mut twin_waits = SpellGraph::new("Twin Waits");
+    let at = |id: &str, kind: &str, x: f32, y: f32, config: serde_json::Value| NodeInstance {
+        id: NodeId::from(id),
+        kind: kind.to_owned(),
+        position: [x, y],
+        config,
+    };
+    twin_waits.nodes = vec![
+        at("trigger", "event/on_message", 0.0, 0.0, serde_json::Value::Null),
+        at("fork", "flow/split", 260.0, 0.0, serde_json::Value::Null),
+        at("left", "time/delay", 520.0, -120.0, json!({ "ms": 40 })),
+        at("right", "time/delay", 520.0, 120.0, json!({ "ms": 40 })),
+        at("join", "flow/wait_for_all", 780.0, 0.0, serde_json::Value::Null),
+        at("reply", "io/send_message", 1040.0, 0.0, serde_json::Value::Null),
+    ];
+    let link = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    twin_waits.wires = vec![
+        link("t1", ("trigger", "out"), ("fork", "in")),
+        link("t2", ("fork", "out_0"), ("left", "in")),
+        link("t3", ("fork", "out_1"), ("right", "in")),
+        link("t4", ("left", "out"), ("join", "in")),
+        link("t5", ("right", "out"), ("join", "in")),
+        link("t6", ("join", "out"), ("reply", "in")),
+        link("t7", ("trigger", "content"), ("reply", "content")),
+    ];
+    let mut timed = runtime_for(twin_waits);
+    chat_reply(&mut timed, "twins")?;
+    timed.frame(2.0);
+    let total = timed.state.trace.last().map_or(0, |line| line.at_ms);
+    let total_label = if total == 0 { "<1ms".to_owned() } else { format!("{total}ms") };
+    let plaque_line = text_lines_under(&timed, "cauldron-plaque").into_iter().map(|(line, _)| line).collect::<Vec<_>>().join(" ");
+
+    let mut far = open(dozen_ingredient_spell(), (960.0, 640.0));
+    for _ in 0..10 {
+        let _ = click(&mut far, "zoom-out");
+    }
+    far.frame(1.0);
+    let far_scale = magicklala_canvas::brew_plan(&far.state.canvas, far.state.canvas_size()).scale;
+
+    let mut routed = StudioApp::with_spell(example("webhook_router.json")?, registry_specs());
+    routed.size = (1280.0, 800.0);
+    routed.run_payload = json!({ "method": "POST", "path": "/hooks/router", "body": { "type": "order", "id": "42" } });
+    routed.validate();
+    routed.run_spell();
+    routed.wait_background(SETTLE);
+    let mut routed = Runtime::new(routed, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    routed.frame(2.0);
+    let routed_total = routed.state.trace.last().map_or(0, |line| line.at_ms);
+    let routed_total = if routed_total == 0 { "<1ms".to_owned() } else { format!("{routed_total}ms") };
+    let routed_plaque = text_lines_under(&routed, "cauldron-plaque").into_iter().map(|(line, _)| line).collect::<Vec<_>>().join(" ");
+
     Ok(json!({
+        "sharpTurns": sharp_turns,
+        "plaqueTime": [{ "plaque": plaque_line, "total": total_label }, { "plaque": routed_plaque.clone(), "total": routed_total }],
+        "farScale": far_scale,
+        "routedPlaque": routed_plaque,
         "throughCards": through_cards,
         "offTap": off_tap,
         "flankAfter": flank_after,
