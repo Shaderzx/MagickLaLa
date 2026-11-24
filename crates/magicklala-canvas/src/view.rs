@@ -291,8 +291,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         None
     };
 
-    let top_row =
-        row().w_full().items_center().child(text(&card.title).font(TextStyle::new(13.0, 750.0)).color(if dimmed { untaken_title } else { p.ink }).wrap());
+    let top_row = col().w_full().min_w(0.0).child(text(&card.title).font(TextStyle::new(13.0, 750.0)).color(if dimmed { untaken_title } else { p.ink }).wrap());
 
     let sub_color = if hexed {
         p.hex
@@ -385,12 +384,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     };
     let bottle_h = 66.0;
     let route = crate::cauldron::route_label(state, &card.id);
-    let twins = state.nodes.iter().filter(|other| other.title == card.title).count() > 1;
-    let short = card.title.split_whitespace().next().unwrap_or(&card.title);
-    let title = match (&route, twins) {
-        (Some(route), true) => format!("{short} · {route}"),
-        _ => card.title.clone(),
-    };
+    let title = state.display_title(&card.id);
     let route_key = route.as_ref().map(|_| format!("route-{}", card.id.0));
     let bottle_art = canvas(potion_bottle_shape(bottle_mood, state.light, width, bottle_h, false, tint)).size(width, bottle_h);
     let pill = if taken {
@@ -839,14 +833,7 @@ fn grimoire_card_view<S: 'static>(
     let title_color = if dimmed { if state.light { hex(0x362E45) } else { hex(0xDFD8F2) } } else { p.ink };
     let kind_color = if dimmed { if state.light { hex(0x3F3652) } else { hex(0xD4CCE8) } } else { p.mute };
     let vial_size = (22.0 * zoom).clamp(17.0, 26.0);
-    let duplicate_title = state.nodes.iter().filter(|other| other.title == card.title).count() > 1;
-    let display_title = if duplicate_title {
-        let branch = card.id.0.strip_suffix("_reply").unwrap_or(&card.id.0);
-        let short = card.title.split_whitespace().next().unwrap_or(&card.title);
-        format!("{short} · {branch}")
-    } else {
-        card.title.clone()
-    };
+    let display_title = state.display_title(&card.id);
     let header_inner = row()
         .grow(1.0)
         .min_w(0.0)

@@ -317,9 +317,10 @@ fn pantry_ghost(app: &StudioApp, t: &HearthPalette) -> Option<El> {
 
 fn empty_canvas_overlay(app: &StudioApp, t: &HearthPalette) -> El {
     let size = app.canvas_size();
+    let pot = magicklala_canvas::brew_plan(&app.canvas, size).pot;
     let card_w = 400.0_f32.min(size.0 - 32.0).max(240.0);
-    let x = ((size.0 - card_w) * 0.5).max(16.0);
-    let y = (size.1 * 0.62 + 12.0).min(size.1 - 152.0).max(228.0);
+    let x = (pot[0] + pot[2] * 0.5 - card_w * 0.5).min(size.0 - card_w - 16.0).max(16.0);
+    let y = (pot[1] + pot[3] + 24.0).min(size.1 - 112.0);
     col().key("empty-canvas").w(card_w).px(16.0).py(12.0).items_center().gap(8.0).absolute(x, y).child(heading("Start a new potion", 24.0, 800.0, t.ink)).child(
         row().pt(4.0).child(sized_button("empty-add-trigger", "Add On Message", true, false, 16.0, t, |app| {
             app.spawn("event/on_message");
@@ -1920,7 +1921,7 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
             .items_center()
             .fill(t.shelf)
             .border_sides([1.0, 0.0, 0.0, 0.0], t.rule)
-            .child(canvas(brand_cauldron_mark(light)).key("trace-bobbin").size(26.0, 22.0))
+            .child(canvas(brand_cauldron_mark(light)).key("trace-bobbin").size(34.0, 28.0))
             .child(heading("Cauldron Log", 13.0, 800.0, t.ink))
             .child(label(run_hint, 12.0, 450.0, t.mute));
         if let Some(undo_msg) = &app.undo_banner {
@@ -1982,7 +1983,7 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
         .w_full()
         .gap(9.0)
         .items_center()
-        .child(canvas(brand_cauldron_mark(light)).key("trace-bobbin").size(22.0, 19.0))
+        .child(canvas(brand_cauldron_mark(light)).key("trace-bobbin").size(34.0, 28.0))
         .child(heading("Cauldron Log", 13.0, 800.0, t.ink))
         .child(label(summary, 12.0, 500.0, t.mute));
     if show_expand_chip {

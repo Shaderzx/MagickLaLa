@@ -300,6 +300,21 @@ impl CanvasState {
         })
     }
 
+    pub fn display_title(&self, id: &NodeId) -> String {
+        let Some(card) = self.card(id) else { return id.0.clone() };
+        let twins: Vec<&NodeId> = self.nodes.iter().filter(|other| other.title == card.title).map(|other| &other.id).collect();
+        if twins.len() < 2 {
+            return card.title.clone();
+        }
+        let short = card.title.split_whitespace().next().unwrap_or(&card.title);
+        let route =
+            self.wires.iter().find(|wire| &wire.to_node == id && wire.ty.is_flow()).map(|wire| wire.from_socket.as_str()).filter(|socket| *socket != "out");
+        match route {
+            Some(route) => format!("{short} · {route}"),
+            None => format!("{short} · {}", twins.iter().position(|twin| *twin == id).unwrap_or_default() + 1),
+        }
+    }
+
     pub fn card(&self, id: &NodeId) -> Option<&NodeCardModel> {
         self.nodes.iter().find(|card| &card.id == id)
     }

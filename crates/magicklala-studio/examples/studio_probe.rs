@@ -2450,7 +2450,9 @@ fn rects_touch(a: [f32; 4], b: [f32; 4]) -> bool {
 
 fn r4_look() -> Result<serde_json::Value, String> {
     let mut title_misfits = Vec::new();
-    for (name, spell) in [("support", StudioApp::from_registry().spell.clone()), ("dozen", dozen_ingredient_spell()), ("webhook", example("webhook_router.json")?)] {
+    for (name, spell) in
+        [("support", StudioApp::from_registry().spell.clone()), ("dozen", dozen_ingredient_spell()), ("webhook", example("webhook_router.json")?)]
+    {
         for size in [(960.0_f32, 640.0_f32), (1280.0, 800.0)] {
             let mut app = StudioApp::with_spell(spell.clone(), registry_specs());
             app.size = size;
@@ -2539,7 +2541,8 @@ fn r4_look() -> Result<serde_json::Value, String> {
     empty.frame(1.0);
     let pot = layout_rect(&empty, "cauldron-center").ok_or("no pot")?;
     let overlay = layout_rect(&empty, "empty-canvas").ok_or("no empty overlay")?;
-    let empty_heading = text_lines_under(&empty, "empty-canvas").into_iter().find(|(line, _)| line == "Start a new potion").map(|(_, rect)| rect).ok_or("no heading")?;
+    let empty_heading =
+        text_lines_under(&empty, "empty-canvas").into_iter().find(|(line, _)| line == "Start a new potion").map(|(_, rect)| rect).ok_or("no heading")?;
     let button = layout_rect(&empty, "empty-add-trigger").ok_or("no add button")?;
     let centre = |rect: [f32; 4]| rect[0] + rect[2] * 0.5;
 

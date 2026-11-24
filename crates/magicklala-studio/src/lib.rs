@@ -2676,17 +2676,7 @@ fn trace_line(event: &TraceEvent, at_ms: u64, canvas: &CanvasState) -> TraceLine
         if !path.is_empty() {
             return along_path(&id.0);
         }
-        let Some(card) = canvas.card(id) else {
-            return id.0.clone();
-        };
-        let dup = canvas.nodes.iter().filter(|other| other.title == card.title).count() > 1;
-        if dup {
-            let branch = id.0.strip_suffix("_reply").unwrap_or(&id.0);
-            let head = card.title.split_whitespace().next().unwrap_or(&card.title);
-            format!("{head} · {branch}")
-        } else {
-            card.title.clone()
-        }
+        canvas.display_title(id)
     };
     let wire_label = |wire_id: &WireId| {
         if !path.is_empty() {
