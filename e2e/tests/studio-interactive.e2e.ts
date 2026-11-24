@@ -177,7 +177,7 @@ test('studio probe keeps example configs and dynamic wires, runs spells and chat
     expect(report.palette.order).toEqual(catalogCategoryOrder);
     expect(report.registry.categories.every((category) => catalogCategoryOrder.includes(category))).toBe(true);
     expect(report.palette.categories).toEqual(catalogCategoryOrder.filter((category) => report.registry.categories.includes(category)));
-    expect(Object.keys(report.palette.accents).sort()).toEqual([...catalogCategoryOrder].sort());
+    expect(new Set(catalogCategoryOrder.map((category) => JSON.stringify(report.palette.accents[category]))).size).toBe(catalogCategoryOrder.length);
 
     expect(report.inspector).toMatchObject({ width: 960, height: 640 });
     expect(report.inspector.editorBottom).not.toBeNull();
@@ -237,8 +237,8 @@ test('studio probe keeps example configs and dynamic wires, runs spells and chat
       const facts = pngFacts(bytes);
       expect(facts.width / facts.height).toBeCloseTo(width / height, 2);
       expect(facts.width).toBeGreaterThanOrEqual(width);
-      expect(facts.distinctColors).toBeGreaterThan(120);
-      expect(facts.entropy).toBeGreaterThan(0.8);
+      expect(facts.distinctColors).toBeGreaterThan(200);
+      expect(facts.entropy).toBeGreaterThan(1.5);
     }
   } finally {
     await rm(dir, { recursive: true, force: true });

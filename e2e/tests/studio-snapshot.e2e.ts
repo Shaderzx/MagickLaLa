@@ -73,7 +73,7 @@ test('magicklala studio --snap writes a detailed Bubble & Sparkle Hearth cauldro
     const facts = pngFacts(bytes);
     expect(facts.width).toBe(bytes.readUInt32BE(16));
     expect(facts.distinctColors).toBeGreaterThan(200);
-    expect(facts.entropy).toBeGreaterThan(1.2);
+    expect(facts.entropy).toBeGreaterThan(1.5);
     expect(facts.warmLinenShare).toBeGreaterThan(0.45);
     expect(facts.emeraldBrothPixels).toBeGreaterThan(1500);
     expect(facts.emberPixels).toBeGreaterThan(300);
