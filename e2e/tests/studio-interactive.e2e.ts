@@ -330,7 +330,7 @@ test('a child spell published and then saved with the Save button in Studio keep
     expect(report.childSave).toEqual({ published: published[0].version, saveButton: true, status: 'Draft saved', releases: [published[0].version], storeError: null });
     const said = (template: string) => template.replace('{{topic}}', report.content);
 
-    expect(report.placed).toEqual({ kind: 'flow/subgraph', editor: true, caption: 'SPELL ID', versionField: true, versionCaption: 'RELEASE VERSION' });
+    expect(report.placed).toEqual({ kind: 'flow/subgraph', editor: true, caption: 'Spell ID', versionField: true, versionCaption: 'Release version' });
     expect(report.pointed.subgraphs).toEqual([{ node_id: report.callNode, spell_id: report.childSpellId, release_version: null }]);
     expect(report.pointed.config).toMatchObject({ spell_id: report.childSpellId });
     expect(report.pointed.validation).toBe('valid');
