@@ -932,3 +932,19 @@ test('The toolbar pill and the cauldron plaque tell the truth about a brew: Brew
   expect(cancelled.plaque).not.toMatch(/^Brewed/);
   for (const ended of [succeeded, failed, cancelled]) expect(ended.runningBrew).toBe(false);
 });
+
+test('Opening another potion while one is still brewing stops the old brew: the new potion shows no running brew, no old chat, no old trace, no lit wires, and the old reply never arrives in it', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['switch-mid-brew']);
+
+  expect(report.runningBefore).toBe(true);
+  expect(report.spell).toBe('Research Agent');
+  expect(report.running).toBe(false);
+  expect(report.runningBrew).toBe(false);
+  expect(report.chat).toEqual([]);
+  expect(report.trace).toBe(0);
+  expect(report.lastRun).toBeNull();
+  expect(report.lastBrew).toBeNull();
+  expect(report.busyCards).toBe(0);
+  expect(report.activeWires).toBe(0);
+  expect(report.backgroundStopped).toBe(true);
+});

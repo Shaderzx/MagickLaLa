@@ -1873,6 +1873,46 @@ fn brew_truth() -> Result<serde_json::Value, String> {
     Ok(json!({ "succeeded": succeeded, "failed": failed, "running": running, "cancelled": cancelled }))
 }
 
+fn switch_mid_brew() -> Result<serde_json::Value, String> {
+    let mut clock = Clock(0.0);
+    let mut rt = slow_runtime(1_200, Duration::from_secs(600));
+    click_at(&mut rt, "tab-playground", clock.tick())?;
+    rt.update(|app, _| {
+        app.chat_input = rune::TextEdit::new("still brewing?");
+        app.send_chat();
+    });
+    rt.update(|app, _| {
+        app.wait_until(SETTLE, delay_started);
+    });
+    let running_before = rt.state.is_running();
+    rt.update(|app, _| {
+        app.request_open_sample("Research Agent");
+        app.confirm_switch();
+    });
+    let switched_at = Instant::now();
+    while switched_at.elapsed() < Duration::from_millis(2_400) {
+        rt.update(|app, _| {
+            app.poll_background();
+        });
+        rt.frame(clock.tick());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let stopped = rt.update_if(|app, _| app.wait_stopped(SETTLE)) || rt.state.background_tasks() == 0;
+    Ok(json!({
+        "runningBefore": running_before,
+        "spell": rt.state.spell.name,
+        "running": rt.state.is_running(),
+        "chat": rt.state.chat.iter().map(|message| message.text.clone()).collect::<Vec<_>>(),
+        "trace": rt.state.trace.len(),
+        "lastRun": rt.state.last_run.as_ref().map(|report| report.outcome.label()),
+        "runningBrew": rt.state.canvas.running_brew,
+        "lastBrew": rt.state.canvas.last_brew.map(|status| format!("{status:?}")),
+        "busyCards": rt.state.canvas.nodes.iter().filter(|card| card.status != ExecutionStatus::Idle).count(),
+        "activeWires": rt.state.canvas.wires.iter().filter(|wire| wire.active).count(),
+        "backgroundStopped": stopped && rt.state.background_tasks() == 0,
+    }))
+}
+
 fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
         Some("surfaces") => capture_surfaces(Path::new(args.get(1).ok_or("missing output directory")?)),
@@ -1881,6 +1921,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("toss") => toss(),
         Some("plain-words") => plain_words(),
         Some("brew-truth") => brew_truth(),
+        Some("switch-mid-brew") => switch_mid_brew(),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-ref-edit") => subgraph_ref_edit(Path::new(args.get(1).ok_or("missing database path")?)),
