@@ -212,7 +212,8 @@ fn blocked_in(card: &NodeCardModel, mood: CauldronMood) -> bool {
 fn ladle_at(plan: &BrewPlan, stir: f32) -> ([f32; 2], [f32; 2]) {
     let pot = plan.pot;
     let (base, tip) = crate::hearth::ladle_ends(pot[2], pot[3], stir);
-    ([pot[0] + base[0], pot[1] + base[1]], [pot[0] + tip[0], pot[1] + tip[1]])
+    let rim = [base[0] + (tip[0] - base[0]) * 0.35, base[1] + (tip[1] - base[1]) * 0.35];
+    ([pot[0] + rim[0], pot[1] + rim[1]], [pot[0] + tip[0], pot[1] + tip[1]])
 }
 
 fn crosses(a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]) -> bool {

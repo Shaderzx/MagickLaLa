@@ -4669,6 +4669,16 @@ fn segments_cross(a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]) -> bool {
     ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0)) && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
 }
 
+fn pot_rect() -> Result<serde_json::Value, String> {
+    let size = StudioConfig::default().size;
+    let mut app = StudioApp::from_registry();
+    app.size = size;
+    let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+    rt.frame(0.0);
+    let pot = layout_rect(&rt, "cauldron-center").ok_or("no pot")?;
+    Ok(json!({ "size": [size.0, size.1], "pot": pot }))
+}
+
 fn clear_signals() -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
@@ -5851,6 +5861,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("close-quarters") => close_quarters(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("true-runs") => true_runs(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("clear-signals") => clear_signals(),
+        Some("pot-rect") => pot_rect(),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("drawn-truths") => drawn_truths(),

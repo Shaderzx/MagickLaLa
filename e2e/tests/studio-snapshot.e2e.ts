@@ -45,21 +45,36 @@ function pngFacts(bytes: Buffer) {
   }
   const total = pixels.length / channels;
   let warmLinenPixels = 0;
-  let emeraldBrothPixels = 0;
   let emberPixels = 0;
   for (let offset = 0; offset < pixels.length; offset += channels) {
     const r = pixels[offset];
     const g = pixels[offset + 1];
     const b = pixels[offset + 2];
     if (r >= 225 && g >= 215 && b >= 195) warmLinenPixels += 1;
-    if (g >= 110 && g > r + 25 && g >= b) emeraldBrothPixels += 1;
     if (r >= 190 && g >= 95 && g <= 235 && b <= 130 && r - b >= 70) emberPixels += 1;
   }
   const entropy = [...colors.values()].reduce((sum, count) => sum - (count / total) * Math.log2(count / total), 0);
-  return { width, height, distinctColors: colors.size, entropy, warmLinenShare: warmLinenPixels / total, emeraldBrothPixels, emberPixels };
+  const brothShareIn = (pot: number[]) => {
+    const [x, y, w, h] = pot;
+    const unit = Math.min(Math.max(Math.min(w, h) / 240, 0.55), 1.35);
+    const centre = x + w / 2;
+    const rim = y + h * 0.56 - 30 * unit;
+    let liquid = 0;
+    let seen = 0;
+    for (let py = Math.round(rim - 10 * unit); py <= Math.round(rim + 6 * unit); py += 1) {
+      for (let px = Math.round(centre - 50 * unit); px <= Math.round(centre + 50 * unit); px += 1) {
+        const at = (py * width + px) * channels;
+        const [r, g, b] = [pixels[at], pixels[at + 1], pixels[at + 2]];
+        seen += 1;
+        if (Math.max(r, g, b) - Math.min(r, g, b) >= 60 && Math.max(r, g, b) >= 90) liquid += 1;
+      }
+    }
+    return liquid / seen;
+  };
+  return { width, height, distinctColors: colors.size, entropy, warmLinenShare: warmLinenPixels / total, emberPixels, brothShareIn };
 }
 
-test('magicklala studio --snap writes a detailed Bubble & Sparkle Hearth cauldron PNG with warm linen ground, emerald broth, and hearth embers', { timeout: 900_000 }, async () => {
+test('magicklala studio --snap writes a detailed Bubble & Sparkle Hearth cauldron PNG with warm linen ground, a broth that fills the pot mouth, and hearth embers', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-snap-'));
   const out = join(dir, 'studio.png');
   try {
@@ -71,11 +86,14 @@ test('magicklala studio --snap writes a detailed Bubble & Sparkle Hearth cauldro
     expect(bytes.readUInt32BE(16)).toBeGreaterThan(0);
     expect(bytes.readUInt32BE(20)).toBeGreaterThan(0);
     const facts = pngFacts(bytes);
+    const { stdout } = await run('cargo', ['run', '-q', '-p', 'magicklala-studio', '--example', 'studio_probe', '--', 'pot-rect'], { cwd: repoRoot, env, timeout: 900_000, maxBuffer: 64 * 1024 * 1024 });
+    const layout = JSON.parse(stdout.trim().split('\n').at(-1) ?? '');
+    expect(layout.size).toEqual([facts.width, facts.height]);
     expect(facts.width).toBe(bytes.readUInt32BE(16));
     expect(facts.distinctColors).toBeGreaterThan(200);
     expect(facts.entropy).toBeGreaterThan(1.5);
     expect(facts.warmLinenShare).toBeGreaterThan(0.45);
-    expect(facts.emeraldBrothPixels).toBeGreaterThan(1500);
+    expect(facts.brothShareIn(layout.pot)).toBeGreaterThan(0.5);
     expect(facts.emberPixels).toBeGreaterThan(300);
   } finally {
     await rm(dir, { recursive: true, force: true });
