@@ -2321,7 +2321,7 @@ fn cut_titles(rt: &Runtime<StudioApp>, text: &mut rune::text::TextSystem) -> Vec
         .collect()
 }
 
-fn r3_look() -> Result<serde_json::Value, String> {
+fn cauldron_reads_cleanly() -> Result<serde_json::Value, String> {
     let mut text = magicklala_studio::studio_text_system();
     let mut cut = Vec::new();
     let mut crossings = Vec::new();
@@ -2451,7 +2451,7 @@ fn rects_touch(a: [f32; 4], b: [f32; 4]) -> bool {
     a[0] < b[0] + b[2] - 0.5 && b[0] < a[0] + a[2] - 0.5 && a[1] < b[1] + b[3] - 0.5 && b[1] < a[1] + a[3] - 0.5
 }
 
-fn r4_look() -> Result<serde_json::Value, String> {
+fn one_name_per_step() -> Result<serde_json::Value, String> {
     let mut title_misfits = Vec::new();
     for (name, spell) in
         [("support", StudioApp::from_registry().spell.clone()), ("dozen", dozen_ingredient_spell()), ("webhook", example("webhook_router.json")?)]
@@ -2568,7 +2568,7 @@ fn all_texts(rt: &Runtime<StudioApp>) -> Vec<String> {
     rt.elements().iter().filter(|element| !element.exiting).filter_map(|element| element.text.clone()).collect()
 }
 
-fn carbon_r4() -> Result<serde_json::Value, String> {
+fn compact_fit() -> Result<serde_json::Value, String> {
     let compact = |spell: SpellGraph| {
         let mut app = StudioApp::with_spell(spell, registry_specs());
         app.size = (960.0, 640.0);
@@ -2696,7 +2696,7 @@ fn dozen_lanes() -> serde_json::Value {
     json!({ "crossing": crossing, "strands": lanes.len(), "pours": pours.len() })
 }
 
-fn carbon_r4b() -> Result<serde_json::Value, String> {
+fn recipe_mending() -> Result<serde_json::Value, String> {
     let pulled = |delete: bool| -> Result<serde_json::Value, String> {
         let mut rt = headless(StudioApp::from_registry());
         let reply = node_of_kind(&rt.state, "io/send_message").ok_or("no reply")?;
@@ -2815,7 +2815,7 @@ fn carbon_r4b() -> Result<serde_json::Value, String> {
         "menu": { "setAside": set_aside, "afterAside": after_aside, "pourIn": pour_in, "afterPour": after_pour },
     }))
 }
-fn sol_r4(db_path: &Path) -> Result<serde_json::Value, String> {
+fn one_recipe(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),
@@ -2948,6 +2948,116 @@ fn sol_r4(db_path: &Path) -> Result<serde_json::Value, String> {
         "midBrew": { "bottle": bottle_mood, "publish": refused },
     }))
 }
+fn strand_clearance(rt: &Runtime<StudioApp>) -> f32 {
+    let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+    let mut nearest = f32::MAX;
+    for (id, points) in magicklala_canvas::cauldron::pour_paths(&rt.state.canvas, &plan) {
+        for point in points.iter().skip(11) {
+            for card in plan.cards.iter().filter(|card| card.role != magicklala_canvas::BrewRole::Bottle) {
+                let r = card.rect;
+                if card.id == id && point[1] <= r[1] + r[3] {
+                    continue;
+                }
+                if point[1] < r[1] || point[1] > r[1] + r[3] {
+                    continue;
+                }
+                let gap = if point[0] < r[0] {
+                    r[0] - point[0]
+                } else if point[0] > r[0] + r[2] {
+                    point[0] - r[0] - r[2]
+                } else {
+                    -1.0
+                };
+                nearest = nearest.min(gap);
+            }
+        }
+    }
+    (nearest * 10.0).round() / 10.0
+}
+
+fn fit_and_wording(db_path: &Path) -> Result<serde_json::Value, String> {
+    let sized = |spell: SpellGraph, size: (f32, f32)| {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.frame(1.0);
+        rt
+    };
+    let dozen = sized(dozen_ingredient_spell(), (960.0, 640.0));
+    let clearance = strand_clearance(&dozen);
+
+    let mut rings = Vec::new();
+    for size in [(1280.0_f32, 800.0_f32), (960.0, 640.0)] {
+        let empty = sized(SpellGraph::new("New Potion"), size);
+        let plan = magicklala_canvas::brew_plan(&empty.state.canvas, empty.state.canvas_size());
+        let centre = plan.pot[1] + plan.pot[3] * 0.5;
+        let switch = layout_rect(&empty, "mode-cauldron").ok_or("no mode switch")?;
+        let board = layout_rect(&empty, "canvas").ok_or("no canvas")?;
+        rings.push(((centre - plan.pour_radius()) - (switch[1] + switch[3] - board[1])).round());
+    }
+
+    let compact = sized(StudioApp::from_registry().spell.clone(), (960.0, 640.0));
+    let formulas: Vec<String> = compact
+        .state
+        .canvas
+        .nodes
+        .iter()
+        .filter(|card| !text_lines_under(&compact, &format!("node-{}", card.id.0)).iter().any(|(line, _)| line == &card.kind))
+        .map(|card| card.kind.clone())
+        .collect();
+
+    let empty_log = texts_under(&mut sized(SpellGraph::new("New Potion"), (1280.0, 800.0)), "trace-strip");
+    let support_log = texts_under(&mut sized(StudioApp::from_registry().spell.clone(), (1280.0, 800.0)), "trace-strip");
+
+    let mut slow = slow_runtime(1_500, Duration::from_secs(600));
+    click_at(&mut slow, "run-spell", 0.5)?;
+    slow.update(|app, _| {
+        app.wait_until(SETTLE, delay_started);
+    });
+    click_at(&mut slow, "publish", 1.0)?;
+    let mid_brew_error = slow.state.store_error.clone();
+    live_finish(&mut slow)?;
+
+    let mut no_db = headless(StudioApp::from_registry());
+    click(&mut no_db, "publish")?;
+    let no_db_error = no_db.state.store_error.clone();
+
+    let config = StudioConfig { db_path: Some(db_path.to_path_buf()), ..StudioConfig::default() };
+    let mut app = StudioApp::open(&config).map_err(|error| error.to_string())?;
+    app.load_graph(tasting_spell());
+    let mut shelf = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    shelf.frame(0.0);
+    click(&mut shelf, "publish")?;
+    click(&mut shelf, "tab-agents")?;
+    shelf.frame(2.0);
+    let shelf_texts = texts_under(&mut shelf, "left-rail");
+    let theme_caption = texts_under(&mut shelf, "theme-toggle");
+
+    let mut menu = headless(StudioApp::from_registry());
+    let llm = NodeId::from("llm");
+    menu.update(move |app, _| {
+        app.canvas.select(Some(llm.clone()));
+        let plan = magicklala_canvas::brew_plan(&app.canvas, app.canvas_size());
+        app.canvas.context_card = plan.card(&llm).map(|card| card.rect);
+        app.canvas.context_menu = Some([24.0, 456.0]);
+    });
+    menu.frame(1.0);
+    let menu_rect = layout_rect(&menu, "context-menu").ok_or("no menu")?;
+    let plaque = layout_rect(&menu, "cauldron-plaque").ok_or("no plaque")?;
+
+    Ok(json!({
+        "strandClearance": clearance,
+        "ringBelowSwitch": rings,
+        "formulasMissingAt960": formulas,
+        "logs": { "empty": empty_log, "support": support_log },
+        "midBrewPublishError": mid_brew_error,
+        "noDbPublishError": no_db_error,
+        "shelf": shelf_texts,
+        "theme": theme_caption,
+        "menuCoversPlaque": rects_touch(menu_rect, plaque),
+    }))
+}
 fn pull_middle() -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32| NodeInstance {
         id: NodeId::from(id),
@@ -3006,7 +3116,7 @@ fn pull_middle() -> Result<serde_json::Value, String> {
     Ok(json!({ "setAside": set_aside, "deleted": removed, "emptyBottle": empty }))
 }
 
-fn sol_r3(db_path: &Path) -> Result<serde_json::Value, String> {
+fn corner_truths(db_path: &Path) -> Result<serde_json::Value, String> {
     let replace_report = |order: &[&str]| -> Result<serde_json::Value, String> {
         let mut rt = headless(StudioApp::with_spell(SpellGraph::new("Shout"), registry_specs()));
         for kind in order {
@@ -3175,14 +3285,15 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("potion-colours") => potion_colours(),
         Some("grimoire-place") => grimoire_place(),
         Some("pour-shape") => pour_shape(),
-        Some("r3-look") => r3_look(),
+        Some("reads-cleanly") => cauldron_reads_cleanly(),
         Some("pull-middle") => pull_middle(),
-        Some("r4-look") => r4_look(),
-        Some("carbon-r4") => carbon_r4(),
-        Some("carbon-r4b") => carbon_r4b(),
-        Some("sol-r4") => sol_r4(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("one-name") => one_name_per_step(),
+        Some("compact-fit") => compact_fit(),
+        Some("recipe-mending") => recipe_mending(),
+        Some("fit-and-wording") => fit_and_wording(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("one-recipe") => one_recipe(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("tray-drop") => tray_drop(),
-        Some("sol-r3") => sol_r3(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("corner-truths") => corner_truths(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-ref-edit") => subgraph_ref_edit(Path::new(args.get(1).ok_or("missing database path")?)),

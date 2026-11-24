@@ -474,8 +474,8 @@ test('Studio without --db refuses Save and Publish with a message naming --db in
     const report = await studioProbe(['save-guards', dbPath]);
 
     expect(report.noDb.status).toBeNull();
-    expect(report.noDb.saveError).toContain('pass --db <file.sqlite> to save drafts on disk');
-    expect(report.noDb.publishError).toContain('pass --db <file.sqlite> to publish releases on disk');
+    expect(report.noDb.saveError).toContain('Pass --db <file.sqlite> to save drafts on disk');
+    expect(report.noDb.publishError).toContain('Pass --db <file.sqlite> to publish releases on disk');
     expect(report.noDb.releases).toEqual([]);
 
     const db = new DatabaseSync(dbPath, { readOnly: true });
@@ -527,8 +527,8 @@ test('Studio treats --db :memory: and every in-memory SQLite form as not on disk
   for (const form of report.forms) {
     expect(form.persistent).toBe(false);
     expect(form.status).toBeNull();
-    expect(form.saveError).toBe('pass --db <file.sqlite> to save drafts on disk');
-    expect(form.publishError).toBe('pass --db <file.sqlite> to publish releases on disk');
+    expect(form.saveError).toBe('Pass --db <file.sqlite> to save drafts on disk');
+    expect(form.publishError).toBe('Pass --db <file.sqlite> to publish releases on disk');
     expect(form.releases).toEqual([]);
   }
 });
@@ -547,7 +547,7 @@ test('Save and Publish show their outcome in the TRACE strip on the default Node
     expect(drafts).toHaveLength(1);
 
     expect(report.noDb.leftTab).toBe('Palette');
-    expect(report.noDb.storeError).toBe('pass --db <file.sqlite> to save drafts on disk');
+    expect(report.noDb.storeError).toBe('Pass --db <file.sqlite> to save drafts on disk');
     expect(report.noDb.shown).toEqual({ text: report.noDb.storeError, insideTrace: true, onScreen: true });
 
     expect(report.saved.leftTab).toBe('Palette');
@@ -575,10 +575,10 @@ test('Studio launched with a --db it cannot open keeps that open error on Save a
     const report = await studioProbe(['unopenable-db', dbPath]);
 
     expect(report.persistent).toBeNull();
-    expect(report.saveError).toContain('the database passed with --db could not be opened: ');
-    expect(report.saveError).not.toContain('pass --db');
-    expect(report.publishError).toContain('the database passed with --db could not be opened: ');
-    expect(report.publishError).not.toContain('pass --db');
+    expect(report.saveError).toContain('The database passed with --db could not be opened: ');
+    expect(report.saveError).not.toContain('Pass --db');
+    expect(report.publishError).toContain('The database passed with --db could not be opened: ');
+    expect(report.publishError).not.toContain('Pass --db');
     expect(report.status).toBeNull();
     expect(report.shown).toEqual({ text: report.publishError, insideTrace: true, onScreen: true });
   } finally {
@@ -646,8 +646,8 @@ test('Studio asks SQLite whether a percent-encoded in-memory URI like file:memte
     for (const form of report.forms) {
       expect(form.persistent).toBe(false);
       expect(form.status).toBeNull();
-      expect(form.saveError).toBe('pass --db <file.sqlite> to save drafts on disk');
-      expect(form.publishError).toBe('pass --db <file.sqlite> to publish releases on disk');
+      expect(form.saveError).toBe('Pass --db <file.sqlite> to save drafts on disk');
+      expect(form.publishError).toBe('Pass --db <file.sqlite> to publish releases on disk');
       expect(form.releases).toEqual([]);
     }
     expect(await readdir(dir)).toEqual([]);
@@ -710,7 +710,7 @@ test('Studio opened on an empty database refuses to validate or publish a flow/s
     expect(report.validation.errors.join('\n')).toContain(report.childRecordId);
     expect(report.published.version).toBeNull();
     expect(report.published.releases).toEqual([]);
-    expect(report.published.storeError).toContain('cannot publish an invalid spell: ');
+    expect(report.published.storeError).toContain('Cannot publish an invalid potion: ');
     expect(report.published.storeError).toContain(report.childRecordId);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -726,12 +726,12 @@ test('Editing the spell clears a one-off Publish or Save error from the TRACE st
     await writeFile(blocker, 'a plain file where a folder should be');
     const report = await studioProbe(['edit-clears-store-error', dbPath, unopenable]);
 
-    expect(report.refused.storeError).toContain('cannot publish an invalid spell: ');
+    expect(report.refused.storeError).toContain('Cannot publish an invalid potion: ');
     expect(report.refused.shown).toEqual({ text: report.refused.storeError, insideTrace: true, onScreen: true });
     expect(report.refusedEdited.storeError).toBeNull();
     expect(report.refusedEdited.shown).toBeNull();
 
-    expect(report.unopenable.storeError).toContain('the database passed with --db could not be opened: ');
+    expect(report.unopenable.storeError).toContain('The database passed with --db could not be opened: ');
     expect(report.unopenable.shown).toEqual({ text: report.unopenable.storeError, insideTrace: true, onScreen: true });
     expect(report.unopenableEdited.storeError).toBeNull();
     expect(report.unopenableEdited.shown).toBeNull();
@@ -1050,7 +1050,7 @@ test('The cauldron is the biggest thing on the support canvas and every ingredie
 });
 
 test('The cauldron reads cleanly at any size: no ingredient name is cut off, no pour line runs over another card, the idle broth already shows the last ingredient colour, steps number in feeding order, a Send that carries on is not the bottle, set-aside cards sit on a visible shelf, the pot grows on a roomy 1600 by 1000 window, branch bottles have distinct names, and Grimoire text stays 11px or taller', { timeout: 900_000 }, async () => {
-  const report = await studioProbe(['r3-look']);
+  const report = await studioProbe(['reads-cleanly']);
 
   expect(report.cut).toEqual([]);
   expect(report.crossings).toEqual([]);
@@ -1083,7 +1083,7 @@ test('Setting aside or deleting the middle step of a recipe joins the steps arou
 test('Studio tells the truth in the corners: a tossed Replace really shapes the reply in either order, a spare trigger never hijacks the brew, nothing is added mid-brew, the Trace panel says Brewing then marks an edited result as the last brew, a wired prompt shows its source with a way to type it instead, a long name never pushes toolbar buttons off a 960 window, re-publishing an unchanged potion makes no new release, saved potions stay in the picker, and checkmarks are drawn rather than font glyphs', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-corners-'));
   try {
-    const report = await studioProbe(['sol-r3', join(dir, 'studio.sqlite')]);
+    const report = await studioProbe(['corner-truths', join(dir, 'studio.sqlite')]);
 
     for (const shaped of [report.tossed, report.spliced]) {
       expect(shaped.role).toBe('Ingredient');
@@ -1115,7 +1115,7 @@ test('Dropping a pantry ingredient on the set-aside tray adds it set aside with 
 });
 
 test('Every step keeps one name and every card keeps its words: ingredient titles never run under their vial at 960 by 640 or 1280 by 800, the cauldron, Grimoire and Cauldron Log name each branch bottle by its route, look-alike bottles without routes are numbered, the log icon sits clear of the first step, and the empty pot has its heading and button centred beneath it', { timeout: 900_000 }, async () => {
-  const report = await studioProbe(['r4-look']);
+  const report = await studioProbe(['one-name']);
 
   expect(report.titleMisfits).toEqual([]);
   const routed = { order_reply: 'Send · orders', support_reply: 'Send · support', ignored_reply: 'Send · default' };
@@ -1130,7 +1130,7 @@ test('Every step keeps one name and every card keeps its words: ingredient title
   expect(report.empty.belowPot).toBeGreaterThanOrEqual(24);
 });
 test('Studio fits and counts honestly at 960 by 640: variable names keep their own line, the hex card keeps its buttons inside, the empty pot leaves room for its heading, the opened pantry can be folded away again, the Grimoire draws its checkmarks and chevrons instead of font glyphs, the recipe panel uses the same bottle name as the cauldron, the toolbar counts ingredients, set-aside cards and bottles the way the pot does, and a Check before any brew never reads Brew #0', { timeout: 900_000 }, async () => {
-  const report = await studioProbe(['carbon-r4']);
+  const report = await studioProbe(['compact-fit']);
 
   expect(report.varLabelWidths.length).toBeGreaterThan(0);
   for (const width of report.varLabelWidths) expect(width).toBeGreaterThanOrEqual(150);
@@ -1146,7 +1146,7 @@ test('Studio fits and counts honestly at 960 by 640: variable names keep their o
 });
 
 test('Studio mends and guards the recipe around every step: pulling the model out keeps the reply fed, setting aside a Replace gives the reply its words back, a tossed Template is wired between the message and the reply, a bottle missing its words says so on the bottle, a single bottle has the potion colour, twelve ingredients pour down twelve separate strands that never cross the pour from pot to bottle, nothing changes mid-brew, and the card menu can set an ingredient aside and pour it back in', { timeout: 900_000 }, async () => {
-  const report = await studioProbe(['carbon-r4b']);
+  const report = await studioProbe(['recipe-mending']);
 
   for (const pulled of [report.pullModel.aside, report.pullModel.deleted]) {
     expect(pulled).toEqual({ check: 'valid', contentFed: true });
@@ -1167,7 +1167,7 @@ test('Studio mends and guards the recipe around every step: pulling the model ou
 test('What Studio shows, brews and publishes is the same recipe: a spare reply stays on the shelf and out of the release while the draft keeps it, a reopened potion keeps its live release, new potions get their own names, setting aside a Switch never opens every route, undo brings back every wire, a wired Delay sits in the pot, a trigger dropped on the shelf never brews, and mid-brew the bottle stays empty and Publish waits', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-one-recipe-'));
   try {
-    const report = await studioProbe(['sol-r4', join(dir, 'studio.sqlite')]);
+    const report = await studioProbe(['one-recipe', join(dir, 'studio.sqlite')]);
 
     expect(report.spare).toEqual({ check: 'valid', role: 'Aside', releaseValid: true, releaseHasSpare: false, draftKeepsSpare: true });
     expect(report.reopened).toEqual({ name: 'Spare Agent', live: 1, releases: 1 });
@@ -1180,6 +1180,30 @@ test('What Studio shows, brews and publishes is the same recipe: a spare reply s
     expect(report.tray).toEqual({ role: 'Aside', brews: 0 });
     expect(report.midBrew.bottle).toBe('Ready');
     expect(report.midBrew.publish).toMatch(/brewing/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Studio reads as one finished product: twelve strands keep clear of every card at 960 by 640, the empty pot ring sits below the mode switch, every vial keeps its formula line at 960, the log says Not brewed yet in one voice, Publish is simply unavailable mid-brew, messages read as sentences about potions, the Potions tab and release rows say each thing once, the theme button names the current theme, and the card menu never hides the plaque', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-finish-'));
+  try {
+    const report = await studioProbe(['fit-and-wording', join(dir, 'studio.sqlite')]);
+
+    expect(report.strandClearance).toBeGreaterThanOrEqual(6);
+    for (const gap of report.ringBelowSwitch) expect(gap).toBeGreaterThanOrEqual(8);
+    expect(report.formulasMissingAt960).toEqual([]);
+    expect(report.logs.empty).toContain('Not brewed yet');
+    expect(report.logs.support).toContain('Not brewed yet');
+    expect(report.logs.empty).not.toMatch(/Idle/);
+    expect(report.midBrewPublishError).toBeNull();
+    expect(report.noDbPublishError).toBe('Pass --db <file.sqlite> to publish releases on disk');
+    expect(report.shelf).toMatch(/Potions/);
+    expect(report.shelf).not.toMatch(/Spells/);
+    expect(report.shelf).not.toMatch(/Published brew/);
+    expect(report.shelf).toMatch(/v1 · 2 ingredients/);
+    expect(report.theme).toBe('Sunlit');
+    expect(report.menuCoversPlaque).toBe(false);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
