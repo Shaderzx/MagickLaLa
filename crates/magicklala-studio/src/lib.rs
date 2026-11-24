@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use magicklala_canvas::{CanvasState, ExecutionStatus, NodeCardModel, WireModel, WorkbenchMode};
 use magicklala_graph::{
     EngineServices, EventEmitter, NodeCatalog, NodeId, NodeInstance, NodeSpec, RunStatus, RunSummary, RunTrigger, SUBGRAPH_KIND, SocketType, SpellEngine,
-    SpellGraph, SpellId, SpellValidator, SubgraphKey, SubgraphRef, SubgraphResolver, TraceEvent, Value, VariableDef, Wire, WireId, resolve_subgraphs_from,
+    SpellGraph, SpellId, SpellValidator, SubgraphKey, SubgraphRef, SubgraphResolver, TraceEvent, ValidationError, Value, VariableDef, Wire, WireId,
+    resolve_subgraphs_from,
 };
 use magicklala_nodes::{HttpLlmGateway, InMemoryKnowledge, InMemoryMemory, LlmGatewayConfig, default_registry};
 use magicklala_store::{NewProject, NewSpell, NewSpellRelease, ProjectId, Repository, SpellRecord, SpellRecordId, SpellRelease, SqliteStore, StoreError};
@@ -577,6 +578,44 @@ pub enum RightTab {
     Playground,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HexFinding {
+    pub node: Option<NodeId>,
+    pub socket: Option<String>,
+    pub message: String,
+}
+
+impl HexFinding {
+    fn loose(message: String) -> Self {
+        Self { node: None, socket: None, message }
+    }
+
+    fn from_validation(error: &ValidationError, spell: &SpellGraph) -> Self {
+        let message = error.to_string();
+        let (node, socket) = match error {
+            ValidationError::MissingRequiredInput { node, socket }
+            | ValidationError::MultipleValueInputs { node, socket }
+            | ValidationError::MissingSocket { node, socket, .. } => (Some(node.clone()), Some(socket.clone())),
+            ValidationError::TypeMismatch { wire, .. } => match spell.wires.iter().find(|candidate| &candidate.id == wire) {
+                Some(found) => (Some(found.to_node.clone()), Some(found.to_socket.clone())),
+                None => (None, None),
+            },
+            ValidationError::UnknownNodeKind { node, .. }
+            | ValidationError::ExclusiveJoin { node, .. }
+            | ValidationError::SubgraphCycle { node, .. }
+            | ValidationError::SubgraphResolverUnavailable { node, .. }
+            | ValidationError::OrphanSubgraph { node, .. }
+            | ValidationError::SubgraphTargetMissing { node }
+            | ValidationError::SubgraphTargetConflict { node, .. }
+            | ValidationError::DuplicateSubgraphTarget(node)
+            | ValidationError::DuplicateNode(node) => (Some(node.clone()), None),
+            ValidationError::ValueCycle(nodes) => (nodes.first().cloned(), None),
+            _ => (None, None),
+        };
+        Self { node, socket, message }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidationState {
     Unchecked,
@@ -629,6 +668,7 @@ pub enum PendingSwitch {
 
 pub struct StudioApp {
     pub spell: SpellGraph,
+    pub hex_findings: Vec<HexFinding>,
     pub canvas: CanvasState,
     pub size: (f32, f32),
     pub specs: Vec<NodeSpec>,
@@ -756,6 +796,7 @@ impl StudioApp {
             dirty: false,
             palette_query: TextEdit::new(""),
             validation: ValidationState::Unchecked,
+            hex_findings: Vec::new(),
             trace: Vec::new(),
             trace_events: Vec::new(),
             pending_trace: VecDeque::new(),
@@ -1387,8 +1428,38 @@ impl StudioApp {
             .collect()
     }
 
-    fn check_spell(&self) -> Result<(), Vec<String>> {
-        self.check_spell_with_root(self.root_subgraph())
+    fn hex_findings_for_spell(&self) -> Vec<HexFinding> {
+        let version_findings: Vec<HexFinding> = self
+            .spell
+            .nodes
+            .iter()
+            .filter(|node| node.kind == SUBGRAPH_KIND)
+            .filter_map(|node| {
+                configured_release_version(node).err().map(|error| HexFinding {
+                    node: Some(node.id.clone()),
+                    socket: None,
+                    message: format!("node {:?}: {error}", node.id.0),
+                })
+            })
+            .collect();
+        if !version_findings.is_empty() {
+            return version_findings;
+        }
+        let validator = SpellValidator::new(self.specs.clone());
+        if let Err(errors) = validator.validate(&self.spell) {
+            return errors.iter().map(|error| HexFinding::from_validation(error, &self.spell)).collect();
+        }
+        if self.spell.subgraphs.is_empty() {
+            return Vec::new();
+        }
+        let resolver = match self.subgraph_resolver() {
+            Ok(resolver) => resolver,
+            Err(error) => return vec![HexFinding::loose(error.to_string())],
+        };
+        match resolve_subgraphs_from(&self.spell, self.root_subgraph(), &resolver, &validator) {
+            Ok(_) => Vec::new(),
+            Err(error) => vec![HexFinding::loose(error.to_string())],
+        }
     }
 
     fn check_spell_with_root(&self, root: SubgraphKey) -> Result<(), Vec<String>> {
@@ -1415,7 +1486,9 @@ impl StudioApp {
                 socket.flagged = false;
             }
         }
-        self.validation = match self.check_spell() {
+        let findings = self.hex_findings_for_spell();
+        self.hex_findings = findings.clone();
+        self.validation = match if findings.is_empty() { Ok(()) } else { Err(findings) } {
             Ok(()) => {
                 self.trace.retain(|line| line.kind != "RunRejected");
                 if self.canvas.brew_summary.as_deref().is_some_and(|s| s.starts_with("Hexed")) {
@@ -1423,33 +1496,25 @@ impl StudioApp {
                 }
                 ValidationState::Valid
             }
-            Err(errors) => {
-                let mut first_socket: Option<String> = None;
+            Err(findings) => {
                 let mut rejected: Vec<TraceLine> = Vec::new();
-                for err in &errors {
-                    let mut matched_node: Option<NodeId> = None;
-                    for card in &mut self.canvas.nodes {
-                        let id_pat = format!("\"{}\"", card.id.0);
-                        if err.contains(&id_pat) || err.contains(&card.id.0) || err.contains(&card.title) {
-                            card.status = ExecutionStatus::Failed;
-                            matched_node = Some(card.id.clone());
-                            for socket in &mut card.inputs {
-                                let sock_pat = format!("\"{}\"", socket.name);
-                                if err.contains(&sock_pat) || (err.contains("required input") && socket.name == "prompt") {
-                                    socket.flagged = true;
-                                    if first_socket.is_none() {
-                                        first_socket = Some(socket.name.clone());
-                                    }
-                                }
-                            }
+                for finding in &findings {
+                    if let Some(card) = finding.node.as_ref().and_then(|id| self.canvas.nodes.iter_mut().find(|card| &card.id == id)) {
+                        card.status = ExecutionStatus::Failed;
+                        if let Some(socket) = finding.socket.as_ref().and_then(|name| card.inputs.iter_mut().find(|socket| &socket.name == name)) {
+                            socket.flagged = true;
                         }
                     }
-                    rejected.push(TraceLine { at_ms: 0, kind: "RunRejected", detail: err.clone(), status: ExecutionStatus::Failed, node: matched_node });
+                    rejected.push(TraceLine {
+                        at_ms: 0,
+                        kind: "RunRejected",
+                        detail: finding.message.clone(),
+                        status: ExecutionStatus::Failed,
+                        node: finding.node.clone(),
+                    });
                 }
-                self.canvas.brew_summary = Some(match first_socket {
-                    Some(sock) => format!("Hexed · missing \"{sock}\""),
-                    None => "Hexed · check crimson vial".to_owned(),
-                });
+                self.canvas.brew_summary = Some(hex_plaque(&findings, &self.canvas.nodes));
+                let errors: Vec<String> = findings.into_iter().map(|finding| finding.message).collect();
                 if self.trace.is_empty() || self.trace.iter().all(|line| line.kind == "RunRejected") {
                     self.trace = rejected;
                 }
@@ -2101,6 +2166,15 @@ pub fn palette_categories(specs: &[NodeSpec]) -> Vec<String> {
     let rank = |category: &String| PALETTE_CATEGORY_ORDER.iter().position(|known| known == category).unwrap_or(PALETTE_CATEGORY_ORDER.len());
     found.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
     found
+}
+
+fn hex_plaque(findings: &[HexFinding], cards: &[NodeCardModel]) -> String {
+    let title_of = |id: &NodeId| cards.iter().find(|card| &card.id == id).map(|card| card.title.clone());
+    match findings.first() {
+        Some(HexFinding { socket: Some(socket), .. }) => format!("Hexed · missing \"{socket}\""),
+        Some(HexFinding { node: Some(node), .. }) => format!("Hexed · {}", title_of(node).unwrap_or_else(|| node.0.clone())),
+        _ => "Hexed".to_owned(),
+    }
 }
 
 fn demo_spell() -> SpellGraph {

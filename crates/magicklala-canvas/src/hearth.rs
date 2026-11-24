@@ -34,6 +34,12 @@ pub enum VialKind {
     ScrollVial,
     PotionFlask,
     SpiceJar,
+    ConeFlask,
+    CubeJar,
+    TestTube,
+    SignalOrb,
+    Hourglass,
+    ShakerJar,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -247,6 +253,48 @@ pub fn category_tone(category: &str, light: bool) -> CategoryTone {
             border: hex(if light { 0xD2AEE0 } else { 0x73448A }),
             kind: VialKind::SpiceJar,
         },
+        "variables" => CategoryTone {
+            liquid: hex(if light { 0xB5602A } else { 0xEC9361 }),
+            glow: hex(0xF8C3A2),
+            tint: hex(if light { 0xFBEEE5 } else { 0x3D2618 }),
+            border: hex(if light { 0xE7B795 } else { 0x86502F }),
+            kind: VialKind::ShakerJar,
+        },
+        "logic" => CategoryTone {
+            liquid: hex(if light { 0x5F7F10 } else { 0xA9D23F }),
+            glow: hex(0xD6F08E),
+            tint: hex(if light { 0xF0F6E0 } else { 0x27321A }),
+            border: hex(if light { 0xBCD48A } else { 0x5A7426 }),
+            kind: VialKind::ConeFlask,
+        },
+        "json" => CategoryTone {
+            liquid: hex(if light { 0x4C5BA6 } else { 0x94A3EA }),
+            glow: hex(0xC9D1FA),
+            tint: hex(if light { 0xECEEF9 } else { 0x232A48 }),
+            border: hex(if light { 0xAFB7E3 } else { 0x4D5891 }),
+            kind: VialKind::CubeJar,
+        },
+        "math" => CategoryTone {
+            liquid: hex(if light { 0xC24E30 } else { 0xF48A6C }),
+            glow: hex(0xFBC0AE),
+            tint: hex(if light { 0xFCEBE6 } else { 0x3E2019 }),
+            border: hex(if light { 0xEAAA98 } else { 0x8A4434 }),
+            kind: VialKind::TestTube,
+        },
+        "network" => CategoryTone {
+            liquid: hex(if light { 0x4E5D70 } else { 0xAEBBCC }),
+            glow: hex(0xD9E1EB),
+            tint: hex(if light { 0xEDF0F4 } else { 0x252B34 }),
+            border: hex(if light { 0xB4BDC9 } else { 0x5B6778 }),
+            kind: VialKind::SignalOrb,
+        },
+        "time" => CategoryTone {
+            liquid: hex(if light { 0x977C06 } else { 0xE5C83F }),
+            glow: hex(0xF6E59A),
+            tint: hex(if light { 0xF9F3DA } else { 0x362F14 }),
+            border: hex(if light { 0xD9C77E } else { 0x7A6824 }),
+            kind: VialKind::Hourglass,
+        },
         _ => CategoryTone {
             liquid: hex(if light { 0x307C8C } else { 0x5AB8CC }),
             glow: hex(0x9EE0ED),
@@ -450,6 +498,122 @@ pub fn mini_vial_icon(category: &str, light: bool, size: f32) -> Shape {
             s = stroke_ellipse(s, 16.0 * u, 19.5 * u, 9.2 * u, 9.2 * u, 1.5 * u, outline);
             let swirl = Path::new().move_to([11.5 * u, 21.5 * u]).cubic_to([14.0 * u, 18.5 * u], [18.0 * u, 24.5 * u], [20.5 * u, 21.0 * u]);
             s = s.stroke_path(&swirl, 1.6 * u, LineCap::Round, tone.glow);
+        }
+        VialKind::ConeFlask => {
+            let cork = vec![[13.6 * u, 3.6 * u], [18.4 * u, 3.6 * u], [18.0 * u, 7.6 * u], [14.0 * u, 7.6 * u]];
+            s = s.fill(cork, p.cork);
+            let flask = Path::new()
+                .move_to([13.8 * u, 7.8 * u])
+                .line_to([18.2 * u, 7.8 * u])
+                .line_to([18.2 * u, 13.0 * u])
+                .line_to([25.6 * u, 26.0 * u])
+                .quad_to([26.2 * u, 28.4 * u], [23.6 * u, 28.4 * u])
+                .line_to([8.4 * u, 28.4 * u])
+                .quad_to([5.8 * u, 28.4 * u], [6.4 * u, 26.0 * u])
+                .line_to([13.8 * u, 13.0 * u])
+                .close();
+            s = s.fill_path(&flask, glass);
+            let liq =
+                Path::new().move_to([10.4 * u, 19.6 * u]).line_to([21.6 * u, 19.6 * u]).line_to([24.6 * u, 26.6 * u]).line_to([7.4 * u, 26.6 * u]).close();
+            s = s.fill_path(&liq, tone.liquid);
+            s = s.stroke_path(&flask, 1.5 * u, LineCap::Round, outline);
+            s = s.line([12.6 * u, 23.4 * u], [19.4 * u, 23.4 * u], 1.2 * u, LineCap::Round, tone.glow);
+            s = fill_circle(s, 16.0 * u, 23.4 * u, 1.5 * u, hex(0xFFFFFF));
+        }
+        VialKind::CubeJar => {
+            let cork = vec![[12.0 * u, 4.0 * u], [20.0 * u, 4.0 * u], [19.4 * u, 8.0 * u], [12.6 * u, 8.0 * u]];
+            s = s.fill(cork, p.cork);
+            let jar = vec![[8.0 * u, 8.6 * u], [24.0 * u, 8.6 * u], [24.0 * u, 28.0 * u], [8.0 * u, 28.0 * u]];
+            s = s.fill(jar.clone(), glass);
+            s = s.fill(vec![[9.4 * u, 15.2 * u], [22.6 * u, 15.2 * u], [22.6 * u, 26.6 * u], [9.4 * u, 26.6 * u]], tone.liquid);
+            let mut ring = jar;
+            ring.push(ring[0]);
+            s = s.stroke(ring, 1.5 * u, outline);
+            let left = Path::new()
+                .move_to([14.0 * u, 17.4 * u])
+                .quad_to([11.6 * u, 17.4 * u], [12.2 * u, 20.8 * u])
+                .quad_to([12.8 * u, 24.2 * u], [14.0 * u, 24.2 * u]);
+            let right = Path::new()
+                .move_to([18.0 * u, 17.4 * u])
+                .quad_to([20.4 * u, 17.4 * u], [19.8 * u, 20.8 * u])
+                .quad_to([19.2 * u, 24.2 * u], [18.0 * u, 24.2 * u]);
+            s = s.stroke_path(&left, 1.3 * u, LineCap::Round, tone.glow);
+            s = s.stroke_path(&right, 1.3 * u, LineCap::Round, tone.glow);
+        }
+        VialKind::TestTube => {
+            let cork = vec![[12.4 * u, 2.8 * u], [19.6 * u, 2.8 * u], [19.0 * u, 7.0 * u], [13.0 * u, 7.0 * u]];
+            s = s.fill(cork, p.cork);
+            let tube = Path::new()
+                .move_to([12.6 * u, 7.2 * u])
+                .line_to([19.4 * u, 7.2 * u])
+                .line_to([19.4 * u, 25.2 * u])
+                .quad_to([19.4 * u, 29.2 * u], [16.0 * u, 29.2 * u])
+                .quad_to([12.6 * u, 29.2 * u], [12.6 * u, 25.2 * u])
+                .close();
+            s = s.fill_path(&tube, glass);
+            let liq = Path::new()
+                .move_to([13.8 * u, 15.0 * u])
+                .line_to([18.2 * u, 15.0 * u])
+                .line_to([18.2 * u, 25.0 * u])
+                .quad_to([18.2 * u, 27.9 * u], [16.0 * u, 27.9 * u])
+                .quad_to([13.8 * u, 27.9 * u], [13.8 * u, 25.0 * u])
+                .close();
+            s = s.fill_path(&liq, tone.liquid);
+            s = s.stroke_path(&tube, 1.5 * u, LineCap::Round, outline);
+            s = s.line([14.8 * u, 20.0 * u], [17.2 * u, 20.0 * u], 1.1 * u, LineCap::Round, tone.glow);
+            s = s.line([16.0 * u, 18.8 * u], [16.0 * u, 21.2 * u], 1.1 * u, LineCap::Round, tone.glow);
+            s = fill_circle(s, 16.0 * u, 24.6 * u, 1.1 * u, hex(0xFFFFFF));
+        }
+        VialKind::SignalOrb => {
+            let cork = vec![[13.6 * u, 3.6 * u], [18.4 * u, 3.6 * u], [18.0 * u, 7.4 * u], [14.0 * u, 7.4 * u]];
+            s = s.fill(cork, p.cork);
+            s = fill_circle(s, 16.0 * u, 18.6 * u, 9.4 * u, glass);
+            s = fill_circle(s, 16.0 * u, 18.6 * u, 6.2 * u, tone.liquid);
+            s = stroke_ellipse(s, 16.0 * u, 18.6 * u, 9.4 * u, 9.4 * u, 1.5 * u, outline);
+            s = stroke_ellipse(s, 16.0 * u, 18.6 * u, 12.6 * u, 3.6 * u, 1.2 * u, tone.glow);
+            s = fill_circle(s, 4.0 * u, 18.6 * u, 1.4 * u, tone.glow);
+            s = fill_circle(s, 28.0 * u, 18.6 * u, 1.4 * u, tone.glow);
+            s = fill_circle(s, 13.6 * u, 16.0 * u, 1.5 * u, p.glass_hi);
+        }
+        VialKind::Hourglass => {
+            s = s.fill(vec![[8.0 * u, 3.4 * u], [24.0 * u, 3.4 * u], [24.0 * u, 6.0 * u], [8.0 * u, 6.0 * u]], p.cork);
+            s = s.fill(vec![[8.0 * u, 26.4 * u], [24.0 * u, 26.4 * u], [24.0 * u, 29.0 * u], [8.0 * u, 29.0 * u]], p.cork);
+            let glass_path = Path::new()
+                .move_to([10.0 * u, 6.0 * u])
+                .line_to([22.0 * u, 6.0 * u])
+                .quad_to([22.0 * u, 13.0 * u], [17.2 * u, 16.2 * u])
+                .quad_to([22.0 * u, 19.4 * u], [22.0 * u, 26.4 * u])
+                .line_to([10.0 * u, 26.4 * u])
+                .quad_to([10.0 * u, 19.4 * u], [14.8 * u, 16.2 * u])
+                .quad_to([10.0 * u, 13.0 * u], [10.0 * u, 6.0 * u])
+                .close();
+            s = s.fill_path(&glass_path, glass);
+            s = s.fill(vec![[13.2 * u, 11.0 * u], [18.8 * u, 11.0 * u], [16.0 * u, 15.0 * u]], tone.liquid);
+            let pile = Path::new().move_to([11.0 * u, 25.6 * u]).quad_to([16.0 * u, 18.6 * u], [21.0 * u, 25.6 * u]).close();
+            s = s.fill_path(&pile, tone.liquid);
+            s = s.line([16.0 * u, 15.4 * u], [16.0 * u, 21.0 * u], 1.0 * u, LineCap::Round, tone.liquid);
+            s = s.stroke_path(&glass_path, 1.5 * u, LineCap::Round, outline);
+        }
+        VialKind::ShakerJar => {
+            let lid = Path::new().move_to([9.0 * u, 9.6 * u]).quad_to([16.0 * u, 2.0 * u], [23.0 * u, 9.6 * u]).close();
+            s = s.fill_path(&lid, p.cork);
+            s = fill_circle(s, 13.0 * u, 7.6 * u, 0.8 * u, outline);
+            s = fill_circle(s, 16.0 * u, 6.4 * u, 0.8 * u, outline);
+            s = fill_circle(s, 19.0 * u, 7.6 * u, 0.8 * u, outline);
+            let jar = Path::new()
+                .move_to([9.0 * u, 9.8 * u])
+                .line_to([23.0 * u, 9.8 * u])
+                .line_to([23.8 * u, 26.0 * u])
+                .quad_to([23.8 * u, 28.6 * u], [21.0 * u, 28.6 * u])
+                .line_to([11.0 * u, 28.6 * u])
+                .quad_to([8.2 * u, 28.6 * u], [8.2 * u, 26.0 * u])
+                .close();
+            s = s.fill_path(&jar, glass);
+            s = s.fill(vec![[9.6 * u, 17.0 * u], [22.4 * u, 17.0 * u], [22.8 * u, 27.2 * u], [9.2 * u, 27.2 * u]], tone.liquid);
+            s = s.stroke_path(&jar, 1.5 * u, LineCap::Round, outline);
+            s = fill_circle(s, 12.6 * u, 21.0 * u, 1.0 * u, tone.glow);
+            s = fill_circle(s, 17.4 * u, 23.6 * u, 1.0 * u, tone.glow);
+            s = fill_circle(s, 20.0 * u, 19.8 * u, 0.9 * u, tone.glow);
         }
         _ => {
             let cork = vec![[12.8 * u, 3.8 * u], [19.2 * u, 3.8 * u], [18.6 * u, 8.0 * u], [13.4 * u, 8.0 * u]];

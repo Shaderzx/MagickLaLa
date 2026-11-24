@@ -1241,12 +1241,13 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
 
 fn node_diagnostics(app: &StudioApp, card: &magicklala_canvas::NodeCardModel) -> Vec<String> {
     let mut found = Vec::new();
-    if let ValidationState::Invalid(errors) = &app.validation {
-        for err in errors {
-            if err.contains(&card.id.0) || err.contains(&card.title) || card.status == ExecutionStatus::Failed {
-                found.push(err.replace(&format!("node \"{}\"", card.id.0), &card.title));
-            }
-        }
+    if matches!(app.validation, ValidationState::Invalid(_)) {
+        found.extend(
+            app.hex_findings
+                .iter()
+                .filter(|finding| finding.node.as_ref() == Some(&card.id))
+                .map(|finding| finding.message.replace(&format!("node {:?}", card.id.0), &card.title).replace(&format!("{:?}", card.id), &card.title)),
+        );
     }
     if found.is_empty() && card.status == ExecutionStatus::Failed {
         found.push(format!("{} fizzled during brewing.", card.title));
@@ -1368,12 +1369,9 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     let socket_h = if compact { 21.0 } else { 24.0 };
     let diagnostics = node_diagnostics(app, card);
     let has_error = !diagnostics.is_empty();
-    let error_text = diagnostics.join(" ");
     let tone = category_tone(&card.category, light);
     let socket_row_el = |socket: &magicklala_canvas::SocketModel, is_input: bool| {
-        let quoted = format!("\"{}\"", socket.name);
-        let flagged =
-            socket.flagged || (is_input && has_error && (error_text.contains(&quoted) || (error_text.contains("required input") && socket.name == "prompt")));
+        let flagged = is_input && socket.flagged;
         let wired = app
             .canvas
             .wires

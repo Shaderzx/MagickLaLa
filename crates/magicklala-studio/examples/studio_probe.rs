@@ -1624,7 +1624,12 @@ fn hex_pinpoint() -> Result<serde_json::Value, String> {
     let reply = twin_ids.nodes.iter().find(|node| node.kind == "io/send_message").ok_or("demo spell has no reply")?.clone();
     let flow_into_reply = twin_ids.wires.iter().find(|wire| wire.to_node == reply.id && wire.to_socket == "in").ok_or("reply has no flow wire")?.clone();
     let twin = NodeId::from(format!("{}_support", reply.id.0).as_str());
-    twin_ids.nodes.push(NodeInstance { id: twin.clone(), kind: reply.kind.clone(), position: [reply.position[0], reply.position[1] + 180.0], config: reply.config.clone() });
+    twin_ids.nodes.push(NodeInstance {
+        id: twin.clone(),
+        kind: reply.kind.clone(),
+        position: [reply.position[0], reply.position[1] + 180.0],
+        config: reply.config.clone(),
+    });
     twin_ids.wires.push(Wire { id: WireId::from("twin_flow"), to_node: twin.clone(), ..flow_into_reply });
     Ok(json!({
         "missingQuery": { "removed": { "node": removed.to_node.0, "socket": removed.to_socket }, "report": hex_report(missing_query)? },
