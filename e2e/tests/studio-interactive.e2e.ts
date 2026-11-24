@@ -1521,3 +1521,23 @@ test('Every pour, name and count reads true: twelve ingredients land on twelve r
     await rm(dir, { recursive: true, force: true });
   }
 });
+test('The workbench tells the truth: undo shows after a brew and for a lone card set aside, the demo has no ignored settings, variable steps pick their variable and Check flags a blank one, a new Rhai step brews, clicking a Grimoire input keeps its wire and a pulled shortcut stays pulled after reopen, embeddings ask for Text and a blank prompt fails Check, a mend only offers a source on the same route, a bottle fed by a word loop waits aside, and changing the recipe clears old Brewed and Checked marks', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-truths-'));
+  try {
+    const report = await studioProbe(['workbench-truths', join(dir, 'studio.sqlite')]);
+
+    expect(report.undo).toEqual({ afterBrewShown: true, restored: true, unwiredAsideUndoable: true });
+    expect(report.deadKeys).toEqual([]);
+    expect(report.variables).toEqual({ seeded: true, nameField: true, blankCheck: 'invalid' });
+    expect(report.rhai.status).toBe('Succeeded');
+    expect(report.rhai.failed).toEqual([]);
+    expect(report.pull).toEqual({ clickKeepsWire: true, pulledStaysPulled: true });
+    expect(report.fields).toEqual({ embedCaption: true, blankPromptCheck: 'invalid' });
+    expect(report.mendOffer).toBe('chat');
+    expect(report.loopBottle).toBe('Aside');
+    expect(report.staleMarks.shelvedLogSaysBrewed).toBe(false);
+    expect(report.staleMarks.logSaysChecked).toBe(false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

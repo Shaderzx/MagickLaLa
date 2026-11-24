@@ -5146,6 +5146,179 @@ fn gateway_hint() -> Result<serde_json::Value, String> {
 fn words_of(rt: &Runtime<StudioApp>, key: &str) -> String {
     text_lines_under(rt, key).into_iter().map(|(line, _)| line).collect::<Vec<_>>().join(" ")
 }
+fn workbench_truths(db_path: &Path) -> Result<serde_json::Value, String> {
+    let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position: [x * 260.0, 0.0], config };
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let spawned = |rt: &mut Runtime<StudioApp>, kind: &'static str| -> Option<NodeId> {
+        let before: Vec<NodeId> = rt.state.canvas.nodes.iter().map(|card| card.id.clone()).collect();
+        rt.update(move |app, _| {
+            let _ = app.spawn(kind);
+        });
+        rt.state.canvas.nodes.iter().map(|card| card.id.clone()).find(|id| !before.contains(id))
+    };
+
+    let mut undoing = runtime_for(tasting_spell());
+    run_once(&mut undoing)?;
+    undoing.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("echo"))));
+    undoing.frame(1.0);
+    let undo_shown = undoing.find("undo-action").is_some();
+    let _ = click(&mut undoing, "undo-action");
+    let echo_back = !undoing.state.canvas.is_shelved(&NodeId::from("echo"));
+    let mut lone_aside = SpellGraph::new("Loner");
+    lone_aside.nodes = vec![place("trigger", "event/on_message", 0.0, serde_json::Value::Null), place("note", "text/template", 1.0, json!({ "template": "x" }))];
+    let mut loner = runtime_for(lone_aside);
+    loner.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("note"))));
+    let lone_undo = !loner.state.undo_stack.is_empty();
+    let undo = json!({ "afterBrewShown": undo_shown, "restored": echo_back, "unwiredAsideUndoable": lone_undo });
+
+    let demo = StudioApp::from_registry();
+    let dead_keys: Vec<String> = demo
+        .spell
+        .nodes
+        .iter()
+        .filter_map(|node| node.config.as_object().map(|map| (node.kind.clone(), map.keys().cloned().collect::<Vec<_>>())))
+        .flat_map(|(kind, keys)| keys.into_iter().filter(move |key| (kind == "memory/search" && key == "max_memories") || (kind == "io/send_message" && key == "agent_name")))
+        .collect();
+
+    let mut vars = runtime_for(tasting_spell());
+    vars.update(|app, _| app.add_variable());
+    let first_var = vars.state.spell.variables.first().map(|variable| variable.name.clone()).unwrap_or_default();
+    let getter = spawned(&mut vars, "var/get").ok_or("no var/get")?;
+    let seeded = vars.state.spell.node(&getter).and_then(|node| node.config.get("name").and_then(serde_json::Value::as_str).map(str::to_owned));
+    let picked = getter.clone();
+    vars.update(move |app, _| {
+        app.canvas.select(Some(picked.clone()));
+        app.right_tab = RightTab::Inspector;
+    });
+    vars.frame(1.0);
+    let has_name_field = vars.find("prompt-field").is_some();
+    let blanked = getter.clone();
+    vars.update(move |app, _| {
+        app.prompts.insert(blanked.clone(), rune::TextEdit::new(""));
+        app.sync_spell();
+    });
+    click(&mut vars, "validate")?;
+    let blank_check = vars.state.validation.label();
+    let variables = json!({ "seeded": seeded == Some(first_var), "nameField": has_name_field, "blankCheck": blank_check });
+
+    let mut rhai = runtime_for(tasting_spell());
+    let script = spawned(&mut rhai, "code/rhai_script").ok_or("no rhai")?;
+    let rhai_run = run_once(&mut rhai)?;
+    let rhai_report = json!({ "status": rhai_run["status"], "failed": rhai_run["failedNodes"], "inputs": rhai.state.spell.node(&script).and_then(|node| node.config.get("inputs").cloned()) });
+
+    let mut pulled = SpellGraph::new("Pulled Shortcut");
+    pulled.nodes = vec![
+        place("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        place("tmpl", "text/template", 1.0, json!({ "template": "Q: {{content}}" })),
+        place("reply", "io/send_message", 2.0, serde_json::Value::Null),
+    ];
+    pulled.wires = vec![
+        wire("p1", ("trigger", "out"), ("reply", "in")),
+        wire("p2", ("trigger", "content"), ("tmpl", "content")),
+        wire("p3", ("tmpl", "text"), ("reply", "content")),
+    ];
+    let mut pulling = studio_at(db_path)?;
+    pulling.update(move |app, _| {
+        app.new_empty_spell();
+        app.load_graph(pulled.clone());
+    });
+    pulling.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("tmpl"))));
+    click(&mut pulling, "mode-grimoire")?;
+    pulling.frame(1.0);
+    let still_id = pulling.state.canvas.wires.iter().find(|wire| wire.to_node.0 == "reply" && wire.to_socket == "content").map(|wire| wire.id.clone());
+    click(&mut pulling, "socket-reply-in-content")?;
+    pulling.update(|app, _| {
+        app.sync_edits();
+    });
+    let after_click = pulling.state.canvas.wires.iter().find(|wire| wire.to_node.0 == "reply" && wire.to_socket == "content").map(|wire| wire.id.clone());
+    drag(&mut pulling, "socket-reply-in-content", (0.0, 160.0))?;
+    pulling.update(|app, _| {
+        app.sync_edits();
+    });
+    click(&mut pulling, "save")?;
+    let reopened = studio_at(db_path)?;
+    let pull = json!({
+        "clickKeepsWire": still_id.is_some() && still_id == after_click,
+        "pulledStaysPulled": !reopened.state.canvas.wires.iter().any(|wire| wire.to_node.0 == "reply" && wire.to_socket == "content"),
+    });
+
+    let mut embedding = SpellGraph::new("Embedder");
+    embedding.nodes = vec![place("trigger", "event/on_message", 0.0, serde_json::Value::Null), place("embed", "ai/embedding", 1.0, serde_json::Value::Null)];
+    embedding.wires = vec![wire("e1", ("trigger", "out"), ("embed", "in"))];
+    let mut embed = runtime_for(embedding);
+    embed.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("embed")));
+        app.right_tab = RightTab::Inspector;
+    });
+    embed.frame(1.0);
+    let embed_lines = text_lines_under(&embed, "inspector-card").into_iter().map(|(line, _)| line).collect::<Vec<_>>();
+    let mut emptied = runtime_for(StudioApp::from_registry().spell.clone());
+    let llm = NodeId::from(node_of_kind(&emptied.state, "ai/generate_text").ok_or("no model")?.as_str());
+    let emptied_id = llm.clone();
+    emptied.update(move |app, _| {
+        app.canvas.wires.retain(|wire| !(wire.to_node == emptied_id && wire.to_socket == "prompt"));
+        app.prompts.insert(emptied_id.clone(), rune::TextEdit::new("   "));
+        app.sync_spell();
+    });
+    click(&mut emptied, "validate")?;
+    let fields = json!({ "embedCaption": embed_lines.iter().any(|line| line == "Text") && !embed_lines.iter().any(|line| line == "Prompt"), "blankPromptCheck": emptied.state.validation.label() });
+
+    let mut mending = SpellGraph::new("Mend Routes");
+    mending.nodes = vec![
+        place("memo", "event/on_memory", 0.0, serde_json::Value::Null),
+        place("chat", "event/on_message", 0.0, serde_json::Value::Null),
+        place("aside", "text/template", 1.0, json!({ "template": "shelf" })),
+        place("say", "io/send_message", 2.0, serde_json::Value::Null),
+    ];
+    mending.wires = vec![wire("m1", ("chat", "out"), ("say", "in"))];
+    let mut mend = runtime_for(mending);
+    mend.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("aside"))));
+    click(&mut mend, "validate")?;
+    let offer = mend.state.hex_mend_source(&NodeId::from("say")).map(|(source, _)| source.node.0);
+
+    let mut loops = SpellGraph::new("Looping Words");
+    loops.nodes = vec![
+        place("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        place("left", "text/template", 1.0, json!({ "template": "{{content}}" })),
+        place("right", "text/template", 1.0, json!({ "template": "{{content}}" })),
+    ];
+    loops.wires = vec![wire("l1", ("left", "text"), ("right", "content")), wire("l2", ("right", "text"), ("left", "content"))];
+    let mut looped = runtime_for(loops);
+    let loop_bottle = spawned(&mut looped, "io/send_message");
+    let loop_role = loop_bottle.and_then(|id| role_of(&looped.state, &id.0));
+
+    let mut stale = runtime_for(tasting_spell());
+    run_once(&mut stale)?;
+    stale.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("trigger"))));
+    stale.frame(1.0);
+    let pill_after_shelving = text_lines_under(&stale, "validation-pill").into_iter().map(|(line, _)| line).collect::<Vec<_>>().join(" ");
+    let log_after_shelving = text_lines_under(&stale, "trace-strip").into_iter().map(|(line, _)| line).collect::<Vec<_>>();
+    let mut checked = runtime_for(tasting_spell());
+    run_once(&mut checked)?;
+    click(&mut checked, "validate")?;
+    let _ = spawned(&mut checked, "time/delay");
+    checked.frame(1.0);
+    let log_after_edit = text_lines_under(&checked, "trace-strip").into_iter().map(|(line, _)| line).collect::<Vec<_>>();
+    let stale_marks = json!({ "pillAfterShelving": pill_after_shelving, "shelvedLogSaysBrewed": log_after_shelving.iter().any(|line| line == "Brewed"), "logSaysChecked": log_after_edit.iter().any(|line| line == "Checked") });
+
+    Ok(json!({
+        "undo": undo,
+        "deadKeys": dead_keys,
+        "variables": variables,
+        "rhai": rhai_report,
+        "pull": pull,
+        "fields": fields,
+        "mendOffer": offer,
+        "loopBottle": loop_role,
+        "staleMarks": stale_marks,
+    }))
+}
 fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
@@ -6049,6 +6222,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("pot-rect") => pot_rect(),
         Some("gateway-hint") => gateway_hint(),
         Some("honest-dials") => honest_dials(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("workbench-truths") => workbench_truths(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("drawn-truths") => drawn_truths(),
