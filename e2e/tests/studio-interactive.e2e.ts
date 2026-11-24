@@ -1016,3 +1016,13 @@ test('The cauldron keeps the recipe honest: a tossed Add Memory is fed only from
     expect(shade.ghostOutline).toBeGreaterThanOrEqual(3);
   }
 });
+
+test('A brewed potion takes the colour of the last ingredient poured in, so the template tasting spell and the switch-routed webhook spell brew different potions', { timeout: 900_000 }, async () => {
+  const { tasting, webhook } = await studioProbe(['potion-colours']);
+
+  expect(tasting.lastPoured[0]).toBe('Template');
+  expect(tasting.potion).toBe(tasting.lastPoured[1]);
+  expect(webhook.lastPoured[0]).toBe('Switch');
+  expect(webhook.potion).toBe(webhook.lastPoured[1]);
+  expect(tasting.potion).not.toBe(webhook.potion);
+});

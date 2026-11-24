@@ -2179,6 +2179,29 @@ fn recipe_honesty() -> Result<serde_json::Value, String> {
     )
 }
 
+fn potion_colours() -> Result<serde_json::Value, String> {
+    let hexed = |c: rune::Color| format!("{:.3},{:.3},{:.3}", c.r, c.g, c.b);
+    let mut out = serde_json::Map::new();
+    for (name, spell) in [("tasting", tasting_spell()), ("webhook", example("webhook_router.json")?)] {
+        let mut rt = runtime_for(spell);
+        if name == "webhook" {
+            rt.update(|app, _| app.run_payload = json!({ "method": "POST", "path": "/hooks/router", "body": { "type": "order", "id": "42" } }));
+        }
+        click(&mut rt, "run-spell")?;
+        live_finish(&mut rt)?;
+        let canvas = &rt.state.canvas;
+        let plan = magicklala_canvas::brew_plan(canvas, rt.state.canvas_size());
+        let last = plan
+            .with_role(magicklala_canvas::BrewRole::Ingredient)
+            .filter_map(|placed| canvas.card(&placed.id))
+            .filter(|card| card.status == ExecutionStatus::Succeeded)
+            .last()
+            .map(|card| (card.title.clone(), hexed(magicklala_canvas::hearth::category_tone(&card.category, canvas.light).liquid)));
+        out.insert(name.to_owned(), json!({ "potion": magicklala_canvas::cauldron::potion_tint(canvas).map(hexed), "lastPoured": last }));
+    }
+    Ok(serde_json::Value::Object(out))
+}
+
 fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
         Some("surfaces") => capture_surfaces(Path::new(args.get(1).ok_or("missing output directory")?)),
@@ -2192,6 +2215,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("publish-plaque") => publish_plaque(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("toss-safety") => toss_safety(),
         Some("recipe-honesty") => recipe_honesty(),
+        Some("potion-colours") => potion_colours(),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-ref-edit") => subgraph_ref_edit(Path::new(args.get(1).ok_or("missing database path")?)),
