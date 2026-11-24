@@ -3083,6 +3083,161 @@ fn fit_and_wording(db_path: &Path) -> Result<serde_json::Value, String> {
         "untakenLanes": lanes,
     }))
 }
+fn chat_reply(rt: &mut Runtime<StudioApp>, text: &str) -> Result<String, String> {
+    let text = text.to_owned();
+    rt.update(move |app, _| {
+        app.chat_input = rune::TextEdit::new(&text);
+        app.send_chat();
+    });
+    live_finish(rt)?;
+    Ok(rt.state.chat.iter().rev().find(|message| !message.from_user).map(|message| message.text.clone()).unwrap_or_default())
+}
+
+fn switch_to_saved(rt: &mut Runtime<StudioApp>, key: &str) -> Result<(), String> {
+    rt.update(|app, _| {
+        app.request_open_sample("Research Agent");
+        app.confirm_switch();
+    });
+    click(rt, "tab-agents")?;
+    rt.frame(1.0);
+    click_at(rt, key, 1.5)?;
+    rt.update(|app, _| app.confirm_switch());
+    rt.frame(2.0);
+    Ok(())
+}
+
+fn shelf_keeps(db_path: &Path) -> Result<serde_json::Value, String> {
+    let place = |id: &str, kind: &str, x: f32| NodeInstance {
+        id: NodeId::from(id),
+        kind: kind.to_owned(),
+        position: [x * 260.0, 0.0],
+        config: serde_json::Value::Null,
+    };
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let config = StudioConfig { db_path: Some(db_path.to_path_buf()), ..StudioConfig::default() };
+    let mut app = StudioApp::open(&config).map_err(|error| error.to_string())?;
+    app.load_graph(tasting_spell());
+    let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("echo"))));
+    let aside_reply = chat_reply(&mut rt, "hi there")?;
+    click(&mut rt, "save")?;
+    switch_to_saved(&mut rt, "spell-tasting-agent")?;
+    let reopened_role = role_of(&rt.state, "echo");
+    rt.update(|app, _| app.toss(magicklala_canvas::Toss::IntoPot(NodeId::from("echo"))));
+    click(&mut rt, "validate")?;
+    let poured = json!({ "check": rt.state.validation.label(), "echoWires": wires_of(&rt.state, "echo") });
+    rt.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("trigger"))));
+    click(&mut rt, "save")?;
+    switch_to_saved(&mut rt, "spell-tasting-agent")?;
+    let reopened_trigger = role_of(&rt.state, "trigger");
+    let runs_before = rt.state.runs;
+    click(&mut rt, "run-spell")?;
+    let shelved_trigger_brews = rt.state.runs - runs_before;
+
+    let mut spare = tasting_spell();
+    spare.name = "Spare Agent".to_owned();
+    spare.nodes.push(place("spare_reply", "io/send_message", 3.0));
+    rt.update(move |app, _| {
+        app.new_empty_spell();
+        app.load_graph(spare.clone());
+    });
+    click(&mut rt, "publish")?;
+    let listed = switch_to_saved(&mut rt, "spell-spare-agent").is_ok();
+    let published_only = json!({
+        "listed": listed,
+        "spare": listed && rt.state.spell.nodes.iter().any(|node| node.id.0 == "spare_reply"),
+        "live": rt.state.active_release_version,
+    });
+
+    rt.update(|app, _| {
+        app.new_empty_spell();
+        app.load_graph(StudioApp::from_registry().spell.clone());
+    });
+    click(&mut rt, "save")?;
+    click(&mut rt, "publish")?;
+    let _ = switch_to_saved(&mut rt, "spell-support-agent");
+    let sample_copy = json!({ "releases": rt.state.releases.len(), "live": rt.state.active_release_version });
+
+    let mut auto = headless(StudioApp::from_registry());
+    let trigger = node_of_kind(&auto.state, "event/on_message").ok_or("no trigger")?;
+    let shelved = NodeId::from(trigger.as_str());
+    auto.update(move |app, _| app.toss(magicklala_canvas::Toss::Aside(shelved.clone())));
+    auto.update(|app, _| {
+        app.spawn("io/send_message");
+    });
+    let trigger_after_add = role_of(&auto.state, &trigger);
+
+    let mut sub = StudioApp::from_registry().spell.clone();
+    sub.nodes.push(NodeInstance {
+        id: NodeId::from("call"),
+        kind: "flow/subgraph".to_owned(),
+        position: [0.0, 400.0],
+        config: json!({ "spell_id": SpellId::new() }),
+    });
+    let mut sub_rt = runtime_for(sub);
+    sub_rt.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("call"))));
+    click(&mut sub_rt, "validate")?;
+    let shelved_subgraph = sub_rt.state.validation.label();
+
+    let mut lonely = StudioApp::from_registry().spell.clone();
+    let lonely_trigger = lonely.nodes.iter().find(|node| node.kind == "event/on_message").map(|node| node.id.clone()).ok_or("no trigger")?;
+    lonely.nodes.push(place("lonely", "io/send_message", 3.0));
+    lonely.wires.push(Wire {
+        id: WireId::from("lonely_words"),
+        from_node: lonely_trigger,
+        from_socket: "content".to_owned(),
+        to_node: NodeId::from("lonely"),
+        to_socket: "content".to_owned(),
+    });
+    let lonely_rt = runtime_for(lonely);
+    let unreachable_role = role_of(&lonely_rt.state, "lonely");
+
+    let mut thinker = SpellGraph::new("Thinker");
+    thinker.nodes = vec![place("trigger", "event/on_message", 0.0), place("think", "ai/generate_text", 1.0), place("reply", "io/send_message", 2.0)];
+    thinker.wires = vec![
+        wire("w1", ("trigger", "out"), ("think", "in")),
+        wire("w2", ("trigger", "content"), ("think", "prompt")),
+        wire("w3", ("think", "out"), ("reply", "in")),
+        wire("w4", ("think", "text"), ("reply", "content")),
+    ];
+    let mut thinker_rt = runtime_for(thinker);
+    thinker_rt.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("think"))));
+    let model_pulled_reply = chat_reply(&mut thinker_rt, "what is brewing")?;
+
+    let mut twins = SpellGraph::new("Twin Triggers");
+    twins.nodes = vec![place("first", "event/on_message", 0.0), place("second", "event/on_start", 0.0), place("reply", "io/send_message", 2.0)];
+    twins.wires = vec![
+        wire("w1", ("first", "out"), ("reply", "in")),
+        wire("w2", ("second", "out"), ("reply", "in")),
+        wire("w3", ("first", "content"), ("reply", "content")),
+    ];
+    let mut twins_rt = runtime_for(twins);
+    twins_rt.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("second"))));
+    twins_rt.update(|app, _| app.toss(magicklala_canvas::Toss::IntoPot(NodeId::from("second"))));
+    let second_restored = twins_rt.state.spell.wires.iter().any(|wire| wire.from_node.0 == "second" && wire.to_node.0 == "reply");
+
+    Ok(json!({
+        "asideReply": aside_reply,
+        "reopenedRole": reopened_role,
+        "poured": poured,
+        "reopenedTrigger": reopened_trigger,
+        "shelvedTriggerBrews": shelved_trigger_brews,
+        "publishedOnly": published_only,
+        "sampleCopy": sample_copy,
+        "triggerAfterAdd": trigger_after_add,
+        "shelvedSubgraph": shelved_subgraph,
+        "unreachableRole": unreachable_role,
+        "modelPulledReply": model_pulled_reply,
+        "secondRestored": second_restored,
+    }))
+}
 fn pull_middle() -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32| NodeInstance {
         id: NodeId::from(id),
@@ -3315,6 +3470,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("one-name") => one_name_per_step(),
         Some("compact-fit") => compact_fit(),
         Some("recipe-mending") => recipe_mending(),
+        Some("shelf-keeps") => shelf_keeps(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("fit-and-wording") => fit_and_wording(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-recipe") => one_recipe(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("tray-drop") => tray_drop(),

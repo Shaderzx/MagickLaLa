@@ -1210,3 +1210,26 @@ test('Studio reads as one finished product: strands clear every card at 960, the
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('The shelf is kept and respected: a set-aside step survives save and reopen and pours back wired, publishing without saving keeps spares, a saved copy of a sample opens with its releases, adding a step never pulls a shelved trigger back, a shelved sub-spell passes Check, an unreachable reply is no bottle, pulling the model passes the message straight through, and a second trigger pours back connected', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-shelf-'));
+  try {
+    const report = await studioProbe(['shelf-keeps', join(dir, 'studio.sqlite')]);
+
+    expect(report.asideReply).toBe('hi there');
+    expect(report.reopenedRole).toBe('Aside');
+    expect(report.poured.check).toBe('valid');
+    expect(report.poured.echoWires).toBeGreaterThanOrEqual(2);
+    expect(report.reopenedTrigger).toBe('Aside');
+    expect(report.shelvedTriggerBrews).toBe(0);
+    expect(report.publishedOnly).toEqual({ listed: true, spare: true, live: 1 });
+    expect(report.sampleCopy).toEqual({ releases: 1, live: 1 });
+    expect(report.triggerAfterAdd).toBe('Aside');
+    expect(report.shelvedSubgraph).toBe('valid');
+    expect(report.unreachableRole).toBe('Aside');
+    expect(report.modelPulledReply).toBe('what is brewing');
+    expect(report.secondRestored).toBe(true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
