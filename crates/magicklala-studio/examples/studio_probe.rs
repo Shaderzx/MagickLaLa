@@ -5330,6 +5330,110 @@ fn workbench_truths(db_path: &Path) -> Result<serde_json::Value, String> {
         "staleMarks": stale_marks,
     }))
 }
+fn hands_on() -> Result<serde_json::Value, String> {
+    let press = |rt: &mut Runtime<StudioApp>, key: rune::Key, cmd: bool| {
+        rt.key(rune::KeyEvent { key, mods: rune::Mods { cmd, ..Default::default() } });
+        rt.frame(1.0);
+    };
+    let centre_of = |rt: &Runtime<StudioApp>, key: &str| layout_rect(rt, key).map(|r| (r[0] + r[2] * 0.5, r[1] + r[3] * 0.5));
+    let echo = || NodeId::from("echo");
+
+    let mut keys = runtime_for(tasting_spell());
+    keys.on_key = Some(magicklala_studio::studio_key);
+    keys.update(move |app, _| app.canvas.select(Some(echo())));
+    press(&mut keys, rune::Key::Escape, false);
+    let escape_clears = keys.state.canvas.selection.is_none();
+    let spot = centre_of(&keys, "node-echo").ok_or("no echo card")?;
+    right_click(&mut keys, spot);
+    let menu_opened = keys.state.canvas.context_menu.is_some();
+    press(&mut keys, rune::Key::Escape, false);
+    let escape_closes_menu = menu_opened && keys.state.canvas.context_menu.is_none();
+    keys.update(move |app, _| app.canvas.select(Some(echo())));
+    press(&mut keys, rune::Key::Delete, false);
+    let deleted = keys.state.canvas.card(&echo()).is_none();
+    press(&mut keys, rune::Key::Command('z'), true);
+    let undone = keys.state.canvas.card(&echo()).is_some();
+    let keyboard = json!({ "escapeClears": escape_clears, "escapeClosesMenu": escape_closes_menu, "deleteRemoves": deleted, "commandZRestores": undone });
+
+    let mut brewing = slow_runtime(3000, Duration::from_secs(20));
+    click(&mut brewing, "run-spell")?;
+    brewing.frame(1.0);
+    brewing.update(|app, _| app.canvas.mode = magicklala_canvas::WorkbenchMode::Grimoire);
+    brewing.frame(1.0);
+    let canvas_rect = rect(&brewing, "canvas").ok_or("no canvas")?;
+    right_click(&mut brewing, (canvas_rect[0] + canvas_rect[2] - 8.0, canvas_rect[1] + canvas_rect[3] - 8.0));
+    let add_locked = brewing.state.is_running();
+    let add_disabled =
+        brewing.accessibility_tree().nodes.iter().any(|(_, node)| node.is_disabled() && node.label().is_some_and(|label| label.starts_with("Add ")));
+    brewing.update(|app, _| app.cancel_run());
+
+    let mut dup = runtime_for(tasting_spell());
+    dup.update(move |app, _| {
+        app.toss(magicklala_canvas::Toss::Aside(echo()));
+        app.canvas.select(Some(echo()));
+        app.duplicate_selected_node();
+    });
+    let copy_aside =
+        dup.state.canvas.nodes.iter().find(|card| card.kind == "text/template" && card.id != echo()).is_some_and(|card| dup.state.canvas.is_shelved(&card.id));
+    let mut dyn_rt = runtime_for(tasting_spell());
+    dyn_rt.update(|app, _| {
+        let _ = app.spawn("code/rhai_script");
+    });
+    let script = dyn_rt.state.canvas.nodes.iter().find(|card| card.kind == "code/rhai_script").map(|card| card.id.clone()).ok_or("no script")?;
+    let picked = script.clone();
+    dyn_rt.update(move |app, _| {
+        app.canvas.select(Some(picked.clone()));
+        app.duplicate_selected_node();
+    });
+    let copy_sockets = dyn_rt
+        .state
+        .canvas
+        .nodes
+        .iter()
+        .find(|card| card.kind == "code/rhai_script" && card.id != script)
+        .map(|card| card.inputs.iter().map(|socket| socket.name.clone()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let duplicate = json!({ "asideCopyStaysAside": copy_aside, "copyHasContent": copy_sockets.iter().any(|name| name == "content") });
+
+    let mut bottle = runtime_for(tasting_spell());
+    let spot = centre_of(&bottle, "node-reply").ok_or("no reply card")?;
+    right_click(&mut bottle, spot);
+    let duplicate_caption = text_lines_under(&bottle, "context-duplicate-node").into_iter().map(|(line, _)| line).collect::<Vec<_>>();
+    let offered = bottle.find("context-set-aside").is_some();
+    let _ = click(&mut bottle, "context-set-aside");
+    let bottle_aside = bottle.state.canvas.is_shelved(&NodeId::from("reply"));
+
+    let mut covered = Vec::new();
+    for size in [(1280.0, 800.0), (960.0, 700.0)] {
+        let mut app = StudioApp::with_spell(StudioApp::from_registry().spell.clone(), registry_specs());
+        app.size = size;
+        let mut menu = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        menu.frame(0.0);
+        let plan = magicklala_canvas::brew_plan(&menu.state.canvas, menu.state.canvas_size());
+        for id in magicklala_canvas::recipe_order(&menu.state.canvas) {
+            if plan.card(&id).is_none_or(|card| card.role != magicklala_canvas::BrewRole::Ingredient) {
+                continue;
+            }
+            menu.update(|app, _| app.close_context_menu());
+            let Some(spot) = centre_of(&menu, &format!("node-{}", id.0)) else { continue };
+            right_click(&mut menu, spot);
+            menu.frame(1.0);
+            if let (Some(panel), Some(pot)) = (layout_rect(&menu, "context-menu"), layout_rect(&menu, "hero-cauldron"))
+                && rects_overlap(panel, pot)
+            {
+                covered.push(format!("{}x{} {}", size.0, size.1, id.0));
+            }
+        }
+    }
+
+    Ok(json!({
+        "keyboard": keyboard,
+        "addDuringBrew": { "running": add_locked, "disabled": add_disabled },
+        "duplicate": duplicate,
+        "bottle": { "caption": duplicate_caption, "offered": offered, "aside": bottle_aside },
+        "menuCoversPot": covered,
+    }))
+}
 fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
@@ -6234,6 +6338,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("gateway-hint") => gateway_hint(),
         Some("honest-dials") => honest_dials(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("workbench-truths") => workbench_truths(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("hands-on") => hands_on(),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("drawn-truths") => drawn_truths(),

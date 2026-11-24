@@ -1541,3 +1541,12 @@ test('The workbench tells the truth: undo shows after a brew and for a lone card
     await rm(dir, { recursive: true, force: true });
   }
 });
+test('Hands on the workbench: Escape clears a pick and closes a menu, Delete removes a picked step and Cmd or Ctrl Z brings it back, Add is greyed while a brew runs, a duplicate of a set aside card stays aside and keeps its extra sockets, a bottle can be set aside from its menu, the menu says Duplicate without the long name, and no card menu covers the pot at 1280 or 960', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['hands-on']);
+
+  expect(report.keyboard).toEqual({ escapeClears: true, escapeClosesMenu: true, deleteRemoves: true, commandZRestores: true });
+  expect(report.addDuringBrew).toEqual({ running: true, disabled: true });
+  expect(report.duplicate).toEqual({ asideCopyStaysAside: true, copyHasContent: true });
+  expect(report.bottle).toEqual({ caption: ['Duplicate'], offered: true, aside: true });
+  expect(report.menuCoversPot).toEqual([]);
+});

@@ -3344,6 +3344,10 @@ fn remember_size(size: (f32, f32)) {
     }
 }
 
+pub fn studio_key(_: &mut StudioApp, _: &rune::KeyEvent, _: &mut rune::Tx) -> bool {
+    false
+}
+
 fn spec(config: StudioConfig) -> AppSpec<StudioApp> {
     remember_run_timeout(config.run_timeout);
     AppSpec {
