@@ -1,4 +1,4 @@
-use magicklala_graph::SocketType;
+use magicklala_graph::{RunStatus, SocketType};
 use rune::{Color, El, Phase, Shape, TextStyle, canvas, col, el, row, text};
 
 use crate::brew::BrewPlan;
@@ -95,10 +95,19 @@ pub(crate) fn cauldron_mood(state: &CanvasState) -> CauldronMood {
     if state.nodes.is_empty() {
         return CauldronMood::Empty;
     }
+    if state.running_brew {
+        return CauldronMood::Simmering;
+    }
     if state.invalid_brew || state.nodes.iter().any(|card| card.status == ExecutionStatus::Failed) {
         return CauldronMood::Hexed;
     }
-    if state.running_brew || state.nodes.iter().any(|card| card.status == ExecutionStatus::Running) {
+    match state.last_brew {
+        Some(RunStatus::Succeeded) => return CauldronMood::Brewed,
+        Some(RunStatus::Failed | RunStatus::TimedOut) => return CauldronMood::Hexed,
+        Some(RunStatus::Cancelled) => return CauldronMood::Ready,
+        None => {}
+    }
+    if state.nodes.iter().any(|card| card.status == ExecutionStatus::Running) {
         return CauldronMood::Simmering;
     }
     if state.has_run() || state.nodes.iter().any(|card| card.status == ExecutionStatus::Succeeded) {

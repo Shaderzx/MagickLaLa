@@ -1657,6 +1657,7 @@ impl StudioApp {
         self.spell.nodes = nodes;
         self.spell.wires = wires;
         self.spell.subgraphs = subgraphs;
+        self.canvas.last_brew = None;
         self.draft_status = None;
         self.publish_status = None;
         self.store_error = None;
@@ -1866,6 +1867,8 @@ impl StudioApp {
         match trigger.and_then(|trigger| self.spawn_engine(trigger, reply_to_chat)) {
             Ok(active) => {
                 self.active = Some(active);
+                self.canvas.running_brew = true;
+                self.canvas.last_brew = None;
                 true
             }
             Err(error) => {
@@ -1991,7 +1994,8 @@ impl StudioApp {
     fn close_run(&mut self, kind: &'static str, detail: String, report: RunReport) {
         let at_ms = self.elapsed_ms();
         self.trace.push(TraceLine { at_ms, kind, detail, status: ExecutionStatus::Failed, node: None });
-        self.canvas.nodes.iter_mut().filter(|card| card.status == ExecutionStatus::Running).for_each(|card| card.status = ExecutionStatus::Failed);
+        let left = if kind == "RunCancelled" { ExecutionStatus::Idle } else { ExecutionStatus::Failed };
+        self.canvas.nodes.iter_mut().filter(|card| card.status == ExecutionStatus::Running).for_each(|card| card.status = left);
         let reply_to_chat = self.release_active();
         self.conclude(report, reply_to_chat);
     }
@@ -2005,6 +2009,11 @@ impl StudioApp {
     }
 
     fn conclude(&mut self, report: RunReport, reply_to_chat: bool) {
+        self.canvas.running_brew = self.is_running();
+        self.canvas.last_brew = match report.outcome {
+            RunOutcome::Finished(status) => Some(status),
+            RunOutcome::Invalid => None,
+        };
         if reply_to_chat {
             self.chat.push(ChatMessage { from_user: false, text: report.chat_reply(self.runs) });
         }

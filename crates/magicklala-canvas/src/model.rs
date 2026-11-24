@@ -242,6 +242,7 @@ pub struct CanvasState {
     pub validated: bool,
     pub invalid_brew: bool,
     pub running_brew: bool,
+    pub last_brew: Option<RunStatus>,
     pub toss_count: u32,
     pub pot_hover: bool,
     next_id: u64,

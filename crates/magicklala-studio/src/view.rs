@@ -3,7 +3,7 @@ use magicklala_canvas::hearth::{
     sparkle_connector_h, stitched_sparkles_h, theme_icon_shape, with_alpha,
 };
 use magicklala_canvas::{ExecutionStatus, WorkbenchMode, interactive_canvas_view};
-use magicklala_graph::{NodeSpec, SUBGRAPH_KIND, SocketType};
+use magicklala_graph::{NodeSpec, RunStatus, SUBGRAPH_KIND, SocketType};
 use rune::{Color, Cx, El, ScrollSpec, TextEdit, TextStyle, canvas, col, el, row, text, text_input};
 
 use crate::{
@@ -210,6 +210,13 @@ fn status_chip(app: &StudioApp, empty: bool, t: &HearthPalette) -> El {
     let green_ink = if t.light { t.broth_deep } else { t.broth_foam };
     let (caption, bg, border, ink, dot, hollow) = if empty {
         ("Empty".to_owned(), t.wash_2, with_alpha(t.rule_2, 0.7), t.mute, t.mute, true)
+    } else if app.is_running() {
+        ("Brewing".to_owned(), t.wash_2, with_alpha(t.gold, 0.8), t.simmer_ink(), t.gold, false)
+    } else if matches!(app.canvas.last_brew, Some(RunStatus::Failed | RunStatus::TimedOut)) {
+        let caption = if app.canvas.last_brew == Some(RunStatus::TimedOut) { "Timed out" } else { "Failed" };
+        (caption.to_owned(), t.hex_tint, with_alpha(t.hex, 0.75), t.hex, t.hex, false)
+    } else if app.canvas.last_brew == Some(RunStatus::Cancelled) {
+        ("Cancelled".to_owned(), t.wash_2, with_alpha(t.rule_2, 0.7), t.ink_2, t.mute, true)
     } else if matches!(app.validation, ValidationState::Invalid(_)) {
         ("Hexed".to_owned(), t.hex_tint, with_alpha(t.hex, 0.75), t.hex, t.hex, false)
     } else if brewed && app.active_release_version.is_some() {

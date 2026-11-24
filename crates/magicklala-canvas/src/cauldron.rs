@@ -172,7 +172,9 @@ fn plaque_text(state: &CanvasState, mood: CauldronMood, plan: &BrewPlan) -> Stri
     let aside_part = if aside == 0 { String::new() } else { format!(" · {aside} aside") };
     match mood {
         CauldronMood::Empty => "Empty cauldron".to_owned(),
+        CauldronMood::Hexed if state.last_brew == Some(magicklala_graph::RunStatus::TimedOut) => "Timed out".to_owned(),
         CauldronMood::Hexed => "Hexed".to_owned(),
+        CauldronMood::Ready if state.last_brew == Some(magicklala_graph::RunStatus::Cancelled) => format!("Cancelled · {ingredients} {word}{aside_part}"),
         CauldronMood::Simmering => format!("Brewing · {ingredients} {word}"),
         CauldronMood::Brewed => {
             let ms: u64 = state.nodes.iter().filter_map(|card| card.duration_ms).sum();
