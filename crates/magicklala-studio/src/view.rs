@@ -196,55 +196,64 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<El> {
             magicklala_canvas::BrewRole::Bottle => None,
         }
     });
-    card =
-        match selected_title {
-            Some(title) => card
-                .child(menu_item(
-                    MenuItemSpec {
-                        key: "context-duplicate-node",
-                        caption: &format!("Duplicate {title}"),
-                        shortcut: "",
-                        enabled: idle,
-                        primary: true,
-                        danger: false,
-                    },
-                    t,
-                    StudioApp::duplicate_selected_node,
-                ))
-                .children(toss_item.map(|(key, caption, action)| {
+    card = match selected_title {
+        Some(title) => card
+            .child(menu_item(
+                MenuItemSpec {
+                    key: "context-duplicate-node",
+                    caption: &format!("Duplicate {title}"),
+                    shortcut: "",
+                    enabled: idle,
+                    primary: true,
+                    danger: false,
+                },
+                t,
+                StudioApp::duplicate_selected_node,
+            ))
+            .children(
+                toss_item.map(|(key, caption, action)| {
                     menu_item(MenuItemSpec { key, caption, shortcut: "", enabled: idle, primary: false, danger: false }, t, action)
-                }))
-                .child(menu_item(
+                }),
+            )
+            .child(if app.canvas.mode == WorkbenchMode::Grimoire {
+                menu_item(
+                    MenuItemSpec { key: "context-open-cauldron", caption: "Show in Cauldron", shortcut: "", enabled: true, primary: false, danger: false },
+                    t,
+                    StudioApp::open_cauldron,
+                )
+            } else {
+                menu_item(
                     MenuItemSpec { key: "context-open-grimoire", caption: "Inspect in Grimoire", shortcut: "", enabled: true, primary: false, danger: false },
                     t,
                     StudioApp::open_grimoire,
-                ))
-                .child(el().w_full().h(1.0).fill(t.rule))
-                .child(menu_item(
-                    MenuItemSpec { key: "context-delete-node", caption: delete, shortcut: "", enabled: idle, primary: false, danger: true },
-                    t,
-                    StudioApp::delete_selected_node,
-                )),
-            None => card
-                .child(menu_item(
-                    MenuItemSpec {
-                        key: &palette_key(QUICK_ADD_KIND).replacen("palette-", "context-add-", 1),
-                        caption: &quick_add,
-                        shortcut: "",
-                        enabled: true,
-                        primary: true,
-                        danger: false,
-                    },
-                    t,
-                    StudioApp::quick_add_from_menu,
-                ))
-                .child(el().w_full().h(1.0).fill(t.rule))
-                .child(menu_item(
-                    MenuItemSpec { key: "context-fit-view", caption: "Fit canvas", shortcut: "", enabled: true, primary: false, danger: false },
-                    t,
-                    StudioApp::fit_view,
-                )),
-        };
+                )
+            })
+            .child(el().w_full().h(1.0).fill(t.rule))
+            .child(menu_item(
+                MenuItemSpec { key: "context-delete-node", caption: delete, shortcut: "", enabled: idle, primary: false, danger: true },
+                t,
+                StudioApp::delete_selected_node,
+            )),
+        None => card
+            .child(menu_item(
+                MenuItemSpec {
+                    key: &palette_key(QUICK_ADD_KIND).replacen("palette-", "context-add-", 1),
+                    caption: &quick_add,
+                    shortcut: "",
+                    enabled: true,
+                    primary: true,
+                    danger: false,
+                },
+                t,
+                StudioApp::quick_add_from_menu,
+            ))
+            .child(el().w_full().h(1.0).fill(t.rule))
+            .child(menu_item(
+                MenuItemSpec { key: "context-fit-view", caption: "Fit canvas", shortcut: "", enabled: true, primary: false, danger: false },
+                t,
+                StudioApp::fit_view,
+            )),
+    };
     Some(card)
 }
 
@@ -410,7 +419,7 @@ fn toolbar(app: &StudioApp, t: &HearthPalette) -> El {
     }
     let hexed = matches!(app.validation, ValidationState::Invalid(_));
     let published_unchanged = app.is_unchanged_from_live_release();
-    let check_kind = if empty_graph { ButtonKind::Disabled } else { ButtonKind::Secondary };
+    let check_kind = if empty_graph || app.is_running() { ButtonKind::Disabled } else { ButtonKind::Secondary };
     let brew_kind = if empty_graph || hexed || !app.has_recipe_trigger() { ButtonKind::Disabled } else { ButtonKind::Primary };
     let bottle_kind = if empty_graph || hexed || published_unchanged || app.is_running() { ButtonKind::Disabled } else { ButtonKind::Secondary };
     let save_kind = if empty_graph || app.is_running() { ButtonKind::Disabled } else { ButtonKind::Secondary };
@@ -863,7 +872,7 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             )
         } else {
             let sample_count = match app.saved_potions.iter().find(|(saved, _)| saved == name) {
-                Some((_, nodes)) => format!("{nodes} steps"),
+                Some((_, summary)) => summary.clone(),
                 None if name == "Research Agent" => "3 ingredients".to_owned(),
                 None => "4 ingredients".to_owned(),
             };
@@ -1173,7 +1182,7 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
             text_input(name_edit, font(12.0, 700.0).mono())
                 .single_line()
                 .key(format!("var-name-{idx}"))
-                .label(format!("Spice {} name", variable.name))
+                .label(format!("Variable {} name", variable.name))
                 .w_full()
                 .h(18.0)
                 .color(t.ink)
@@ -1257,7 +1266,15 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
             if def_edit.text.is_empty() {
                 field = field.child(row().h(18.0).items_center().absolute(0.0, 0.0).child(label("Enter value…", 11.0, 450.0, t.placeholder)));
             }
-            field
+            match app.var_default_error(idx) {
+                Some(problem) => col()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .gap(2.0)
+                    .child(field.border_sides([0.0, 0.0, 1.5, 0.0], t.hex))
+                    .child(row().key(format!("var-default-error-{idx}")).child(label(problem, 10.5, 650.0, t.hex))),
+                None => field,
+            }
         } else {
             text("—").font(font(11.5, 550.0).mono()).color(t.mute)
         };
@@ -1308,7 +1325,7 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
         if menu_open {
             let var_name = variable.name.clone();
             let current_ty = variable.ty;
-            let choices = [SocketType::String, SocketType::Int, SocketType::Float, SocketType::Bool, SocketType::Any];
+            let choices = [SocketType::String, SocketType::Int, SocketType::Float, SocketType::Bool, SocketType::Json, SocketType::Any];
             let dropdown = choices.into_iter().fold(
                 col()
                     .key(format!("var-type-menu-{}", variable.name))
@@ -1353,7 +1370,7 @@ fn node_diagnostics(app: &StudioApp, card: &magicklala_canvas::NodeCardModel) ->
         found.extend(app.hex_findings.iter().filter(|finding| finding.node.as_ref() == Some(&card.id)).map(|finding| finding.readable.clone()));
     }
     if found.is_empty() && card.status == ExecutionStatus::Failed {
-        found.push(format!("{} fizzled during brewing.", card.title));
+        found.push(format!("{} failed during the brew.", app.canvas.display_title(&card.id)));
     }
     found
 }
@@ -1484,7 +1501,31 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             .items_center()
             .gap(10.0)
             .child(canvas(empty_bottle_mark(light, 42.0)).key("inspector-empty-bobbin").size(42.0, 42.0))
-            .child(heading("No ingredient picked", 15.5, 800.0, t.ink));
+            .child(heading(if app.canvas.nodes.is_empty() { "Pick a trigger" } else { "No ingredient picked" }, 15.5, 800.0, t.ink))
+            .children(app.canvas.nodes.is_empty().then(|| {
+                app.specs.iter().filter(|spec| spec.is_trigger).fold(col().w_full().gap(6.0).pt(6.0), |list, spec| {
+                    let kind = spec.kind.clone();
+                    list.child(
+                        row()
+                            .key(format!("starter-{}", spec.kind.replace('/', "-")))
+                            .label(format!("Add {}", spec.title))
+                            .w_full()
+                            .h(32.0)
+                            .px(10.0)
+                            .gap(8.0)
+                            .radius(10.0)
+                            .continuous_corners()
+                            .items_center()
+                            .fill(t.card)
+                            .border(1.0, t.rule)
+                            .child(canvas(mini_vial_icon(&spec.category, light, 16.0)).size(16.0, 16.0))
+                            .child(label(&spec.title, 12.0, 650.0, t.ink))
+                            .on_press(move |app: &mut StudioApp| {
+                                app.spawn(&kind);
+                            }),
+                    )
+                })
+            }));
     };
     let compact = app.size.1 < COMPACT_INSPECTOR_BELOW;
     let socket_h = if compact { 21.0 } else { 24.0 };
@@ -1645,7 +1686,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         );
     }
     let mut column = column.child(inspector_section_heading("Sockets", t)).child(sockets);
-    if card.kind == "ai/generate_text" {
+    if matches!(card.kind.as_str(), "ai/generate_text" | "ai/stream_text") {
         let temp_value = app.selected_temperature().to_string();
         let model_name = app.selected_model_name();
         let narrow_inspector = app.compact_toolbar();
@@ -1797,7 +1838,7 @@ pub fn prompt_editor_height(size: (f32, f32)) -> f32 {
 
 fn editor_caption(field: &str) -> &'static str {
     match field {
-        "script" => "Rhai rune",
+        "script" => "Script",
         "template" => "Template",
         SUBGRAPH_SPELL_FIELD => "Spell ID",
         _ => "Prompt",
@@ -1848,7 +1889,15 @@ fn playground_panel(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     } else {
         transcript.iter().enumerate().fold(col().gap(2.0).pt(8.0).pb(12.0), |mut list, (index, message)| {
             if message.from_user && index > 0 {
-                list = list.child(el().w_full().pt(8.0).pb(2.0).clip_rounded(0.0).child(canvas(stitched_sparkles_h(268.0, light)).size(268.0, 7.0)));
+                let divider_w = app.inspector_width() - 28.0;
+                list = list.child(
+                    el().key("tasting-divider")
+                        .w(divider_w)
+                        .pt(8.0)
+                        .pb(2.0)
+                        .clip_rounded(0.0)
+                        .child(canvas(stitched_sparkles_h(divider_w, light)).size(divider_w, 7.0)),
+                );
             }
             let turn_row = if message.from_user {
                 row()

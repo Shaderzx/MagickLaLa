@@ -730,6 +730,12 @@ pub struct Release {
 }
 
 #[derive(Debug, Clone)]
+pub struct ParkedShelf {
+    pub parked: Vec<(SocketRef, SocketRef)>,
+    pub bridges: Vec<(SocketRef, SocketRef)>,
+}
+
+#[derive(Debug, Clone)]
 pub enum UndoEntry {
     Aside {
         id: NodeId,
@@ -743,6 +749,7 @@ pub enum UndoEntry {
         config: Option<serde_json::Value>,
         wires: Vec<WireModel>,
         bridges: Vec<(SocketRef, SocketRef)>,
+        shelf: Option<ParkedShelf>,
     },
     Variable {
         index: usize,
@@ -780,7 +787,7 @@ pub struct StudioApp {
     pub undo_stack: Vec<UndoEntry>,
     pub aside_wires: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
     pub aside_bridges: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
-    pub saved_potions: Vec<(String, usize)>,
+    pub saved_potions: Vec<(String, String)>,
     pub pantry_drag: Option<PantryDrag>,
     pub undo_banner: Option<String>,
     pub dirty: bool,
@@ -1024,7 +1031,6 @@ impl StudioApp {
             card_mut.inputs.iter_mut().for_each(|socket| {
                 socket.flagged = false;
                 socket.mistyped = false;
-                socket.mistyped = false;
             });
         }
         self.validate();
@@ -1080,15 +1086,33 @@ impl StudioApp {
         self.var_default_edits = self.spell.variables.iter().map(|v| TextEdit::new(Self::format_value(v.default.as_ref()))).collect();
     }
 
+    pub fn var_default_error(&self, idx: usize) -> Option<&'static str> {
+        let variable = self.spell.variables.get(idx)?;
+        let edit = self.var_default_edits.get(idx)?;
+        if edit.text.trim().is_empty() || Self::try_parse_value(&edit.text, variable.ty).is_some() {
+            return None;
+        }
+        Some(match variable.ty {
+            SocketType::Int => "Needs a whole number",
+            SocketType::Float => "Needs a number",
+            SocketType::Bool => "Needs true or false",
+            _ => "Needs valid JSON",
+        })
+    }
+
     pub fn variable_binding_hint(&self, name: &str) -> (String, bool) {
         if name.trim().is_empty() {
             return ("Unused".to_owned(), false);
         }
         let template_token = format!("{{{{{name}}}}}");
-        for card in &self.canvas.nodes {
+        for card in self.canvas.nodes.iter().filter(|card| !self.canvas.is_shelved(&card.id)) {
             let in_prompt = self.prompts.get(&card.id).is_some_and(|e| e.text.contains(&template_token));
             let in_config = self.configs.get(&card.id).is_some_and(|cfg| {
-                cfg.as_object().is_some_and(|map| map.contains_key(name) || map.values().any(|v| v.as_str().is_some_and(|s| s.contains(&template_token))))
+                cfg.as_object().is_some_and(|map| {
+                    map.contains_key(name)
+                        || map.values().any(|v| v.as_str().is_some_and(|s| s.contains(&template_token)))
+                        || (card.kind.starts_with("var/") && map.get("name").and_then(serde_json::Value::as_str) == Some(name))
+                })
             });
             if in_prompt || in_config {
                 return (format!("→ {}", self.canvas.display_title(&card.id)), true);
@@ -1130,7 +1154,7 @@ impl StudioApp {
             TextEdit::new(Self::format_value(variable.default.as_ref()))
         };
         self.undo_stack.push(UndoEntry::Variable { index, variable, name_edit, default_edit });
-        self.undo_banner = Some(format!("Removed spice {name}"));
+        self.undo_banner = Some(format!("Removed variable {name}"));
         if self.open_var_type.as_deref() == Some(name) {
             self.open_var_type = None;
         }
@@ -1144,6 +1168,9 @@ impl StudioApp {
     }
 
     pub fn toggle_var_type_menu(&mut self, name: &str) {
+        if self.is_running() {
+            return;
+        }
         self.pending_type_reset = None;
         if self.open_var_type.as_deref() == Some(name) {
             self.open_var_type = None;
@@ -1211,6 +1238,9 @@ impl StudioApp {
     }
 
     pub fn toggle_model_menu(&mut self) {
+        if self.is_running() {
+            return;
+        }
         self.model_menu_open = !self.model_menu_open;
     }
 
@@ -1350,11 +1380,23 @@ impl StudioApp {
         self.dirty = false;
     }
 
+    pub fn recipe_summary(&self, graph: &SpellGraph) -> String {
+        let mut canvas = CanvasState::from_graph(graph, &self.specs);
+        for entry in &graph.shelf {
+            canvas.shelve(&entry.node);
+        }
+        let plan = magicklala_canvas::brew_plan(&canvas, self.canvas_size());
+        let ingredients = plan.with_role(magicklala_canvas::BrewRole::Ingredient).count();
+        let aside = plan.with_role(magicklala_canvas::BrewRole::Aside).count();
+        let word = if ingredients == 1 { "ingredient" } else { "ingredients" };
+        if aside > 0 { format!("{ingredients} {word} · {aside} aside") } else { format!("{ingredients} {word}") }
+    }
+
     pub fn refresh_saved_potions(&mut self) {
         self.saved_potions = self
             .store
             .as_ref()
-            .map(|store| store.saved_spells().into_iter().map(|record| (record.name.clone(), record.graph.nodes.len())).collect())
+            .map(|store| store.saved_spells().into_iter().map(|record| (record.name.clone(), self.recipe_summary(&record.graph))).collect())
             .unwrap_or_default();
     }
 
@@ -1420,6 +1462,9 @@ impl StudioApp {
     }
 
     pub fn request_restore_release(&mut self, version: u32) {
+        if self.is_running() {
+            return;
+        }
         self.pending_restore_version = Some(version);
     }
 
@@ -1558,6 +1603,10 @@ impl StudioApp {
     }
 
     pub fn pantry_drag_move(&mut self, kind: &str, at: [f32; 2]) {
+        if self.is_running() {
+            self.pantry_drag = None;
+            return;
+        }
         self.pantry_drag = Some(PantryDrag { kind: kind.to_owned(), at });
         self.canvas.pot_hover = self.pantry_drag_over_pot();
     }
@@ -1608,7 +1657,7 @@ impl StudioApp {
                     return;
                 }
                 let bridges = self.bridge_around(&id);
-                let title = self.canvas.card(&id).map(|card| card.title.clone()).unwrap_or_default();
+                let title = self.canvas.display_title(&id);
                 self.aside_wires.insert(id.clone(), removed.clone());
                 self.aside_bridges.insert(id.clone(), bridges.clone());
                 self.undo_stack.push(UndoEntry::Aside { id, wires: removed, bridges });
@@ -1979,6 +2028,14 @@ impl StudioApp {
                 }
             }
             if let Some(edit) = self.var_default_edits.get(idx)
+                && edit.text.trim().is_empty()
+                && !matches!(var.ty, SocketType::String | SocketType::Any)
+                && var.default.is_some()
+            {
+                var.default = None;
+                vars_changed = true;
+            }
+            if let Some(edit) = self.var_default_edits.get(idx)
                 && edit.text != Self::format_value(var.default.as_ref())
                 && let Some(parsed) = Self::try_parse_value(&edit.text, var.ty)
                 && var.default.as_ref() != Some(&parsed)
@@ -1996,11 +2053,11 @@ impl StudioApp {
         let unplaced = |list: &[NodeInstance]| list.iter().map(|node| (node.id.clone(), node.kind.clone(), node.config.clone())).collect::<Vec<_>>();
         if vars_changed || wires != self.spell.wires || subgraphs != self.spell.subgraphs || unplaced(&nodes) != unplaced(&self.spell.nodes) {
             self.canvas.clear_run_marks();
+            self.canvas.last_brew = None;
         }
         self.spell.nodes = nodes;
         self.spell.wires = wires;
         self.spell.subgraphs = subgraphs;
-        self.canvas.last_brew = None;
         self.draft_status = None;
         self.publish_status = None;
         self.store_error = None;
@@ -2201,6 +2258,9 @@ impl StudioApp {
     }
 
     pub fn validate(&mut self) -> &ValidationState {
+        if self.is_running() {
+            return &self.validation;
+        }
         self.sync_spell();
         for card in &mut self.canvas.nodes {
             if card.status == ExecutionStatus::Failed {
@@ -2498,6 +2558,11 @@ impl StudioApp {
         self.canvas.context_menu = None;
     }
 
+    pub fn open_cauldron(&mut self) {
+        self.canvas.mode = WorkbenchMode::Cauldron;
+        self.close_context_menu();
+    }
+
     pub fn open_grimoire(&mut self) {
         self.canvas.mode = WorkbenchMode::Grimoire;
         self.close_context_menu();
@@ -2583,6 +2648,11 @@ impl StudioApp {
         self.close_context_menu();
         let Some(selected_id) = self.canvas.selection.clone() else { return };
         let attached_wires: Vec<WireModel> = self.canvas.wires.iter().filter(|w| w.from_node == selected_id || w.to_node == selected_id).cloned().collect();
+        let shelf = self.canvas.is_shelved(&selected_id).then(|| ParkedShelf {
+            parked: self.aside_wires.get(&selected_id).cloned().unwrap_or_default(),
+            bridges: self.aside_bridges.get(&selected_id).cloned().unwrap_or_default(),
+        });
+        let title = self.canvas.display_title(&selected_id);
         let bridges = self.bridge_around(&selected_id);
         self.canvas.select(Some(selected_id.clone()));
         if let Some(removed) = self.canvas.remove_selected_node() {
@@ -2591,8 +2661,7 @@ impl StudioApp {
             let prompt = self.prompts.remove(&removed.id);
             let version = self.versions.remove(&removed.id);
             let config = self.configs.remove(&removed.id);
-            let title = removed.title.clone();
-            self.undo_stack.push(UndoEntry::Node { card: Box::new(removed), prompt, version, config, wires: attached_wires, bridges });
+            self.undo_stack.push(UndoEntry::Node { card: Box::new(removed), prompt, version, config, wires: attached_wires, bridges, shelf });
             self.undo_banner = Some(format!("Removed {title}"));
             self.validation = ValidationState::Unchecked;
             self.dirty = true;
@@ -2618,7 +2687,7 @@ impl StudioApp {
                 self.validation = ValidationState::Unchecked;
                 self.sync_spell();
             }
-            UndoEntry::Node { card, prompt, version, config, wires, bridges } => {
+            UndoEntry::Node { card, prompt, version, config, wires, bridges, shelf } => {
                 self.drop_bridges(&bridges);
                 let id = card.id.clone();
                 if let Some(prompt) = prompt {
@@ -2631,6 +2700,15 @@ impl StudioApp {
                     self.configs.insert(id.clone(), config);
                 }
                 self.canvas.restore_node(*card, wires);
+                if let Some(ParkedShelf { parked, bridges }) = shelf {
+                    self.canvas.shelve(&id);
+                    if !parked.is_empty() {
+                        self.aside_wires.insert(id.clone(), parked);
+                    }
+                    if !bridges.is_empty() {
+                        self.aside_bridges.insert(id.clone(), bridges);
+                    }
+                }
                 self.validation = ValidationState::Unchecked;
                 self.dirty = true;
                 self.sync_spell();

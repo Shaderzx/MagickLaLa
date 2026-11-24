@@ -1269,7 +1269,7 @@ test('The cauldron draws only what is true: every potion leaves through the bras
   expect(report.emptyMood).toBe('Empty');
   expect(report.standHasTest).toBe(false);
 });
-test('Quiet corners tell the truth: saved potions count real ingredients, a brew locks drags, menus, restores and Check, copy says variable and Script, undoing a deleted shelved step puts it back on the shelf with its wires, a bad typed default is flagged, Json is a type, shelved steps never claim a variable while var steps do, drips stay on their stream, twin names reach the undo banner, moving a card keeps the brew lit, the Grimoire menu offers the Cauldron, Stream Text has a model, the Tasting divider fits at 960, and an empty pot offers triggers to start with', { timeout: 900_000 }, async () => {
+test('Quiet corners tell the truth: saved potions count ingredients, a brew locks drags, menus, restores and Check, copy says variable and Script, undo puts a deleted shelved step back on the shelf, bad typed defaults are flagged, Json is a type, only unshelved and var steps claim a variable, drips stay on their stream, twin names reach the undo banner, moving a card keeps the brew lit, the Grimoire menu offers the Cauldron, Stream Text has a model, the Tasting divider fits at 960, an empty pot offers triggers', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-quiet-'));
   try {
     const report = await studioProbe(['quiet-corners', join(dir, 'studio.sqlite')]);

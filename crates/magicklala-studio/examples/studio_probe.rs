@@ -3705,6 +3705,7 @@ fn quiet_corners(db_path: &Path) -> Result<serde_json::Value, String> {
     taste.update(|app, _| app.size = (960.0, 640.0));
     taste.set_viewport((960.0, 640.0), 1.0);
     type_chat(&mut taste, "hello")?;
+    type_chat(&mut taste, "and again")?;
     taste.update(|app, _| app.right_tab = RightTab::Playground);
     taste.frame(1.0);
     let divider = layout_rect(&taste, "tasting-divider").map(|rect| rect[2]);

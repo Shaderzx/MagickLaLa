@@ -5,7 +5,7 @@ use crate::brew::BrewPlan;
 use crate::cauldron::{Toss, TossHook, cauldron_workbench_view};
 use crate::hearth::{
     CauldronMood, HearthPalette, WireStyle, brand_cauldron_mark, category_tone, fill_circle, fill_star4, grimoire_wire_shape, hex, mini_vial_icon,
-    potion_bottle_shape, tabletop_circle_shape, with_alpha,
+    potion_bottle_shape, with_alpha,
 };
 use crate::model::{CARD_HEADER, SOCKET_ROW};
 use crate::{CanvasState, DragState, ExecutionStatus, NodeCardModel, SocketModel, SocketRef, WorkbenchMode};
@@ -344,6 +344,9 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         .on_press(move |s: &mut S| lens(s).select(Some(select_id.clone())))
         .on_drag(move |s: &mut S, drag, tx| {
             tx.instant();
+            if lens(s).running_brew {
+                return;
+            }
             match drag.phase {
                 Phase::Down => {
                     let canvas = lens(s);
@@ -659,8 +662,6 @@ pub(crate) fn apothecary_dots(state: &CanvasState, size: (f32, f32), p: &HearthP
             }
         }
     }
-    let circle = tabletop_circle_shape(center, circle_r, state.light);
-    let _ = circle;
     let outer_segs = 56;
     for i in (0..outer_segs).step_by(2) {
         let a0 = (i as f32 / outer_segs as f32) * std::f32::consts::TAU;

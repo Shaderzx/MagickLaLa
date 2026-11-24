@@ -224,7 +224,8 @@ pub fn bottle_tint(state: &CanvasState, plan: &BrewPlan, bottle: &NodeId) -> Opt
 
 pub fn drip_hops(points: &[[f32; 2]]) -> Vec<([f32; 2], [f32; 2])> {
     let third = points.len() / 3;
-    (0..3).map(|k| (points[k * third], points[((k + 1) * third).min(points.len() - 1)])).collect()
+    let hop = 2.min(points.len().saturating_sub(1));
+    (0..3).map(|k| (points[k * third], points[(k * third + hop).min(points.len() - 1)])).collect()
 }
 
 fn drips(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &HearthPalette) -> Vec<El> {
