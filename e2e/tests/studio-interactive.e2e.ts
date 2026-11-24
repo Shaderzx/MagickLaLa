@@ -1252,3 +1252,28 @@ test('A brew locks the recipe and the bottles tell the truth: typing, saving, ad
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('Every pour, name and count reads true: twelve ingredients land on twelve rim spots with no crossings, low vials pour over the rim, bottle ribbons arc clear of the pot, running sockets pass 3 to 1, compact tabs keep their words, step badges never cover names, twin steps carry numbered full names everywhere, set-aside steps lose their pantry mark, potion and release rows count real ingredients, a lone trigger reads Brewed, and Grimoire cards at half zoom never cut titles or stack labels', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-polish-'));
+  try {
+    const report = await studioProbe(['geometry-and-polish', join(dir, 'studio.sqlite')]);
+
+    expect(report.dozen).toEqual({ landings: 12, pours: 12, ribbonCrossings: 0, pourCrossings: 0, lanes: false });
+    expect(report.throughBelly).toEqual([]);
+    expect(report.ribbonThroughPot).toBe(0);
+    for (const ratio of report.runningContrast) expect(ratio).toBeGreaterThanOrEqual(3);
+    expect(report.tabs.gap).toBeGreaterThanOrEqual(6);
+    expect(report.tabs.wordsFit).toBe(true);
+    expect(report.badges.found).toBeGreaterThan(0);
+    expect(report.badges.overlaps).toEqual([]);
+    expect(report.names).toEqual({ vials: ['Delay · 1', 'Delay · 2'], triggers: ['On Message · 1', 'On Message · 2'], menu: 'Delay · 2' });
+    expect(report.pantryMarksAside).toBe(false);
+    expect(report.pantryMarksInPot).toBe(true);
+    expect(report.potionRow).toMatch(/3 ingredients · 1 aside/);
+    expect(report.releaseRows).toMatch(/v1 4 ingredients/);
+    expect(report.loneChip).toMatch(/Brewed/);
+    expect(report.grimoireAtHalf).toEqual([]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

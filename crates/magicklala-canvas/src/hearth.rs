@@ -241,6 +241,10 @@ impl HearthPalette {
         if self.light { hex(0x322A42) } else { hex(0xDFD8F2) }
     }
 
+    pub fn running_mark(&self) -> Color {
+        self.gold
+    }
+
     pub fn simmer_ink(&self) -> Color {
         if self.light { hex(0x7A4E0C) } else { self.gold_hi }
     }

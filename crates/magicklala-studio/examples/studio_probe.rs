@@ -3385,6 +3385,181 @@ fn brew_locks(db_path: &Path) -> Result<serde_json::Value, String> {
         "logs": logs,
     }))
 }
+fn geometry_and_polish(db_path: &Path) -> Result<serde_json::Value, String> {
+    let sized = |spell: SpellGraph, size: (f32, f32)| {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.frame(1.0);
+        rt
+    };
+    let dozen = sized(dozen_ingredient_spell(), (960.0, 640.0));
+    let plan = magicklala_canvas::brew_plan(&dozen.state.canvas, dozen.state.canvas_size());
+    let pours = magicklala_canvas::cauldron::pour_paths(&dozen.state.canvas, &plan);
+    let mut landings: Vec<i64> = pours.iter().filter_map(|(_, points)| points.last().map(|point| (point[0] * 2.0).round() as i64)).collect();
+    landings.sort_unstable();
+    landings.dedup();
+    let ribbons = magicklala_canvas::cauldron::ribbon_paths(&plan);
+    let dozen_crossings = pours.iter().filter(|(_, points)| ribbons.iter().any(|ribbon| polylines_cross(points, ribbon))).count();
+    let pour_overlaps: usize =
+        pours.iter().enumerate().map(|(index, (_, a))| pours.iter().skip(index + 1).filter(|(_, b)| polylines_cross(a, b)).count()).sum();
+
+    let research = sized(example("parallel_research.json")?, (1280.0, 800.0));
+    let research_plan = magicklala_canvas::brew_plan(&research.state.canvas, research.state.canvas_size());
+    let pot = research_plan.pot;
+    let rim_y = pot[1] + pot[3] * 0.44;
+    let through_belly: Vec<String> = magicklala_canvas::cauldron::pour_paths(&research.state.canvas, &research_plan)
+        .into_iter()
+        .filter(|(_, points)| {
+            points
+                .iter()
+                .take(points.len().saturating_sub(4))
+                .any(|point| point[0] > pot[0] && point[0] < pot[0] + pot[2] && point[1] > rim_y + 4.0 && point[1] < pot[1] + pot[3])
+        })
+        .map(|(id, _)| id.0)
+        .collect();
+
+    let hook = sized(example("webhook_router.json")?, (1280.0, 800.0));
+    let hook_plan = magicklala_canvas::brew_plan(&hook.state.canvas, hook.state.canvas_size());
+    let hpot = hook_plan.pot;
+    let ribbon_through_pot = magicklala_canvas::cauldron::ribbon_paths(&hook_plan)
+        .iter()
+        .flat_map(|ribbon| ribbon.iter().skip(5).copied().collect::<Vec<_>>())
+        .filter(|point| point[0] > hpot[0] && point[0] < hpot[0] + hpot[2] && point[1] > hpot[1] && point[1] < hpot[1] + hpot[3])
+        .count();
+
+    let light = magicklala_canvas::HearthPalette::for_theme(true);
+    let dark = magicklala_canvas::HearthPalette::for_theme(false);
+    let running_contrast = [contrast(light.running_mark(), light.card), contrast(dark.running_mark(), dark.card)];
+
+    let mut rail = sized(StudioApp::from_registry().spell.clone(), (960.0, 640.0));
+    click(&mut rail, "expand-nodes")?;
+    rail.frame(2.0);
+    let tab_a = layout_rect(&rail, "tab-palette").ok_or("no pantry tab")?;
+    let tab_b = layout_rect(&rail, "tab-agents").ok_or("no potions tab")?;
+    let tab_gap = (tab_b[0] - (tab_a[0] + tab_a[2])).round();
+    let tab_words_fit = text_lines_under(&rail, "tab-palette").iter().all(|(_, rect)| inside(tab_a, *rect))
+        && text_lines_under(&rail, "tab-agents").iter().all(|(_, rect)| inside(tab_b, *rect));
+
+    let compact = sized(StudioApp::from_registry().spell.clone(), (960.0, 640.0));
+    let badge_overlaps: Vec<String> = compact
+        .state
+        .canvas
+        .nodes
+        .iter()
+        .filter_map(|card| {
+            let badge = layout_rect(&compact, &format!("step-badge-{}", card.id.0))?;
+            let hit = text_lines_under(&compact, &format!("node-{}", card.id.0))
+                .iter()
+                .any(|(line, rect)| line != &card.kind && !line.chars().all(|c| c.is_ascii_digit()) && rects_touch(badge, *rect));
+            hit.then(|| card.title.clone())
+        })
+        .collect();
+    let badges_found = compact.state.canvas.nodes.iter().filter(|card| layout_rect(&compact, &format!("step-badge-{}", card.id.0)).is_some()).count();
+
+    let place = |id: &str, kind: &str, x: f32| NodeInstance {
+        id: NodeId::from(id),
+        kind: kind.to_owned(),
+        position: [x * 260.0, 0.0],
+        config: serde_json::Value::Null,
+    };
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let mut twins = SpellGraph::new("Twin Pauses");
+    twins.nodes = vec![
+        place("trigger", "event/on_message", 0.0),
+        place("first", "time/delay", 1.0),
+        place("second", "time/delay", 2.0),
+        place("reply", "io/send_message", 3.0),
+        place("again", "event/on_message", 0.0),
+    ];
+    twins.wires = vec![
+        wire("w1", ("trigger", "out"), ("first", "in")),
+        wire("w2", ("first", "out"), ("second", "in")),
+        wire("w3", ("second", "out"), ("reply", "in")),
+        wire("w4", ("trigger", "content"), ("reply", "content")),
+    ];
+    let mut twin_rt = sized(twins, (1280.0, 800.0));
+    let vial_titles: Vec<String> = ["first", "second"]
+        .iter()
+        .filter_map(|id| text_lines_under(&twin_rt, &format!("node-{id}")).into_iter().map(|(line, _)| line).find(|line| line.starts_with("Delay")))
+        .collect();
+    let trigger_names = [twin_rt.state.canvas.display_title(&NodeId::from("trigger")), twin_rt.state.canvas.display_title(&NodeId::from("again"))];
+    twin_rt.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("second")));
+        app.canvas.context_menu = Some([400.0, 300.0]);
+    });
+    twin_rt.frame(2.0);
+    let menu_title = text_lines_under(&twin_rt, "context-menu").into_iter().map(|(line, _)| line).next();
+
+    let mut aside = sized(StudioApp::from_registry().spell.clone(), (1280.0, 800.0));
+    aside.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("recall"))));
+    aside.frame(2.0);
+    let pantry_marked = layout_rect(&aside, "pantry-in-memory-search").is_some();
+    let pantry_kept = layout_rect(&aside, "pantry-in-ai-generate_text").is_some();
+    click(&mut aside, "tab-agents")?;
+    aside.frame(3.0);
+    let potion_row = texts_under(&mut aside, "spell-support-agent");
+
+    let config = StudioConfig { db_path: Some(db_path.to_path_buf()), ..StudioConfig::default() };
+    let mut app = StudioApp::open(&config).map_err(|error| error.to_string())?;
+    app.new_empty_spell();
+    app.load_graph(example("webhook_router.json")?);
+    let mut released = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    released.frame(0.0);
+    click(&mut released, "publish")?;
+    click(&mut released, "tab-agents")?;
+    released.frame(2.0);
+    let release_rows = texts_under(&mut released, "left-rail");
+
+    let mut lone = SpellGraph::new("Lone");
+    lone.nodes = vec![place("trigger", "event/on_message", 0.0)];
+    let mut lone_rt = sized(lone, (1280.0, 800.0));
+    click(&mut lone_rt, "run-spell")?;
+    live_finish(&mut lone_rt)?;
+    lone_rt.frame(3.0);
+    let lone_chip = texts_under(&mut lone_rt, "validation-pill");
+
+    let mut grim = sized(example("parallel_research.json")?, (1280.0, 800.0));
+    click(&mut grim, "mode-grimoire")?;
+    grim.update(|app, _| app.canvas.camera.zoom = 0.5);
+    grim.frame(3.0);
+    let mut grim_issues = Vec::new();
+    for card in grim.state.canvas.nodes.clone() {
+        let Some(header) = layout_rect(&grim, &format!("node-{}-header", card.id.0)) else { continue };
+        let lines = text_lines_under(&grim, &format!("node-{}", card.id.0));
+        if lines.iter().any(|(line, rect)| (line == &card.title || line.starts_with(&card.title)) && !inside(header, *rect)) {
+            grim_issues.push(format!("{} title cut", card.id.0));
+        }
+        let labels: Vec<[f32; 4]> =
+            lines.iter().filter(|(line, _)| card.inputs.iter().chain(card.outputs.iter()).any(|socket| &socket.name == line)).map(|(_, rect)| *rect).collect();
+        if labels.iter().enumerate().any(|(index, a)| labels.iter().skip(index + 1).any(|b| rects_touch(*a, *b))) {
+            grim_issues.push(format!("{} labels collide", card.id.0));
+        }
+    }
+
+    Ok(json!({
+        "dozen": { "landings": landings.len(), "pours": pours.len(), "ribbonCrossings": dozen_crossings, "pourCrossings": pour_overlaps, "lanes": plan.lanes.is_some() },
+        "throughBelly": through_belly,
+        "ribbonThroughPot": ribbon_through_pot,
+        "runningContrast": running_contrast,
+        "tabs": { "gap": tab_gap, "wordsFit": tab_words_fit },
+        "badges": { "found": badges_found, "overlaps": badge_overlaps },
+        "names": { "vials": vial_titles, "triggers": trigger_names, "menu": menu_title },
+        "pantryMarksAside": pantry_marked,
+        "pantryMarksInPot": pantry_kept,
+        "potionRow": potion_row,
+        "releaseRows": release_rows,
+        "loneChip": lone_chip,
+        "grimoireAtHalf": grim_issues,
+    }))
+}
 fn pull_middle() -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32| NodeInstance {
         id: NodeId::from(id),
@@ -3618,6 +3793,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("compact-fit") => compact_fit(),
         Some("recipe-mending") => recipe_mending(),
         Some("brew-locks") => brew_locks(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("geometry-and-polish") => geometry_and_polish(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("shelf-keeps") => shelf_keeps(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("fit-and-wording") => fit_and_wording(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-recipe") => one_recipe(Path::new(args.get(1).ok_or("missing database path")?)),
