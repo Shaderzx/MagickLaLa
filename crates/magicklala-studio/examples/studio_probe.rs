@@ -3627,7 +3627,7 @@ fn quiet_corners(db_path: &Path) -> Result<serde_json::Value, String> {
     let hinted = note.clone();
     vars.update(move |app, _| {
         if let Some(edit) = app.prompts.get_mut(&hinted) {
-            *edit = rune::TextEdit::new(&format!("use {token}"));
+            *edit = rune::TextEdit::new(format!("use {token}"));
         }
         app.sync_spell();
         app.toss(magicklala_canvas::Toss::Aside(hinted.clone()));
