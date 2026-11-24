@@ -1181,7 +1181,25 @@ impl StudioApp {
         self.pending_switch = None;
     }
 
+    fn drop_active_run(&mut self) {
+        if let Some(active) = self.active.take() {
+            active.token.cancel();
+            if !active.handle.is_finished() {
+                self.stopping.push(active.handle);
+            }
+        }
+        self.chat.clear();
+        self.trace.clear();
+        self.trace_events.clear();
+        self.pending_trace.clear();
+        self.last_run = None;
+        self.run_started = None;
+        self.canvas.running_brew = false;
+        self.canvas.last_brew = None;
+    }
+
     fn detach_spell_history(&mut self) {
+        self.drop_active_run();
         if let Some(store) = self.store.as_mut() {
             store.detach_record();
         }
