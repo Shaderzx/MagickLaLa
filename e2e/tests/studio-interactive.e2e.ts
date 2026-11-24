@@ -1444,6 +1444,35 @@ test('Studio keeps its promises: a prompt typed over a shelf shortcut stays type
   expect(report.temperature).toEqual({ second: 0.4, variable: 'Float(0.4)' });
   expect(report.ladleCrossed).toBe(false);
   expect(report.pulledWires).toBe(0);
+});test('Every dial tells the truth: a step with no temperature reads Auto and the first press writes one, the model tile names its provider, only real variable links are shown and a changed default changes the brew, the 960 Grimoire never zooms past its labels, cards keep recipe numbers after a parallel brew, lane pours turn on wide curves, the first log chip keeps its name, the header counts bottles, big whole numbers keep their meaning, and a missing AI gateway says where to set one', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-dials-'));
+  try {
+    const report = await studioProbe(['honest-dials', join(dir, 'studio.sqlite')]);
+
+    expect(report.temperature).toEqual({ shown: 'Auto', written: 0.8, providerShown: true });
+    expect(report.bindings.invented).toEqual([]);
+    expect(report.bindings.greetingLinked).toBe(true);
+    expect(report.bindings.first).toEqual(['hi friend']);
+    expect(report.bindings.second).toEqual(['hey friend']);
+    expect(report.compactGrimoire.zoom).toBeGreaterThanOrEqual(0.6);
+    expect(report.compactGrimoire.socketNames).toBeGreaterThan(0);
+    expect(report.badgesSeen).toBeGreaterThanOrEqual(4);
+    expect(report.badgeMismatch).toEqual([]);
+    expect(report.laneRadius).toBeGreaterThanOrEqual(16);
+    expect(report.firstChipNamed).toBe(true);
+    expect(report.headerSaysBottles).toBe(true);
+    expect(report.bigNumbersLive).toBeNull();
+
+    const env: NodeJS.ProcessEnv = { ...process.env, DISPLAY: '', WAYLAND_DISPLAY: '' };
+    delete env.MAGICKLALA_LLM_BASE_URL;
+    delete env.MAGICKLALA_LLM_API_KEY;
+    delete env.OPENAI_API_KEY;
+    const { stdout } = await run('cargo', ['run', '-q', '-p', 'magicklala-studio', '--example', 'studio_probe', '--', 'gateway-hint'], { cwd: repoRoot, env, timeout: 900_000, maxBuffer: 64 * 1024 * 1024 });
+    const hint = JSON.parse(stdout.trim().split('\n').at(-1) ?? '');
+    expect(hint.error).toContain('MAGICKLALA_LLM_BASE_URL');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });test('A brew locks the recipe and the bottles tell the truth: typing, saving, adding, dragging cards and drawing wires all wait until the brew ends and the lit result survives, branch bottles show no step numbers before a brew, a running bottle simmers without a check, a published branch potion shows its sealed version on the bottle, and thirteen-step and thirty-eight-step brews and a many-issue Check keep every log chip and the result inside the log at 960 and 1280', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-locks-'));
   try {

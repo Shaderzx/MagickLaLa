@@ -4961,6 +4961,185 @@ fn clear_signals() -> Result<serde_json::Value, String> {
         "pulledWires": pulled,
     }))
 }
+fn honest_dials(db_path: &Path) -> Result<serde_json::Value, String> {
+    let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
+        id: NodeId::from(id),
+        kind: kind.to_owned(),
+        position: [x * 260.0, 0.0],
+        config,
+    };
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let open = |spell: SpellGraph, size: (f32, f32)| {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt
+    };
+    let lines = |rt: &Runtime<StudioApp>, key: &str| text_lines_under(rt, key).into_iter().map(|(line, _)| line).collect::<Vec<_>>();
+
+    let mut research = open(example("parallel_research.json")?, (1280.0, 800.0));
+    let model = NodeId::from(node_of_kind(&research.state, "ai/generate_text").ok_or("no model")?.as_str());
+    let picked = model.clone();
+    research.update(move |app, _| {
+        app.canvas.select(Some(picked.clone()));
+        app.right_tab = RightTab::Inspector;
+    });
+    research.frame(1.0);
+    let card_lines = lines(&research, "inspector-card");
+    let shown_temperature = card_lines
+        .iter()
+        .position(|line| line == "Temperature")
+        .and_then(|at| card_lines.iter().skip(at + 1).find(|line| !["−", "+"].contains(&line.as_str())).cloned());
+    let shown_provider = lines(&research, "model-picker").join(" ");
+    click(&mut research, "temp-inc")?;
+    let written = research.state.configs.get(&model).and_then(|config| config.get("temperature")).and_then(serde_json::Value::as_f64);
+    let temperature = json!({ "shown": shown_temperature, "written": written, "providerShown": shown_provider.contains("openai") });
+
+    let support = StudioApp::from_registry();
+    let invented: Vec<String> = support
+        .spell
+        .variables
+        .iter()
+        .map(|variable| (variable.name.clone(), support.variable_binding_hint(&variable.name)))
+        .filter(|(_, (_, linked))| *linked)
+        .map(|(name, (hint, _))| format!("{name} {hint}"))
+        .collect();
+    let mut greeting = SpellGraph::new("Greeting Agent");
+    greeting.nodes = vec![
+        place("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        place("words", "text/template", 1.0, json!({ "template": "{{greeting}} friend" })),
+        place("reply", "io/send_message", 2.0, serde_json::Value::Null),
+    ];
+    greeting.wires = vec![wire("g1", ("trigger", "out"), ("reply", "in")), wire("g2", ("words", "text"), ("reply", "content"))];
+    greeting.variables = vec![magicklala_graph::VariableDef {
+        name: "greeting".to_owned(),
+        ty: SocketType::String,
+        default: Some(magicklala_graph::Value::String("hi".to_owned())),
+        exposed: false,
+    }];
+    let mut greet = open(greeting, (1280.0, 800.0));
+    let greeting_hint = greet.state.variable_binding_hint("greeting");
+    let first = run_once(&mut greet)?;
+    greet.update(|app, _| {
+        app.var_default_edits[0] = rune::TextEdit::new("hey");
+        app.sync_spell();
+    });
+    let second = run_once(&mut greet)?;
+    let bindings = json!({ "invented": invented, "greetingLinked": greeting_hint.1, "first": first["replies"], "second": second["replies"] });
+
+    let mut grim = open(example("webhook_router.json")?, (960.0, 640.0));
+    click(&mut grim, "mode-grimoire")?;
+    grim.frame(1.0);
+    let socket_names = grim
+        .state
+        .canvas
+        .nodes
+        .iter()
+        .map(|card| {
+            lines(&grim, &format!("node-{}", card.id.0))
+                .iter()
+                .filter(|line| card.inputs.iter().chain(card.outputs.iter()).any(|socket| &socket.name == *line))
+                .count()
+        })
+        .sum::<usize>();
+    let compact_grimoire = json!({ "zoom": (grim.state.canvas.camera.zoom * 100.0).round() / 100.0, "socketNames": socket_names });
+
+    let mut parallel = open(example("parallel_research.json")?, (1280.0, 800.0));
+    run_once(&mut parallel)?;
+    parallel.frame(2.0);
+    let plan = magicklala_canvas::brew_plan(&parallel.state.canvas, parallel.state.canvas_size());
+    let badges: Vec<(usize, String)> = plan
+        .with_role(magicklala_canvas::BrewRole::Ingredient)
+        .filter_map(|card| card.recipe_step.map(|step| (step, card.id.clone())))
+        .filter_map(|(step, id)| parallel.presented(&format!("step-badge-{}", id.0)).map(|_| (step, words_of(&parallel, &format!("step-badge-{}", id.0)))))
+        .collect();
+    let badge_mismatch: Vec<String> =
+        badges.iter().filter(|(step, shown)| shown != &step.to_string()).map(|(step, shown)| format!("recipe {step} shows {shown}")).collect();
+
+    let mut lanes = open(example("webhook_router.json")?, (960.0, 640.0));
+    run_once(&mut lanes)?;
+    let lane_plan = magicklala_canvas::brew_plan(&lanes.state.canvas, lanes.state.canvas_size());
+    let mut tightest = f32::MAX;
+    if lane_plan.lanes.is_some() {
+        for (_, points) in magicklala_canvas::cauldron::pour_paths(&lanes.state.canvas, &lane_plan) {
+            for trio in points.windows(3) {
+                let a = [trio[1][0] - trio[0][0], trio[1][1] - trio[0][1]];
+                let b = [trio[2][0] - trio[1][0], trio[2][1] - trio[1][1]];
+                let (la, lb) = (a[0].hypot(a[1]), b[0].hypot(b[1]));
+                if la < 0.01 || lb < 0.01 {
+                    continue;
+                }
+                let turn = ((a[0] * b[0] + a[1] * b[1]) / (la * lb)).clamp(-1.0, 1.0).acos();
+                if turn > 0.03 {
+                    tightest = tightest.min((la + lb) * 0.5 / turn / lane_plan.scale);
+                }
+            }
+        }
+    }
+    let lane_radius = if tightest == f32::MAX { serde_json::Value::Null } else { json!(tightest.round()) };
+
+    let mut chips = open(example("webhook_router.json")?, (960.0, 640.0));
+    run_once(&mut chips)?;
+    chips.frame(2.0);
+    let first_chip_named = lines(&chips, "trace-strip").iter().any(|line| line.starts_with("On Webhook"));
+
+    let mut grim_wide = open(example("webhook_router.json")?, (1280.0, 800.0));
+    click(&mut grim_wide, "mode-grimoire")?;
+    grim_wide.frame(1.0);
+    let header_words = lines(&grim_wide, "toolbar-left").join(" ");
+
+    let mut big = studio_at(db_path)?;
+    let mut counted = delay_spell(5);
+    counted.name = "Big Numbers".to_owned();
+    if let Some(node) = counted.nodes.iter_mut().find(|node| node.id.0 == "wait") {
+        node.config = json!({ "ms": 5, "seed": 9_007_199_254_740_993_u64 });
+    }
+    big.update(move |app, _| {
+        app.new_empty_spell();
+        app.load_graph(counted.clone());
+    });
+    click(&mut big, "publish")?;
+    big.update(|app, _| {
+        app.configs.insert(NodeId::from("wait"), json!({ "ms": 5, "seed": 9_007_199_254_740_992_u64 }));
+        app.sync_spell();
+    });
+    let big_numbers = big.state.active_release_version;
+
+    Ok(json!({
+        "temperature": temperature,
+        "bindings": bindings,
+        "compactGrimoire": compact_grimoire,
+        "badgeMismatch": badge_mismatch,
+        "badgesSeen": badges.len(),
+        "laneRadius": lane_radius,
+        "firstChipNamed": first_chip_named,
+        "headerSaysBottles": header_words.contains("bottle"),
+        "bigNumbersLive": big_numbers,
+    }))
+}
+
+fn gateway_hint() -> Result<serde_json::Value, String> {
+    let mut lonely = runtime_for(example("parallel_research.json")?);
+    run_once(&mut lonely)?;
+    let failed = lonely.state.trace.iter().find(|line| line.kind == "NodeFailed").and_then(|line| line.node.clone()).ok_or("nothing failed")?;
+    lonely.update(move |app, _| {
+        app.canvas.select(Some(failed.clone()));
+        app.right_tab = RightTab::Inspector;
+    });
+    lonely.frame(1.0);
+    Ok(json!({ "error": words_of(&lonely, "inspector-error") }))
+}
+
+fn words_of(rt: &Runtime<StudioApp>, key: &str) -> String {
+    text_lines_under(rt, key).into_iter().map(|(line, _)| line).collect::<Vec<_>>().join(" ")
+}
 fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
@@ -5862,6 +6041,8 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("true-runs") => true_runs(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("clear-signals") => clear_signals(),
         Some("pot-rect") => pot_rect(),
+        Some("gateway-hint") => gateway_hint(),
+        Some("honest-dials") => honest_dials(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("drawn-truths") => drawn_truths(),
