@@ -1269,6 +1269,32 @@ test('The cauldron draws only what is true: every potion leaves through the bras
   expect(report.emptyMood).toBe('Empty');
   expect(report.standHasTest).toBe(false);
 });
+test('Quiet corners tell the truth: saved potions count real ingredients, a brew locks drags, menus, restores and Check, copy says variable and Script, undoing a deleted shelved step puts it back on the shelf with its wires, a bad typed default is flagged, Json is a type, shelved steps never claim a variable while var steps do, drips stay on their stream, twin names reach the undo banner, moving a card keeps the brew lit, the Grimoire menu offers the Cauldron, Stream Text has a model, the Tasting divider fits at 960, and an empty pot offers triggers to start with', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-quiet-'));
+  try {
+    const report = await studioProbe(['quiet-corners', join(dir, 'studio.sqlite')]);
+
+    expect(report.potionRow).toContain('3 ingredients · 1 aside');
+    expect(report.potionRow.some((line: string) => line.endsWith('steps'))).toBe(false);
+    expect(report.midBrew).toEqual({ running: true, modelMenu: false, typeMenu: null, restore: null, pantryDrag: false, tray: false, checkUnchanged: true, checkDisabled: true });
+    expect(report.banner).toMatch(/^Removed variable /);
+    expect(report.runeCaption).toBe(false);
+    expect(report.undo.role).toBe('Aside');
+    expect(report.undo.parked).toBeGreaterThan(0);
+    expect(report.undo.wiresAfterPour).toBeGreaterThan(0);
+    expect(report.variables).toEqual({ flagged: true, json: true, shelvedHint: false, getterHint: true });
+    expect(report.dripDrift).toBeLessThanOrEqual(2);
+    expect(report.twinBanner).toBe('Removed Template · 1');
+    expect(report.litAfterMove).toBe(true);
+    expect(report.grimoireMenu).toContain('Show in Cauldron');
+    expect(report.grimoireMenu).not.toContain('Inspect in Grimoire');
+    expect(report.streamModel).toBe(true);
+    expect(report.divider.width).toBeLessThanOrEqual(report.divider.panel - 28);
+    expect(report.starter).toEqual({ clicked: true, nodes: ['event/on_message'] });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 test('A brew locks the recipe and the bottles tell the truth: typing, saving, adding, dragging cards and drawing wires all wait until the brew ends and the lit result survives, branch bottles show no step numbers before a brew, a running bottle simmers without a check, a published branch potion shows its sealed version on the bottle, and thirteen-step and thirty-eight-step brews and a many-issue Check keep every log chip and the result inside the log at 960 and 1280', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-locks-'));
   try {

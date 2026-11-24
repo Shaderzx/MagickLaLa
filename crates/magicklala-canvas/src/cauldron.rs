@@ -222,6 +222,11 @@ pub fn bottle_tint(state: &CanvasState, plan: &BrewPlan, bottle: &NodeId) -> Opt
     brew_tint(&own).or_else(|| brew_tint(&all))
 }
 
+pub fn drip_hops(points: &[[f32; 2]]) -> Vec<([f32; 2], [f32; 2])> {
+    let third = points.len() / 3;
+    (0..3).map(|k| (points[k * third], points[((k + 1) * third).min(points.len() - 1)])).collect()
+}
+
 fn drips(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &HearthPalette) -> Vec<El> {
     if matches!(mood, CauldronMood::Hexed | CauldronMood::Empty) {
         return Vec::new();
@@ -237,10 +242,7 @@ fn drips(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &HearthPal
         }
         let r = (if style.active { 3.4 } else { 2.6 }) * plan.scale.max(0.6);
         let period = if style.active { 0.9 } else { 1.8 };
-        let third = points.len() / 3;
-        for k in 0..3 {
-            let start = points[k * third];
-            let end = points[((k + 1) * third).min(points.len() - 1)];
+        for (k, (start, end)) in drip_hops(points).into_iter().enumerate() {
             let delay = period * k as f64 / 3.0 + index as f64 * 0.17;
             let mut travel = LoopSpec::slide(period, [0.0, 0.0], [end[0] - start[0], end[1] - start[1]]);
             travel.delay = delay;
