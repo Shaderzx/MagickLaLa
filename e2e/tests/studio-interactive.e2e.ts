@@ -1077,3 +1077,31 @@ test('Setting aside or deleting the middle step of a recipe joins the steps arou
   expect(emptyBottle.reply).not.toBe('done');
   expect(emptyBottle.plaque).toMatch(/bottle empty/);
 });
+
+test('Studio tells the truth in the corners: a tossed Replace really shapes the reply in either order, a spare trigger never hijacks the brew, nothing is added mid-brew, the Trace panel says Brewing then marks an edited result as the last brew, a wired prompt shows its source with a way to type it instead, a long name never pushes toolbar buttons off a 960 window, re-publishing an unchanged potion makes no new release, saved potions stay in the picker, and checkmarks are drawn rather than font glyphs', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-corners-'));
+  try {
+    const report = await studioProbe(['sol-r3', join(dir, 'studio.sqlite')]);
+
+    for (const shaped of [report.tossed, report.spliced]) {
+      expect(shaped.role).toBe('Ingredient');
+      expect(shaped.replaceFeeders).toEqual(expect.arrayContaining([expect.stringMatching(/^on-message-\d+\.content->text$/)]));
+      expect(shaped.replyFeeders).toContain(shaped.replace + '.text->content');
+    }
+    expect(report.twinReply).toBe('done');
+    expect(report.traceRunning).toMatch(/Brewing/);
+    expect(report.traceRunning).not.toMatch(/Brewed/);
+    expect(report.addedMidBrew).toBe(0);
+    expect(report.traceAfterEdit).toMatch(/Last brew/);
+    expect(report.promptField).toMatch(/On Message · content/);
+    expect(report.unplugShown).toBe(true);
+    expect(report.promptAfter).toEqual({ wired: false, editor: true });
+    expect(report.clipped).toEqual([]);
+    expect(report.releases).toBe(1);
+    expect(report.listed).toBe(true);
+    expect(report.reopened).toBe('Tasting Agent');
+    expect(report.checkGlyphs).toEqual([]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -2493,6 +2493,141 @@ fn pull_middle() -> Result<serde_json::Value, String> {
     Ok(json!({ "setAside": set_aside, "deleted": removed, "emptyBottle": empty }))
 }
 
+fn sol_r3(db_path: &Path) -> Result<serde_json::Value, String> {
+    let replace_report = |order: &[&str]| -> Result<serde_json::Value, String> {
+        let mut rt = headless(StudioApp::with_spell(SpellGraph::new("Shout"), registry_specs()));
+        for kind in order {
+            let kind = (*kind).to_owned();
+            rt.update(move |app, _| {
+                app.spawn(&kind);
+            });
+        }
+        let replace = node_of_kind(&rt.state, "text/replace").ok_or("no replace")?;
+        let reply = node_of_kind(&rt.state, "io/send_message").ok_or("no reply")?;
+        Ok(
+            json!({ "role": role_of(&rt.state, &replace), "replaceFeeders": feeders_of(&rt.state, &replace), "replyFeeders": feeders_of(&rt.state, &reply), "replace": replace }),
+        )
+    };
+    let tossed = replace_report(&["event/on_message", "text/replace", "io/send_message"])?;
+    let spliced = replace_report(&["event/on_message", "io/send_message", "text/replace"])?;
+
+    let place = |id: &str, kind: &str, x: f32| NodeInstance {
+        id: NodeId::from(id),
+        kind: kind.to_owned(),
+        position: [x * 260.0, 0.0],
+        config: serde_json::Value::Null,
+    };
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let mut twin = SpellGraph::new("Twin Triggers");
+    twin.nodes = vec![place("spare", "event/on_message", 0.0), place("trigger", "event/on_message", 0.0), place("reply", "io/send_message", 1.0)];
+    twin.wires = vec![wire("w1", ("trigger", "out"), ("reply", "in")), wire("w2", ("trigger", "content"), ("reply", "content"))];
+    let mut twin_rt = runtime_for(twin);
+    click(&mut twin_rt, "run-spell")?;
+    live_finish(&mut twin_rt)?;
+    let twin_reply = twin_rt.state.canvas.card(&NodeId::from("reply")).map(|card| card.status.label());
+
+    let mut clock = Clock(0.0);
+    let mut slow = slow_runtime(1_500, Duration::from_secs(600));
+    click_at(&mut slow, "run-spell", clock.tick())?;
+    slow.update(|app, _| {
+        app.wait_until(SETTLE, delay_started);
+    });
+    click_at(&mut slow, "tab-trace", clock.tick())?;
+    slow.frame(clock.tick());
+    let trace_running = texts_under(&mut slow, "inspector-trace");
+    let before = slow.state.spell.nodes.len();
+    slow.update(|app, _| app.palette_query = rune::TextEdit::new("Template"));
+    slow.frame(clock.tick());
+    slow.frame(clock.tick());
+    click_at(&mut slow, "palette-text-template", clock.tick())?;
+    let added_mid_brew = slow.state.spell.nodes.len() - before;
+    live_finish(&mut slow)?;
+    slow.update(|app, _| {
+        app.toss(magicklala_canvas::Toss::Aside(NodeId::from("wait")));
+    });
+    slow.frame(clock.tick());
+    let trace_after_edit = texts_under(&mut slow, "inspector-trace");
+
+    let mut prompt = headless(StudioApp::from_registry());
+    prompt.update(|app, _| app.canvas.select(Some(NodeId::from("llm"))));
+    prompt.frame(0.0);
+    let prompt_field = texts_under(&mut prompt, "prompt-field");
+    let unplug_shown = prompt.find("prompt-unplug").is_some();
+    if unplug_shown {
+        click(&mut prompt, "prompt-unplug")?;
+    }
+    let prompt_after = json!({
+        "wired": prompt.state.spell.wires.iter().any(|wire| wire.to_node.0 == "llm" && wire.to_socket == "prompt"),
+        "editor": prompt.find("prompt-editor").is_some(),
+    });
+
+    let mut long = StudioApp::from_registry();
+    long.spell.name = "Customer Support Escalation Triage And Follow Up Potion".to_owned();
+    long.canvas.spell_name = long.spell.name.clone();
+    long.size = (960.0, 640.0);
+    let mut long_rt = Runtime::new(long, studio_view, (960.0, 640.0), Env::new(true, 1.0));
+    long_rt.frame(0.0);
+    let clipped: Vec<String> = ["run-spell", "save", "publish", "theme-toggle", "zoom-fit"]
+        .iter()
+        .filter(|key| long_rt.presented(key).is_none_or(|(rect, _)| rect[0] < 0.0 || rect[0] + rect[2] > 960.5))
+        .map(|key| (*key).to_owned())
+        .collect();
+
+    let config = StudioConfig { db_path: Some(db_path.to_path_buf()), ..StudioConfig::default() };
+    let mut app = StudioApp::open(&config).map_err(|error| error.to_string())?;
+    app.load_graph(tasting_spell());
+    let mut store_rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    store_rt.frame(0.0);
+    click(&mut store_rt, "publish")?;
+    click(&mut store_rt, "run-spell")?;
+    live_finish(&mut store_rt)?;
+    click(&mut store_rt, "publish")?;
+    let releases = store_rt.state.releases.len();
+    click(&mut store_rt, "save")?;
+    store_rt.update(|app, _| {
+        app.request_open_sample("Research Agent");
+        app.confirm_switch();
+    });
+    click(&mut store_rt, "tab-agents")?;
+    store_rt.frame(1.0);
+    let listed = store_rt.find("spell-tasting-agent").is_some();
+    if listed {
+        click(&mut store_rt, "spell-tasting-agent")?;
+        store_rt.update(|app, _| app.confirm_switch());
+    }
+    let reopened = store_rt.state.spell.name.clone();
+    let glyphs: Vec<String> = visible_texts(&store_rt).into_iter().filter(|text| text.contains('\u{2713}')).collect();
+
+    let mut brewed = runtime_for(tasting_spell());
+    click(&mut brewed, "run-spell")?;
+    live_finish(&mut brewed)?;
+    let mut checks: Vec<String> = visible_texts(&brewed).into_iter().filter(|text| text.contains('\u{2713}')).collect();
+    checks.extend(glyphs);
+
+    Ok(json!({
+        "tossed": tossed,
+        "spliced": spliced,
+        "twinReply": twin_reply,
+        "traceRunning": trace_running,
+        "addedMidBrew": added_mid_brew,
+        "traceAfterEdit": trace_after_edit,
+        "promptField": prompt_field,
+        "unplugShown": unplug_shown,
+        "promptAfter": prompt_after,
+        "clipped": clipped,
+        "releases": releases,
+        "listed": listed,
+        "reopened": reopened,
+        "checkGlyphs": checks,
+    }))
+}
+
 fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
         Some("surfaces") => capture_surfaces(Path::new(args.get(1).ok_or("missing output directory")?)),
@@ -2511,6 +2646,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("pour-shape") => pour_shape(),
         Some("r3-look") => r3_look(),
         Some("pull-middle") => pull_middle(),
+        Some("sol-r3") => sol_r3(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-ref-edit") => subgraph_ref_edit(Path::new(args.get(1).ok_or("missing database path")?)),
