@@ -520,7 +520,7 @@ pub fn grimoire_lanes(state: &CanvasState) -> Vec<(magicklala_graph::WireId, i8)
     lanes
 }
 
-const DETAIL_ZOOM: f32 = 0.75;
+const DETAIL_ZOOM: f32 = 0.6;
 
 fn bottle_hex_pill(card: &NodeCardModel, p: &HearthPalette) -> Option<El> {
     let caption = match card.inputs.iter().find(|socket| socket.flagged) {

@@ -1273,6 +1273,7 @@ test('Every pour, name and count reads true: twelve ingredients land on twelve r
     expect(report.releaseRows).toMatch(/v1 4 ingredients/);
     expect(report.loneChip).toMatch(/Brewed/);
     expect(report.grimoireAtHalf).toEqual([]);
+    expect(report.grimoireNamesAt64).toEqual([]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

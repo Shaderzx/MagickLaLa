@@ -3543,6 +3543,16 @@ fn geometry_and_polish(db_path: &Path) -> Result<serde_json::Value, String> {
             grim_issues.push(format!("{} labels collide", card.id.0));
         }
     }
+    grim.update(|app, _| app.canvas.camera.zoom = 0.64);
+    grim.frame(3.0);
+    let mut grim_bare = Vec::new();
+    for card in grim.state.canvas.nodes.clone() {
+        let lines = text_lines_under(&grim, &format!("node-{}", card.id.0));
+        let shown = card.inputs.iter().chain(card.outputs.iter()).filter(|socket| lines.iter().any(|(line, _)| line == &socket.name)).count();
+        if shown < card.inputs.len() + card.outputs.len() {
+            grim_bare.push(format!("{} shows {shown} of {} socket names", card.id.0, card.inputs.len() + card.outputs.len()));
+        }
+    }
 
     Ok(json!({
         "dozen": { "landings": landings.len(), "pours": pours.len(), "ribbonCrossings": dozen_crossings, "pourCrossings": pour_overlaps, "lanes": plan.lanes.is_some() },
@@ -3558,6 +3568,7 @@ fn geometry_and_polish(db_path: &Path) -> Result<serde_json::Value, String> {
         "releaseRows": release_rows,
         "loneChip": lone_chip,
         "grimoireAtHalf": grim_issues,
+        "grimoireNamesAt64": grim_bare,
     }))
 }
 fn pull_middle() -> Result<serde_json::Value, String> {
