@@ -2668,6 +2668,124 @@ fn carbon_r4() -> Result<serde_json::Value, String> {
         "singularPlurals": singular_plurals,
     }))
 }
+fn carbon_r4b() -> Result<serde_json::Value, String> {
+    let pulled = |delete: bool| -> Result<serde_json::Value, String> {
+        let mut rt = headless(StudioApp::from_registry());
+        let reply = node_of_kind(&rt.state, "io/send_message").ok_or("no reply")?;
+        let model = NodeId::from(node_of_kind(&rt.state, "ai/generate_text").ok_or("no model")?.as_str());
+        rt.update(move |app, _| {
+            if delete {
+                app.canvas.select(Some(model.clone()));
+                app.delete_selected_node();
+            } else {
+                app.toss(magicklala_canvas::Toss::Aside(model.clone()));
+            }
+        });
+        click(&mut rt, "validate")?;
+        Ok(json!({ "check": rt.state.validation.label(), "contentFed": feeders_of(&rt.state, &reply).iter().any(|feed| feed.ends_with("->content")) }))
+    };
+    let spawned = |kinds: &[&str]| {
+        let mut rt = headless(StudioApp::with_spell(SpellGraph::new("Shout"), registry_specs()));
+        for kind in kinds {
+            let kind = (*kind).to_owned();
+            rt.update(move |app, _| {
+                app.spawn(&kind);
+            });
+        }
+        rt
+    };
+    let mut replace_rt = spawned(&["event/on_message", "io/send_message", "text/replace"]);
+    let replace = NodeId::from(node_of_kind(&replace_rt.state, "text/replace").ok_or("no replace")?.as_str());
+    replace_rt.update(move |app, _| app.toss(magicklala_canvas::Toss::Aside(replace.clone())));
+    click(&mut replace_rt, "validate")?;
+    let replace_reply = node_of_kind(&replace_rt.state, "io/send_message").ok_or("no reply")?;
+    let replace_aside = json!({ "check": replace_rt.state.validation.label(), "replyFeeders": feeders_of(&replace_rt.state, &replace_reply) });
+
+    let mut template_rt = spawned(&["event/on_message", "io/send_message", "text/template"]);
+    click(&mut template_rt, "validate")?;
+    let template = node_of_kind(&template_rt.state, "text/template").ok_or("no template")?;
+    let template_reply = node_of_kind(&template_rt.state, "io/send_message").ok_or("no reply")?;
+    let template_toss = json!({
+        "check": template_rt.state.validation.label(),
+        "role": role_of(&template_rt.state, &template),
+        "templateFed": !feeders_of(&template_rt.state, &template).is_empty(),
+        "replyFeeders": feeders_of(&template_rt.state, &template_reply),
+        "template": template,
+    });
+
+    let mut hollow = StudioApp::from_registry().spell.clone();
+    let reply = hollow.nodes.iter().find(|node| node.kind == "io/send_message").map(|node| node.id.0.clone()).ok_or("no reply")?;
+    hollow.wires.retain(|wire| wire.to_node.0 != reply || wire.to_socket != "content");
+    let mut hexed = runtime_for(hollow);
+    click(&mut hexed, "validate")?;
+    hexed.frame(2.0);
+    let bottle_pill = text_lines_under(&hexed, &format!("node-{reply}")).into_iter().map(|(line, _)| line).find(|line| line.contains("content"));
+
+    let mut brewed = headless(StudioApp::from_registry());
+    click(&mut brewed, "run-spell")?;
+    live_finish(&mut brewed)?;
+    let plan = magicklala_canvas::brew_plan(&brewed.state.canvas, brewed.state.canvas_size());
+    let brewed_reply = NodeId::from(node_of_kind(&brewed.state, "io/send_message").ok_or("no reply")?.as_str());
+    let tint = |color: Option<rune::Color>| color.map(|c| format!("{:.3},{:.3},{:.3}", c.r, c.g, c.b));
+    let tints = json!({
+        "bottle": tint(magicklala_canvas::cauldron::bottle_tint(&brewed.state.canvas, &plan, &brewed_reply)),
+        "potion": tint(magicklala_canvas::cauldron::potion_tint(&brewed.state.canvas, &plan)),
+    });
+
+    let mut clock = 0.0;
+    let mut tick = || {
+        clock += 0.5;
+        clock
+    };
+    let mut slow = slow_runtime(1_500, Duration::from_secs(600));
+    click_at(&mut slow, "run-spell", tick())?;
+    slow.update(|app, _| {
+        app.wait_until(SETTLE, delay_started);
+    });
+    let nodes_before = slow.state.spell.nodes.len();
+    let vars_before = slow.state.spell.variables.len();
+    slow.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("wait")));
+        app.delete_selected_node();
+        app.add_variable();
+        app.undo();
+    });
+    slow.frame(tick());
+    let wait_running = slow.state.canvas.card(&NodeId::from("wait")).is_some_and(|card| card.status == ExecutionStatus::Running);
+    let mid_brew = json!({
+        "nodes": slow.state.spell.nodes.len() as i64 - nodes_before as i64,
+        "vars": slow.state.spell.variables.len() as i64 - vars_before as i64,
+        "stillSimmering": wait_running,
+    });
+    live_finish(&mut slow)?;
+
+    let mut menu = headless(StudioApp::from_registry());
+    let recall = NodeId::from("recall");
+    let open_menu = |rt: &mut Runtime<StudioApp>, id: &NodeId| {
+        let id = id.clone();
+        rt.update(move |app, _| {
+            app.canvas.select(Some(id.clone()));
+            app.canvas.context_menu = Some([420.0, 300.0]);
+        });
+        rt.frame(1.0);
+    };
+    open_menu(&mut menu, &recall);
+    let set_aside = click_at(&mut menu, "context-set-aside", 1.0).is_ok();
+    let after_aside = role_of(&menu.state, "recall");
+    open_menu(&mut menu, &recall);
+    let pour_in = click_at(&mut menu, "context-pour-in", 1.5).is_ok();
+    let after_pour = role_of(&menu.state, "recall");
+
+    Ok(json!({
+        "pullModel": { "aside": pulled(false)?, "deleted": pulled(true)? },
+        "replaceAside": replace_aside,
+        "templateToss": template_toss,
+        "bottlePill": bottle_pill,
+        "tints": tints,
+        "midBrew": mid_brew,
+        "menu": { "setAside": set_aside, "afterAside": after_aside, "pourIn": pour_in, "afterPour": after_pour },
+    }))
+}
 fn pull_middle() -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32| NodeInstance {
         id: NodeId::from(id),
@@ -2899,6 +3017,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("pull-middle") => pull_middle(),
         Some("r4-look") => r4_look(),
         Some("carbon-r4") => carbon_r4(),
+        Some("carbon-r4b") => carbon_r4b(),
         Some("tray-drop") => tray_drop(),
         Some("sol-r3") => sol_r3(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),

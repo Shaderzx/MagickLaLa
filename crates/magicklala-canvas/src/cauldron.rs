@@ -76,7 +76,7 @@ pub fn potion_tint(state: &CanvasState, plan: &BrewPlan) -> Option<Color> {
     brew_tint(&liquids)
 }
 
-fn bottle_tint(state: &CanvasState, plan: &BrewPlan, bottle: &NodeId) -> Option<Color> {
+pub fn bottle_tint(state: &CanvasState, plan: &BrewPlan, bottle: &NodeId) -> Option<Color> {
     let own: Vec<Color> = pouring_cards(state, plan)
         .filter(|(placed, _)| placed.feeds_only.as_ref() == Some(bottle))
         .map(|(_, card)| category_tone(&card.category, state.light).liquid)
