@@ -330,11 +330,10 @@ fn plaque(state: &CanvasState, mood: CauldronMood, plan: &BrewPlan, p: &HearthPa
     )
 }
 
-fn legend(state: &CanvasState, mood: CauldronMood, plan: &BrewPlan, size: (f32, f32), p: &HearthPalette) -> Option<El> {
+fn legend(state: &CanvasState, mood: CauldronMood, size: (f32, f32), p: &HearthPalette) -> Option<El> {
     let untaken = state.has_run() && state.nodes.iter().any(|card| card.status == ExecutionStatus::Idle);
     let hexed = mood == CauldronMood::Hexed;
-    let aside = plan.with_role(BrewRole::Aside).next().is_some();
-    if !untaken && !hexed && !aside {
+    if !untaken && !hexed {
         return None;
     }
     let dash = |color: Color| row().gap(3.0).items_center().child(el().w(6.0).h(2.0).fill(color)).child(el().w(6.0).h(2.0).fill(color));
@@ -355,15 +354,6 @@ fn legend(state: &CanvasState, mood: CauldronMood, plan: &BrewPlan, size: (f32, 
             .child(row().gap(5.0).items_center().child(dash(p.mute)).child(text("Blocked").font(TextStyle::new(11.0, 600.0)).color(p.ink_2)));
     } else if untaken {
         keyed = keyed.child(row().gap(5.0).items_center().child(dash(p.mute)).child(text("Untaken").font(TextStyle::new(11.0, 600.0)).color(p.ink_2)));
-    }
-    if aside {
-        keyed = keyed.child(
-            row()
-                .gap(5.0)
-                .items_center()
-                .child(el().size(12.0, 8.0).radius(3.0).border(1.2, p.rule_2))
-                .child(text("Set aside").font(TextStyle::new(11.0, 600.0)).color(p.ink_2)),
-        );
     }
     Some(keyed)
 }
@@ -557,7 +547,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         );
     }
     board = board.child(mode_switcher(state, &p, lens, size));
-    if let Some(keyed) = legend(state, mood, &plan, size, &p) {
+    if let Some(keyed) = legend(state, mood, size, &p) {
         board = board.child(keyed);
     }
     board
