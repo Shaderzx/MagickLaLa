@@ -2440,6 +2440,124 @@ fn r3_look() -> Result<serde_json::Value, String> {
     }))
 }
 
+fn layout_rect(rt: &Runtime<StudioApp>, key: &str) -> Option<[f32; 4]> {
+    rt.elements().iter().find(|element| element.key.as_deref() == Some(key) && !element.exiting).map(|element| element.rect)
+}
+
+fn rects_touch(a: [f32; 4], b: [f32; 4]) -> bool {
+    a[0] < b[0] + b[2] - 0.5 && b[0] < a[0] + a[2] - 0.5 && a[1] < b[1] + b[3] - 0.5 && b[1] < a[1] + a[3] - 0.5
+}
+
+fn r4_look() -> Result<serde_json::Value, String> {
+    let mut title_misfits = Vec::new();
+    for (name, spell) in [("support", StudioApp::from_registry().spell.clone()), ("dozen", dozen_ingredient_spell()), ("webhook", example("webhook_router.json")?)] {
+        for size in [(960.0_f32, 640.0_f32), (1280.0, 800.0)] {
+            let mut app = StudioApp::with_spell(spell.clone(), registry_specs());
+            app.size = size;
+            let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+            rt.frame(0.0);
+            rt.frame(2.0);
+            let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+            for placed in plan.cards.iter().filter(|card| card.role != magicklala_canvas::BrewRole::Bottle) {
+                let Some(card) = rt.state.canvas.card(&placed.id) else { continue };
+                let Some(header) = layout_rect(&rt, &format!("node-{}-header", card.id.0)) else { continue };
+                let vial = layout_rect(&rt, &format!("vial-{}", card.id.0));
+                let lines: Vec<[f32; 4]> =
+                    text_lines_under(&rt, &format!("node-{}", card.id.0)).into_iter().filter(|(line, _)| line == &card.title).map(|(_, rect)| rect).collect();
+                let fits = !lines.is_empty() && lines.iter().all(|rect| inside(header, *rect) && vial.is_none_or(|vial| !rects_touch(vial, *rect)));
+                if !fits {
+                    title_misfits.push(format!("{name}@{}: {}", size.0, card.title));
+                }
+            }
+        }
+    }
+
+    let names_in = |rt: &Runtime<StudioApp>, ids: &[&str]| -> serde_json::Map<String, serde_json::Value> {
+        ids.iter()
+            .filter_map(|id| {
+                let lines = text_lines_under(rt, &format!("node-{id}"));
+                let line = lines.into_iter().map(|(line, _)| line).find(|line| line.starts_with("Send"))?;
+                Some(((*id).to_owned(), json!(line)))
+            })
+            .collect()
+    };
+    let bottles = ["order_reply", "support_reply", "ignored_reply"];
+    let mut hook = runtime_for(example("webhook_router.json")?);
+    hook.update(|app, _| app.run_payload = json!({ "method": "POST", "path": "/hooks/router", "body": { "type": "order", "id": "42" } }));
+    click(&mut hook, "run-spell")?;
+    live_finish(&mut hook)?;
+    hook.frame(4.0);
+    let cauldron_names = names_in(&hook, &bottles);
+    let trace_names: serde_json::Map<String, serde_json::Value> = hook
+        .state
+        .trace
+        .iter()
+        .filter(|line| line.kind == "NodeFinished")
+        .filter_map(|line| {
+            let id = line.node.as_ref()?.0.clone();
+            bottles.contains(&id.as_str()).then(|| (id, json!(line.detail.rsplit_once(" · ").map_or(line.detail.as_str(), |(name, _)| name))))
+        })
+        .collect();
+    click(&mut hook, "mode-grimoire")?;
+    hook.frame(5.0);
+    hook.frame(7.0);
+    let grimoire_names = names_in(&hook, &bottles);
+
+    let place =
+        |id: &str, kind: &str, x: f32| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position: [x, 0.0], config: serde_json::Value::Null };
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let mut twins = SpellGraph::new("Twin Replies");
+    twins.nodes = vec![place("trigger", "event/on_message", 0.0), place("first_reply", "io/send_message", 1.0), place("second_reply", "io/send_message", 2.0)];
+    twins.wires = vec![
+        wire("w1", ("trigger", "out"), ("first_reply", "in")),
+        wire("w2", ("trigger", "content"), ("first_reply", "content")),
+        wire("w3", ("trigger", "out"), ("second_reply", "in")),
+        wire("w4", ("trigger", "content"), ("second_reply", "content")),
+    ];
+    let mut twin_rt = runtime_for(twins);
+    twin_rt.frame(1.0);
+    let twin_names = names_in(&twin_rt, &["first_reply", "second_reply"]);
+
+    let mut brewed = headless(StudioApp::from_registry());
+    click(&mut brewed, "run-spell")?;
+    live_finish(&mut brewed)?;
+    brewed.frame(4.0);
+    let bobbin = layout_rect(&brewed, "trace-bobbin").ok_or("no log icon")?;
+    let scroll = layout_rect(&brewed, "trace-scroll").ok_or("no log chips")?;
+    let log_gap = scroll[1] - (bobbin[1] + bobbin[3]);
+    let idle = headless(StudioApp::from_registry());
+    let idle_bobbin = layout_rect(&idle, "trace-bobbin").ok_or("no idle log icon")?;
+    let log_icons = [[bobbin[2], bobbin[3]], [idle_bobbin[2], idle_bobbin[3]]];
+
+    let mut empty = headless(StudioApp::with_spell(SpellGraph::new("New Potion"), registry_specs()));
+    empty.frame(1.0);
+    let pot = layout_rect(&empty, "cauldron-center").ok_or("no pot")?;
+    let overlay = layout_rect(&empty, "empty-canvas").ok_or("no empty overlay")?;
+    let empty_heading = text_lines_under(&empty, "empty-canvas").into_iter().find(|(line, _)| line == "Start a new potion").map(|(_, rect)| rect).ok_or("no heading")?;
+    let button = layout_rect(&empty, "empty-add-trigger").ok_or("no add button")?;
+    let centre = |rect: [f32; 4]| rect[0] + rect[2] * 0.5;
+
+    Ok(json!({
+        "titleMisfits": title_misfits,
+        "cauldronNames": cauldron_names,
+        "grimoireNames": grimoire_names,
+        "traceNames": trace_names,
+        "twinNames": twin_names,
+        "logGap": log_gap,
+        "logIcons": log_icons,
+        "empty": {
+            "headingOffset": (centre(empty_heading) - centre(pot)).abs().round(),
+            "buttonOffset": (centre(button) - centre(pot)).abs().round(),
+            "belowPot": (overlay[1] - (pot[1] + pot[3])).round(),
+        },
+    }))
+}
 fn pull_middle() -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32| NodeInstance {
         id: NodeId::from(id),
@@ -2669,6 +2787,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("pour-shape") => pour_shape(),
         Some("r3-look") => r3_look(),
         Some("pull-middle") => pull_middle(),
+        Some("r4-look") => r4_look(),
         Some("tray-drop") => tray_drop(),
         Some("sol-r3") => sol_r3(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),

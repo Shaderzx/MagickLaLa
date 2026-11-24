@@ -1113,3 +1113,19 @@ test('Dropping a pantry ingredient on the set-aside tray adds it set aside with 
 
   expect(report).toEqual({ added: 1, role: 'Aside', wires: 0 });
 });
+
+test('Every step keeps one name and every card keeps its words: ingredient titles never run under their vial at 960 by 640 or 1280 by 800, the cauldron, Grimoire and Cauldron Log name each branch bottle by its route, look-alike bottles without routes are numbered, the log icon sits clear of the first step, and the empty pot has its heading and button centred beneath it', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['r4-look']);
+
+  expect(report.titleMisfits).toEqual([]);
+  const routed = { order_reply: 'Send · orders', support_reply: 'Send · support', ignored_reply: 'Send · default' };
+  expect(report.cauldronNames).toEqual(routed);
+  expect(report.grimoireNames).toEqual(routed);
+  expect(report.traceNames).toEqual({ order_reply: 'Send · orders' });
+  expect(report.twinNames).toEqual({ first_reply: 'Send · 1', second_reply: 'Send · 2' });
+  expect(report.logGap).toBeGreaterThanOrEqual(4);
+  expect(report.logIcons).toEqual([[34, 28], [34, 28]]);
+  expect(report.empty.headingOffset).toBeLessThanOrEqual(2);
+  expect(report.empty.buttonOffset).toBeLessThanOrEqual(2);
+  expect(report.empty.belowPot).toBeGreaterThanOrEqual(24);
+});
