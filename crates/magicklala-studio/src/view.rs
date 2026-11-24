@@ -443,12 +443,12 @@ fn toolbar(app: &StudioApp, t: &HearthPalette) -> El {
     };
     let mut left = row()
         .key("toolbar-left")
-        .gap(if compact { 7.0 } else { 11.0 })
+        .gap(if compact { 5.0 } else { 11.0 })
         .items_center()
         .child(brand)
         .child(divider())
         .child(row().min_w(0.0).shrink().child(heading(&app.spell.name, 14.5, 750.0, t.ink).truncate()));
-    if !empty_graph && app.canvas.mode == WorkbenchMode::Grimoire {
+    if !empty_graph && !compact && app.canvas.mode == WorkbenchMode::Grimoire {
         let stats_box =
             row().h(24.0).px(8.5).radius(12.0).continuous_corners().items_center().fill(t.wash_2).border(1.0, t.rule).child(label(stats, 11.0, 550.0, t.ink_2));
         left = left.child(stats_box);
@@ -1229,12 +1229,15 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
         } else {
             text(&variable.name).font(font(12.0, 700.0).mono()).color(t.ink).truncate()
         };
-        let name_col = col().key(format!("var-label-{idx}")).grow(1.0).min_w(0.0).gap(1.5).child(name_widget).child(label(
-            bound_hint,
-            11.0,
-            600.0,
-            if bound_active { if t.light { t.broth_deep } else { t.broth_foam } } else { t.mute },
-        ));
+        let name_problem = app.var_name_error(idx);
+        let name_col = col()
+            .key(format!("var-label-{idx}"))
+            .grow(1.0)
+            .min_w(0.0)
+            .gap(1.5)
+            .child(name_widget)
+            .children(name_problem.map(|problem| row().key(format!("var-name-error-{idx}")).child(label(problem, 10.5, 650.0, t.hex))))
+            .child(label(bound_hint, 11.0, 600.0, if bound_active { if t.light { t.broth_deep } else { t.broth_foam } } else { t.mute }));
         let controls = row()
             .gap(6.0)
             .items_center()
@@ -1399,7 +1402,9 @@ fn node_diagnostics(app: &StudioApp, card: &magicklala_canvas::NodeCardModel) ->
         found.extend(app.hex_findings.iter().filter(|finding| finding.node.as_ref() == Some(&card.id)).map(|finding| finding.readable.clone()));
     }
     if found.is_empty() && card.status == ExecutionStatus::Failed {
-        found.push(format!("{} failed during the brew.", app.canvas.display_title(&card.id)));
+        let own = app.trace.iter().rev().find(|line| line.kind == "NodeFailed" && line.node.as_ref() == Some(&card.id)).map(|line| line.detail.clone());
+        let elsewhere = app.trace.iter().find(|line| line.kind == "NodeFailed").map(|line| format!("Stopped when {}", line.detail));
+        found.push(own.or(elsewhere).unwrap_or_else(|| format!("{} failed during the brew.", app.canvas.display_title(&card.id))));
     }
     found
 }
@@ -1490,22 +1495,31 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
                     .gap(8.0)
                     .items_center()
                     .child(
-                        row().size(18.0, 18.0).radius(6.0).fill(if checked_only { t.hex } else { t.primary_bg }).items_center().justify_center().child(figure(
-                            (index + 1).to_string(),
-                            10.0,
-                            750.0,
-                            if checked_only { t.card } else { t.primary_ink },
-                        )),
+                        row()
+                            .size(18.0, 18.0)
+                            .radius(6.0)
+                            .fill(if checked_only || line.status == ExecutionStatus::Failed { t.hex } else { t.primary_bg })
+                            .items_center()
+                            .justify_center()
+                            .child(figure(
+                                (index + 1).to_string(),
+                                10.0,
+                                750.0,
+                                if checked_only || line.status == ExecutionStatus::Failed { t.card } else { t.primary_ink },
+                            )),
                     )
                     .child(if checked_only {
                         label(&line.detail, 12.0, 550.0, t.ink).wrap()
                     } else {
                         let (name, took) = step_name_and_time(app, line);
+                        let cause =
+                            (line.kind == "NodeFailed").then(|| line.detail.split_once(": ").map_or(line.detail.as_str(), |(_, cause)| cause).to_owned());
                         col()
                             .grow(1.0)
                             .min_w(0.0)
                             .gap(1.0)
                             .child(label(name, 12.0, 600.0, t.ink).wrap())
+                            .children(cause.map(|cause| label(cause, 11.0, 600.0, t.hex).wrap()))
                             .children(took.map(|took| text(took).font(font(10.5, 550.0).mono().features("'tnum' 1")).color(t.mute)))
                     }),
             )
@@ -1586,7 +1600,7 @@ fn recipe_overview(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             .fill(t.card)
             .border(1.0, t.rule)
             .child(canvas(mini_vial_icon(&card.category, light, 16.0)).size(16.0, 16.0))
-            .child(label(app.canvas.display_title(&card.id), 12.0, 600.0, t.ink).wrap().grow(1.0).min_w(0.0))
+            .child(label(app.canvas.display_title(&card.id), 12.0, 600.0, t.ink).wrap_anywhere().grow(1.0).min_w(0.0))
             .children(word.map(|word| label(word, 10.5, 700.0, ink)))
             .on_press(move |app: &mut StudioApp| app.canvas.select(Some(id.clone())))
     };
@@ -1763,9 +1777,10 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     let mut column = col().key("inspector-card").gap(if compact { 6.0 } else { 9.0 }).pt(if compact { 8.0 } else { 10.0 }).child(card_header);
     if has_error {
         let flagged_socket = card.inputs.iter().find(|socket| socket.flagged).map(|socket| socket.name.clone());
+        let mistyped = card.inputs.iter().any(|socket| socket.flagged && socket.mistyped);
         let headline = match &flagged_socket {
-            Some(socket) => format!("{} needs \"{socket}\"", app.canvas.display_title(&card.id)),
-            None => diagnostics.first().cloned().unwrap_or_default(),
+            Some(socket) if !mistyped => format!("{} needs \"{socket}\"", app.canvas.display_title(&card.id)),
+            _ => diagnostics.first().cloned().unwrap_or_default(),
         };
         let mend = app.hex_mend_source(&card.id);
         let fix_button = match (&mend, flagged_socket.as_deref()) {
@@ -1806,7 +1821,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         column = column.children(prompt_block.take());
     }
     let mut column = column.child(inspector_section_heading("Sockets", t)).child(sockets);
-    if matches!(card.kind.as_str(), "ai/generate_text" | "ai/stream_text") {
+    if matches!(card.kind.as_str(), "ai/generate_text" | "ai/stream_text" | "ai/structured_json") {
         let temp_value = app.selected_temperature().to_string();
         let model_name = app.selected_model_name();
         let narrow_inspector = app.compact_toolbar();

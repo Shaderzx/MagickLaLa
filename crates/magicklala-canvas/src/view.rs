@@ -479,8 +479,8 @@ pub(crate) fn branch_bottle_view<S: 'static>(
         .border(if taken || card.selected { 1.6 } else { 1.1 }, card_border)
         .shadow(2.0, 8.0, if untaken { Color::TRANSPARENT } else { p.shadow_card })
         .child(match route_key {
-            Some(key) => row().key(key).w_full().child(text(title).font(TextStyle::new(12.5, 750.0)).color(title_col).wrap()),
-            None => row().w_full().child(text(title).font(TextStyle::new(12.5, 750.0)).color(title_col).wrap()),
+            Some(key) => col().key(key).w_full().min_w(0.0).child(text(title).font(TextStyle::new(12.5, 750.0)).color(title_col).wrap_anywhere().max_lines(2)),
+            None => col().w_full().min_w(0.0).child(text(title).font(TextStyle::new(12.5, 750.0)).color(title_col).wrap_anywhere().max_lines(2)),
         })
         .children((!terse).then(|| text(&card.kind).font(TextStyle::new(11.0, 500.0).mono()).color(sub_col).truncate()));
     let mut tag_wrap = el().w_full().child(tag_inner).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(pill));
@@ -510,9 +510,10 @@ pub(crate) fn branch_bottle_view<S: 'static>(
 pub fn branch_bottle_mood(state: &CanvasState, card: &NodeCardModel) -> CauldronMood {
     let taken = card.status == ExecutionStatus::Succeeded;
     let simmering = card.status == ExecutionStatus::Running;
+    let hexed = card.status == ExecutionStatus::Failed || card.inputs.iter().any(|socket| socket.flagged);
     if taken {
         CauldronMood::Brewed
-    } else if state.has_run() && !simmering && state.brewed_clean() {
+    } else if (state.has_run() && !simmering && state.brewed_clean()) || hexed || cauldron_mood(state) == CauldronMood::Hexed {
         CauldronMood::Hexed
     } else {
         CauldronMood::Ready
@@ -1059,7 +1060,42 @@ fn socket_port<S: 'static>(
         .border((1.6 * zoom).max(1.0), border_color)
         .absolute((socket.offset[0] - size / 2.0) * zoom, (socket.offset[1] - size / 2.0) * zoom);
     if !output {
-        return port;
+        if !wired {
+            return port;
+        }
+        let into = SocketRef::new(card.id.clone(), socket.name.clone());
+        return port.on_drag(move |s: &mut S, drag, tx| {
+            tx.instant();
+            let canvas = lens(s);
+            if canvas.running_brew {
+                return;
+            }
+            match drag.phase {
+                Phase::Down => {
+                    let Some(held) = canvas.wires.iter().find(|wire| wire.to_node == into.node && wire.to_socket == into.socket).cloned() else { return };
+                    canvas.wires.retain(|wire| wire.id != held.id);
+                    let from = SocketRef::new(held.from_node.clone(), held.from_socket.clone());
+                    let anchor = canvas.card(&from.node).and_then(|card| card.socket_world(&from.socket, true)).map_or(held.from, |(point, _)| point);
+                    let cursor = canvas.card(&into.node).and_then(|card| card.socket_world(&into.socket, false)).map_or(anchor, |(point, _)| point);
+                    canvas.drag = DragState::ConnectingWire { from, ty: held.ty, anchor: cursor, cursor };
+                }
+                Phase::Move => {
+                    let zoom = canvas.camera.zoom;
+                    if let DragState::ConnectingWire { anchor, cursor, .. } = &mut canvas.drag {
+                        *cursor = [anchor[0] + drag.dx / zoom, anchor[1] + drag.dy / zoom];
+                    }
+                }
+                _ => {
+                    if let DragState::ConnectingWire { from, cursor, .. } = canvas.drag.clone()
+                        && !drag.cancelled()
+                        && let Some(target) = canvas.input_socket_at(cursor)
+                    {
+                        canvas.last_connect_error = canvas.connect_sockets(&from, &target).err();
+                    }
+                    canvas.drag = DragState::Idle;
+                }
+            }
+        });
     }
     let from = SocketRef::new(card.id.clone(), socket.name.clone());
     let ty = socket.ty;

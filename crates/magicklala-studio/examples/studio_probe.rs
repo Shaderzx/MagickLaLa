@@ -3579,10 +3579,18 @@ fn shot(args: &[String]) -> Result<serde_json::Value, String> {
     app.size = size;
     let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
     rt.frame(0.0);
-    if args.get(5).is_some_and(|action| action == "brew") {
+    let asked = |action: &str| args.iter().skip(5).any(|given| given == action);
+    if asked("dark") {
+        rt.update(|app, _| app.toggle_theme());
+    }
+    if asked("brew") {
         click(&mut rt, "run-spell")?;
         live_finish(&mut rt)?;
         rt.frame(3.0);
+    }
+    if asked("grimoire") {
+        click(&mut rt, "mode-grimoire")?;
+        rt.frame(4.0);
     }
     let app = std::mem::replace(&mut rt.state, StudioApp::from_registry());
     render_headless_snapshot_state(&out, app).map_err(|error| error.to_string())?;
@@ -4662,7 +4670,6 @@ fn segments_cross(a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]) -> bool {
 }
 
 fn clear_signals() -> Result<serde_json::Value, String> {
-    let mut text = magicklala_studio::studio_text_system();
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),
@@ -4687,7 +4694,7 @@ fn clear_signals() -> Result<serde_json::Value, String> {
 
     let mut research = open(example("parallel_research.json")?, (1280.0, 800.0));
     run_once(&mut research)?;
-    let failed = research.state.canvas.nodes.iter().find(|card| card.status == ExecutionStatus::Failed).map(|card| card.id.clone()).ok_or("nothing failed")?;
+    let failed = research.state.trace.iter().find(|line| line.kind == "NodeFailed").and_then(|line| line.node.clone()).ok_or("nothing failed")?;
     let lit: Vec<String> = research
         .state
         .canvas
@@ -4710,7 +4717,14 @@ fn clear_signals() -> Result<serde_json::Value, String> {
     });
     research.frame(2.0);
     let trace_words = words(&research, "inspector-scroll");
-    let failure = json!({ "headlineHasCause": headline.contains("gateway"), "traceHasCause": trace_words.contains("gateway"), "dimmedFinishedPours": lit });
+    let cause = research
+        .state
+        .trace
+        .iter()
+        .find(|line| line.kind == "NodeFailed" && line.node.as_ref() == Some(&failed))
+        .map(|line| line.detail.split_once(": ").map_or(line.detail.clone(), |(_, cause)| cause.to_owned()))
+        .unwrap_or_default();
+    let failure = json!({ "headlineHasCause": !cause.is_empty() && headline.contains(&cause), "traceHasCause": !cause.is_empty() && trace_words.contains(&cause), "dimmedFinishedPours": lit });
 
     let mut tight = open(example("parallel_research.json")?, (960.0, 640.0));
     run_once(&mut tight)?;
@@ -4725,14 +4739,16 @@ fn clear_signals() -> Result<serde_json::Value, String> {
     let tile = layout_rect(&tight, "model-picker").ok_or("no model tile")?;
     let tile_whole = inside(scroll, tile) || tile[1] >= scroll[1] + scroll[3] - 0.5;
 
-    let mut grim = open(StudioApp::from_registry().spell.clone(), (960.0, 640.0));
-    click(&mut grim, "mode-grimoire")?;
-    grim.frame(1.0);
-    let name = grim.state.spell.name.clone();
-    let title_whole = text_lines_under(&grim, "toolbar-left").into_iter().find(|(line, _)| line == &name).is_some_and(|(line, rect)| {
-        let (natural, _) = text.measure(&line, rune::TextStyle::new(14.5, 750.0), 1.0);
-        natural <= rect[2] + 2.0
-    });
+    let title_width = |size: (f32, f32)| -> Result<Option<f32>, String> {
+        let mut grim = open(StudioApp::from_registry().spell.clone(), size);
+        click(&mut grim, "mode-grimoire")?;
+        grim.frame(1.0);
+        let name = grim.state.spell.name.clone();
+        Ok(text_lines_under(&grim, "toolbar-left").into_iter().find(|(line, _)| line == &name).map(|(_, rect)| rect[2]))
+    };
+    let roomy_title = title_width((1600.0, 900.0))?;
+    let compact_title = title_width((960.0, 640.0))?;
+    let title_whole = matches!((roomy_title, compact_title), (Some(full), Some(shown)) if shown + 0.5 >= full);
 
     let mut mismatch = SpellGraph::new("Mismatched Agent");
     mismatch.nodes = vec![place("tick", "event/on_tick", 0.0, serde_json::Value::Null), place("say", "io/send_message", 1.0, serde_json::Value::Null)];

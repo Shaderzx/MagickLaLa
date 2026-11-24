@@ -1144,6 +1144,17 @@ impl StudioApp {
         self.var_problems = self.variable_errors();
     }
 
+    pub fn var_name_error(&self, idx: usize) -> Option<&'static str> {
+        let name = self.var_name_edits.get(idx)?.text.trim();
+        if name.is_empty() {
+            Some("Needs a name")
+        } else if self.var_name_edits[..idx].iter().any(|edit| edit.text.trim() == name) {
+            Some("Duplicate name")
+        } else {
+            None
+        }
+    }
+
     pub fn var_default_error(&self, idx: usize) -> Option<&'static str> {
         let variable = self.spell.variables.get(idx)?;
         let edit = self.var_default_edits.get(idx)?;
@@ -1580,12 +1591,6 @@ impl StudioApp {
             }
             if let Some(map) = entry.as_object_mut() {
                 map.insert("temperature".to_owned(), serde_json::json!(next));
-            }
-        }
-        if let Some(index) = self.spell.variables.iter().position(|v| v.name == "temperature") {
-            self.spell.variables[index].default = Some(Value::Float(next));
-            if let Some(edit) = self.var_default_edits.get_mut(index) {
-                *edit = TextEdit::new(next.to_string());
             }
         }
         self.sync_spell();
@@ -3362,7 +3367,8 @@ fn hex_plaque(findings: &[HexFinding], canvas: &CanvasState) -> String {
         Some(HexFinding { socket: Some(socket), mistyped: true, .. }) => format!("Hexed · wrong type \"{socket}\""),
         Some(HexFinding { socket: Some(socket), .. }) => format!("Hexed · missing \"{socket}\""),
         Some(HexFinding { node: Some(node), .. }) => format!("Hexed · {}", title_of(node).unwrap_or_else(|| node.0.clone())),
-        _ => "Hexed".to_owned(),
+        Some(HexFinding { node: None, readable, .. }) => format!("Hexed · {readable}"),
+        None => "Hexed".to_owned(),
     }
 }
 

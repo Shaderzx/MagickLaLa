@@ -816,7 +816,7 @@ pub fn ladle_ends(width: f32, height: f32, stir: f32) -> ([f32; 2], [f32; 2]) {
     (base, tip)
 }
 
-pub fn hero_cauldron_shape(mood: CauldronMood, light: bool, width: f32, height: f32, tint: Option<Color>, stir: f32) -> Shape {
+pub fn hero_cauldron_shape(mood: CauldronMood, light: bool, width: f32, height: f32, tint: Option<Color>, ladle: Option<f32>) -> Shape {
     let p = HearthPalette::for_theme(light);
     let (deep, mid, foam, spark) = tinted_broth(mood, &p, tint);
     let cx = width * 0.5;
@@ -929,13 +929,15 @@ pub fn hero_cauldron_shape(mood: CauldronMood, light: bool, width: f32, height: 
     s = fill_star4(s, cx + 7.5 * u, cy + 13.0 * u, 5.2 * u, 1.6 * u, p.gold_hi);
 
     let rim_y = cy - 30.0 * u;
-    let (base, tip) = ladle_ends(width, height, stir);
-    let turn = |dx: f32, dy: f32| [base[0] + (dx * stir.cos() - dy * stir.sin()) * u, base[1] + (dx * stir.sin() + dy * stir.cos()) * u];
-    let knob = turn(18.5, -40.5);
-    let ladle_stem = Path::new().move_to(base).line_to(tip);
-    s = s.stroke_path(&ladle_stem, 9.0 * u, LineCap::Round, p.wood);
-    s = s.stroke_path(&ladle_stem, 3.0 * u, LineCap::Round, p.wood_hi);
-    s = fill_star4(s, knob[0], knob[1], 2.5 * u, 0.9 * u, p.iron);
+    if let Some(stir) = ladle {
+        let (base, tip) = ladle_ends(width, height, stir);
+        let turn = |dx: f32, dy: f32| [base[0] + (dx * stir.cos() - dy * stir.sin()) * u, base[1] + (dx * stir.sin() + dy * stir.cos()) * u];
+        let knob = turn(18.5, -40.5);
+        let ladle_stem = Path::new().move_to(base).line_to(tip);
+        s = s.stroke_path(&ladle_stem, 9.0 * u, LineCap::Round, p.wood);
+        s = s.stroke_path(&ladle_stem, 3.0 * u, LineCap::Round, p.wood_hi);
+        s = fill_star4(s, knob[0], knob[1], 2.5 * u, 0.9 * u, p.iron);
+    }
 
     s = fill_ellipse(s, cx, rim_y, 74.0 * u, 20.5 * u, p.iron_rim);
     s = fill_ellipse(s, cx, rim_y - 1.5 * u, 71.0 * u, 18.2 * u, p.iron_hi);

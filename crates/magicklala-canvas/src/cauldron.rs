@@ -93,11 +93,25 @@ fn over_route(from: [f32; 2], to: [f32; 2], ceiling: f32, climb_x: f32, s: f32) 
     points
 }
 
+fn rise_rank(plan: &BrewPlan, own: Option<&NodeId>) -> usize {
+    let Some(mine) = own.and_then(|id| plan.card(id)) else { return 0 };
+    let stacked = plan.lanes.is_some();
+    plan.with_role(BrewRole::Bottle)
+        .filter(|other| other.id != mine.id)
+        .filter(|other| {
+            if stacked {
+                other.rect[1] < mine.rect[1] - 0.5 || ((other.rect[1] - mine.rect[1]).abs() <= 0.5 && other.rect[0] > mine.rect[0])
+            } else {
+                other.rect[0] > mine.rect[0]
+            }
+        })
+        .count()
+}
+
 fn ribbon_route(plan: &BrewPlan, to: [f32; 2], own: Option<&NodeId>) -> Vec<[f32; 2]> {
     let tap = spout_point(plan);
     let s = plan.scale.max(0.4);
-    let nest = own.and_then(|id| plan.card(id)).map_or(0, |mine| plan.with_role(BrewRole::Bottle).filter(|other| other.rect[0] > mine.rect[0]).count());
-    let lip_steps = 4 + nest * 4;
+    let lip_steps = 4 + rise_rank(plan, own) * 4;
     let lip: Vec<[f32; 2]> = (0..lip_steps).map(|step| [tap[0] + step as f32 * 4.0 * s, tap[1]]).collect();
     let mut route = ribbon_course(plan, [tap[0] + lip_steps as f32 * 4.0 * s, tap[1]], to, own, s);
     route.splice(0..0, lip);
@@ -124,7 +138,7 @@ fn ribbon_course(plan: &BrewPlan, from: [f32; 2], to: [f32; 2], own: Option<&Nod
     let direct = cubic_samples(from, [from[0] + dx * 0.4, from[1]], [to[0], to[1] - 16.0 * s], to, 44);
     let blocking: Vec<[f32; 4]> = plan.cards.iter().filter(|card| Some(&card.id) != own).map(|card| card.rect).filter(|r| inside(*r, &direct) > 0).collect();
     let lanes_floor = plan.lanes.map_or(f32::MIN, |[shelf_bottom, band]| shelf_bottom + band + 6.0 * s);
-    let nest = own.and_then(|id| plan.card(id)).map_or(0, |mine| plan.with_role(BrewRole::Bottle).filter(|other| other.rect[0] > mine.rect[0]).count()) as f32;
+    let nest = rise_rank(plan, own) as f32;
     let lowest_top = blocking.iter().map(|rect| rect[1]).fold(to[1] - 16.0 * s, f32::min);
     let ceiling = (lowest_top - 6.0 * s).max(lanes_floor);
     let shelf_left = plan.with_role(BrewRole::Bottle).map(|card| card.rect[0]).fold(to[0], f32::min);
@@ -191,13 +205,37 @@ pub fn pour_blocked(state: &CanvasState, id: &NodeId) -> bool {
 
 fn blocked_in(card: &NodeCardModel, mood: CauldronMood) -> bool {
     let hexed = card.status == ExecutionStatus::Failed || card.inputs.iter().any(|socket| socket.flagged);
-    mood == CauldronMood::Hexed && !hexed
+    let poured = matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Running);
+    mood == CauldronMood::Hexed && !hexed && !poured
+}
+
+fn ladle_at(plan: &BrewPlan, stir: f32) -> ([f32; 2], [f32; 2]) {
+    let pot = plan.pot;
+    let (base, tip) = crate::hearth::ladle_ends(pot[2], pot[3], stir);
+    ([pot[0] + base[0], pot[1] + base[1]], [pot[0] + tip[0], pot[1] + tip[1]])
+}
+
+fn crosses(a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]) -> bool {
+    let turn = |p: [f32; 2], q: [f32; 2], r: [f32; 2]| (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+    let (d1, d2, d3, d4) = (turn(c, d, a), turn(c, d, b), turn(a, b, c), turn(a, b, d));
+    d1 * d2 < 0.0 && d3 * d4 < 0.0
+}
+
+pub fn ladle_stir(state: &CanvasState, plan: &BrewPlan) -> Option<f32> {
+    let pours = pour_paths(state, plan);
+    let start = state.toss_count as usize % STIRS.len();
+    let leanings = STIRS.iter().cycle().skip(start).take(STIRS.len()).copied().chain([0.9, 1.25, -0.9, -1.25]);
+    for stir in leanings {
+        let (a, b) = ladle_at(plan, stir);
+        if !pours.iter().any(|(_, points)| points.windows(2).any(|pair| crosses(pair[0], pair[1], a, b))) {
+            return Some(stir);
+        }
+    }
+    None
 }
 
 pub fn ladle_line(state: &CanvasState, plan: &BrewPlan) -> Option<([f32; 2], [f32; 2])> {
-    let pot = plan.pot;
-    let (base, tip) = crate::hearth::ladle_ends(pot[2], pot[3], STIRS[state.toss_count as usize % STIRS.len()]);
-    Some(([pot[0] + base[0], pot[1] + base[1]], [pot[0] + tip[0], pot[1] + tip[1]]))
+    ladle_stir(state, plan).map(|stir| ladle_at(plan, stir))
 }
 
 fn stream_for(state: &CanvasState, card: &NodeCardModel, mood: CauldronMood, p: &HearthPalette, arch_lift: f32) -> StreamStyle {
@@ -636,7 +674,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         .size(pot[2], pot[3])
         .absolute(pot[0], pot[1])
         .child(
-            canvas(hero_cauldron_shape(mood, state.light, pot[2], pot[3], potion_tint(state, &plan), STIRS[state.toss_count as usize % STIRS.len()]))
+            canvas(hero_cauldron_shape(mood, state.light, pot[2], pot[3], potion_tint(state, &plan), ladle_stir(state, &plan)))
                 .key("hero-cauldron")
                 .size(pot[2], pot[3]),
         )
