@@ -1913,6 +1913,34 @@ fn switch_mid_brew() -> Result<serde_json::Value, String> {
     }))
 }
 
+fn variable_defaults() -> Result<serde_json::Value, String> {
+    use magicklala_graph::{Value, VariableDef};
+    let mut spell = echo_spell();
+    spell.variables = vec![
+        VariableDef { name: "nickname".to_owned(), ty: SocketType::String, default: None, exposed: true },
+        VariableDef { name: "blank".to_owned(), ty: SocketType::String, default: Some(Value::String(String::new())), exposed: true },
+        VariableDef { name: "settings".to_owned(), ty: SocketType::Json, default: Some(Value::Json(json!({ "tone": "warm", "depth": 2 }))), exposed: true },
+        VariableDef { name: "retries".to_owned(), ty: SocketType::Int, default: Some(Value::Int(3)), exposed: true },
+    ];
+    let original = serde_json::to_value(&spell.variables).map_err(|error| error.to_string())?;
+    let mut rt = runtime_for(spell);
+    click(&mut rt, "tab-variables")?;
+    rt.update(|app, _| {
+        app.sync_spell();
+    });
+    rt.frame(0.0);
+    let opened = serde_json::to_value(&rt.state.spell.variables).map_err(|error| error.to_string())?;
+    let dirty = rt.state.dirty;
+    rt.update(|app, _| {
+        if let Some(edit) = app.var_default_edits.get_mut(2) {
+            *edit = rune::TextEdit::new(r#"{"tone":"brisk"}"#);
+        }
+        app.sync_spell();
+    });
+    let edited = serde_json::to_value(&rt.state.spell.variables).map_err(|error| error.to_string())?;
+    Ok(json!({ "original": original, "opened": opened, "dirtyAfterOpen": dirty, "edited": edited }))
+}
+
 fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
         Some("surfaces") => capture_surfaces(Path::new(args.get(1).ok_or("missing output directory")?)),
@@ -1922,6 +1950,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("plain-words") => plain_words(),
         Some("brew-truth") => brew_truth(),
         Some("switch-mid-brew") => switch_mid_brew(),
+        Some("variable-defaults") => variable_defaults(),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-ref-edit") => subgraph_ref_edit(Path::new(args.get(1).ok_or("missing database path")?)),

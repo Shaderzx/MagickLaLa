@@ -948,3 +948,12 @@ test('Opening another potion while one is still brewing stops the old brew: the 
   expect(report.activeWires).toBe(0);
   expect(report.backgroundStopped).toBe(true);
 });
+
+test('Opening a spell and looking at its Variables never rewrites them: an unset text default stays unset, an empty one stays empty, a JSON default stays JSON, nothing is marked edited, and typing new JSON saves JSON', { timeout: 900_000 }, async () => {
+  const { original, opened, dirtyAfterOpen, edited } = await studioProbe(['variable-defaults']);
+
+  expect(opened).toEqual(original);
+  expect(dirtyAfterOpen).toBe(false);
+  expect(edited[2].default).toEqual({ type: 'json', value: { tone: 'brisk' } });
+  expect(edited.filter((_: unknown, index: number) => index !== 2)).toEqual(original.filter((_: unknown, index: number) => index !== 2));
+});
