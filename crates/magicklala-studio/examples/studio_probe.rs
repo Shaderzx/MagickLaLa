@@ -1962,6 +1962,94 @@ fn variable_defaults() -> Result<serde_json::Value, String> {
     Ok(json!({ "original": original, "opened": opened, "dirtyAfterOpen": dirty, "edited": edited }))
 }
 
+fn publish_plaque(db_path: &Path) -> Result<serde_json::Value, String> {
+    let config = StudioConfig { db_path: Some(db_path.to_path_buf()), ..StudioConfig::default() };
+    let mut app = StudioApp::open(&config).map_err(|error| error.to_string())?;
+    app.load_graph(tasting_spell());
+    let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    click(&mut rt, "publish")?;
+    let published = texts_under(&mut rt, "cauldron-plaque");
+    click(&mut rt, "run-spell")?;
+    live_finish(&mut rt)?;
+    let brewed = json!({ "plaque": texts_under(&mut rt, "cauldron-plaque"), "pill": texts_under(&mut rt, "validation-pill") });
+    let canvas_rect = rt.presented("canvas").map(|(rect, _)| rect).ok_or("no canvas")?;
+    let start = rt.find("node-echo-header").ok_or("no echo vial")?;
+    drag(&mut rt, "node-echo-header", (canvas_rect[0] + 40.0 - start.0, canvas_rect[1] + canvas_rect[3] - 30.0 - start.1))?;
+    let edited = json!({
+        "plaque": texts_under(&mut rt, "cauldron-plaque"),
+        "pill": texts_under(&mut rt, "validation-pill"),
+        "litWires": rt.state.canvas.wires.iter().filter(|wire| wire.active).count(),
+        "markedCards": rt.state.canvas.nodes.iter().filter(|card| card.status != ExecutionStatus::Idle || card.duration_ms.is_some()).count(),
+    });
+    Ok(json!({ "published": published, "brewed": brewed, "edited": edited }))
+}
+
+fn wires_of(app: &StudioApp, id: &str) -> usize {
+    app.spell.wires.iter().filter(|wire| wire.from_node.0 == id || wire.to_node.0 == id).count()
+}
+
+fn role_of(app: &StudioApp, id: &str) -> Option<String> {
+    magicklala_canvas::brew_plan(&app.canvas, app.canvas_size()).card(&NodeId::from(id)).map(|card| format!("{:?}", card.role))
+}
+
+fn toss_safety() -> Result<serde_json::Value, String> {
+    let mut rt = headless(StudioApp::from_registry());
+    let header = "node-search-header";
+    let before = wires_of(&rt.state, "search");
+    drag(&mut rt, header, (40.0, 0.0))?;
+    let nudge = json!({ "before": before, "after": wires_of(&rt.state, "search"), "role": role_of(&rt.state, "search") });
+
+    let start = rt.find(header).ok_or("no search vial")?;
+    let canvas_rect = rt.presented("canvas").map(|(rect, _)| rect).ok_or("no canvas")?;
+    drag(&mut rt, header, (canvas_rect[0] + 40.0 - start.0, canvas_rect[1] + canvas_rect[3] - 30.0 - start.1))?;
+    let aside_wires = wires_of(&rt.state, "search");
+    let aside_role = role_of(&rt.state, "search");
+    let undo_shown = rt.find("undo-action").is_some();
+    if undo_shown {
+        click(&mut rt, "undo-action")?;
+    }
+    let undo = json!({ "asideWires": aside_wires, "asideRole": aside_role, "undoShown": undo_shown, "restoredWires": wires_of(&rt.state, "search"), "restoredRole": role_of(&rt.state, "search") });
+
+    let start = rt.find("node-recall-header").ok_or("no recall vial")?;
+    drag(&mut rt, "node-recall-header", (canvas_rect[0] + 40.0 - start.0, canvas_rect[1] + canvas_rect[3] - 30.0 - start.1))?;
+    let stashed = rt.state.aside_wires.len();
+    rt.update(|app, _| {
+        app.request_open_sample("Research Agent");
+        app.confirm_switch();
+    });
+    let leak = json!({ "stashedBefore": stashed, "stashedAfterSwitch": rt.state.aside_wires.len() });
+
+    let mut menu_rt = headless(StudioApp::from_registry());
+    click(&mut menu_rt, "node-search-header")?;
+    let menu_canvas = menu_rt.presented("canvas").map(|(rect, _)| rect).ok_or("no canvas")?;
+    right_click(&mut menu_rt, (menu_canvas[0] + menu_canvas[2] - 40.0, menu_canvas[1] + 140.0));
+    let empty_items: Vec<String> = CONTEXT_MENU_ITEMS.iter().filter(|key| menu_rt.find(key).is_some()).map(|key| (*key).to_owned()).collect();
+    click(&mut menu_rt, "context-dismiss")?;
+    let card_at = menu_rt.find("node-llm-header").ok_or("no llm vial")?;
+    right_click(&mut menu_rt, card_at);
+    let card_items: Vec<String> = CONTEXT_MENU_ITEMS.iter().filter(|key| menu_rt.find(key).is_some()).map(|key| (*key).to_owned()).collect();
+    let overlap = match (rect(&menu_rt, "context-menu"), rect(&menu_rt, "node-llm")) {
+        (Some(m), Some(c)) => m[0] < c[0] + c[2] && c[0] < m[0] + m[2] && m[1] < c[1] + c[3] && c[1] < m[1] + m[3],
+        _ => true,
+    };
+    let menu = json!({ "emptyItems": empty_items, "cardItems": card_items, "coversCard": overlap });
+
+    let mut clock = Clock(0.0);
+    let mut slow = slow_runtime(1_500, Duration::from_secs(600));
+    click_at(&mut slow, "run-spell", clock.tick())?;
+    slow.update(|app, _| {
+        app.wait_until(SETTLE, delay_started);
+    });
+    let wait_before = wires_of(&slow.state, "wait");
+    let start = slow.find("node-wait-header").ok_or("no wait vial")?;
+    let slow_canvas = slow.presented("canvas").map(|(rect, _)| rect).ok_or("no canvas")?;
+    drag(&mut slow, "node-wait-header", (slow_canvas[0] + 40.0 - start.0, slow_canvas[1] + slow_canvas[3] - 30.0 - start.1))?;
+    let while_running = json!({ "before": wait_before, "after": wires_of(&slow.state, "wait"), "running": slow.state.is_running() });
+    slow.update(|app, _| app.cancel_run());
+    Ok(json!({ "nudge": nudge, "undo": undo, "leak": leak, "menu": menu, "whileRunning": while_running }))
+}
+
 fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
         Some("surfaces") => capture_surfaces(Path::new(args.get(1).ok_or("missing output directory")?)),
@@ -1972,6 +2060,8 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("brew-truth") => brew_truth(),
         Some("switch-mid-brew") => switch_mid_brew(),
         Some("variable-defaults") => variable_defaults(),
+        Some("publish-plaque") => publish_plaque(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("toss-safety") => toss_safety(),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-ref-edit") => subgraph_ref_edit(Path::new(args.get(1).ok_or("missing database path")?)),

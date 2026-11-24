@@ -959,3 +959,39 @@ test('Opening a spell and looking at its Variables never rewrites them: an unset
   expect(edited[2].default).toEqual({ type: 'json', value: { tone: 'brisk' } });
   expect(edited.filter((_: unknown, index: number) => index !== 2)).toEqual(original.filter((_: unknown, index: number) => index !== 2));
 });
+
+test('After a publish the cauldron plaque moves on: it says Published, then follows the brew, then says Draft once the recipe is edited, and the edit clears the lit streams and step marks of the old brew', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-plaque-'));
+  try {
+    const { published, brewed, edited } = await studioProbe(['publish-plaque', join(dir, 'studio.sqlite')]);
+
+    expect(published).toMatch(/^Published v1 · /);
+    expect(brewed.pill).toBe('Draft brewed');
+    expect(brewed.plaque).toMatch(/^Brewed · /);
+    expect(edited.plaque).toMatch(/^Draft · /);
+    expect(edited.pill).toBe('Draft');
+    expect(edited.litWires).toBe(0);
+    expect(edited.markedCards).toBe(0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Cauldron vials are safe to handle: a small nudge keeps every wire, setting one aside can be undone with its wires back, set-aside wires never follow you into another potion, right-clicking empty space after picking a card offers the empty-space menu, the card menu never covers its card, and nothing can be tossed while a brew is running', { timeout: 900_000 }, async () => {
+  const { nudge, undo, leak, menu, whileRunning } = await studioProbe(['toss-safety']);
+
+  expect(nudge.after).toBe(nudge.before);
+  expect(nudge.role).toBe('Ingredient');
+  expect(undo.asideWires).toBe(0);
+  expect(undo.asideRole).toBe('Aside');
+  expect(undo.undoShown).toBe(true);
+  expect(undo.restoredWires).toBe(nudge.before);
+  expect(undo.restoredRole).toBe('Ingredient');
+  expect(leak.stashedBefore).toBe(1);
+  expect(leak.stashedAfterSwitch).toBe(0);
+  expect(menu.emptyItems).toEqual(['context-add-ai-generate_text', 'context-fit-view', 'context-dismiss']);
+  expect(menu.cardItems).toEqual(['context-duplicate-node', 'context-delete-node', 'context-dismiss']);
+  expect(menu.coversCard).toBe(false);
+  expect(whileRunning.running).toBe(true);
+  expect(whileRunning.after).toBe(whileRunning.before);
+});
