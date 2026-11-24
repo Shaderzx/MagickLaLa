@@ -4342,6 +4342,105 @@ fn plain_sight() -> Result<serde_json::Value, String> {
         "menuHeaderClash": header_clash,
     }))
 }
+fn close_quarters(db_path: &Path) -> Result<serde_json::Value, String> {
+    let mut text = magicklala_studio::studio_text_system();
+    let open = |spell: SpellGraph, size: (f32, f32)| {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt
+    };
+
+    let mut compact = open(StudioApp::from_registry().spell.clone(), (960.0, 640.0));
+    let model = NodeId::from(node_of_kind(&compact.state, "ai/generate_text").ok_or("no model")?.as_str());
+    compact.update(move |app, _| {
+        app.canvas.select(Some(model.clone()));
+        app.right_tab = RightTab::Inspector;
+    });
+    compact.frame(1.0);
+    let field = layout_rect(&compact, "prompt-field").ok_or("no prompt field")?;
+    let source = text_lines_under(&compact, "prompt-field").into_iter().find(|(line, _)| line.starts_with("From ")).ok_or("no source line")?;
+    let (natural, line_h) = text.measure(&source.0, rune::TextStyle::new(12.0, 650.0), 1.0);
+    let rows = (source.1[3] / line_h).round().max(1.0);
+    let prompt_source = json!({ "text": source.0, "whole": natural <= source.1[2] * rows + 2.0, "inside": inside(field, source.1) });
+
+    let mut crowding = Vec::new();
+    for (name, spell) in [("router", example("webhook_router.json")?), ("support", StudioApp::from_registry().spell.clone())] {
+        for size in [(1280.0_f32, 800.0_f32), (960.0, 640.0)] {
+            let mut rt = open(spell.clone(), size);
+            click(&mut rt, "run-spell")?;
+            live_finish(&mut rt)?;
+            rt.frame(3.0);
+            let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+            let s = plan.scale;
+            let bottles: Vec<&magicklala_canvas::BrewCard> = plan.with_role(magicklala_canvas::BrewRole::Bottle).collect();
+            for (index, ribbon) in magicklala_canvas::cauldron::ribbon_paths(&plan).iter().enumerate() {
+                let Some(card) = bottles.get(index) else { continue };
+                let r = card.rect;
+                let tag = [r[0] - 18.0 * s, r[1] + r[3] * 0.46 - 6.0 * s, r[2] + 26.0 * s, r[3] * 0.54 + 6.0 * s];
+                let body = &ribbon[..ribbon.len() * 4 / 5];
+                if body.iter().any(|point| point[0] > tag[0] && point[0] < tag[0] + tag[2] && point[1] > tag[1] && point[1] < tag[1] + tag[3]) {
+                    crowding.push(format!("{name}@{}: ribbon {index} hugs its tag", size.0));
+                }
+            }
+        }
+    }
+
+    let dozen = open(dozen_ingredient_spell(), (960.0, 640.0));
+    let plan = magicklala_canvas::brew_plan(&dozen.state.canvas, dozen.state.canvas_size());
+    let canvas_h = dozen.state.canvas_size().1;
+    let pours = magicklala_canvas::cauldron::pour_paths(&dozen.state.canvas, &plan);
+    let top =
+        pours.iter().flat_map(|(_, points)| points.iter().map(|point| point[1])).chain(plan.cards.iter().map(|card| card.rect[1])).fold(f32::MAX, f32::min);
+    let bottom = plan.cards.iter().map(|card| card.rect[1] + card.rect[3]).fold(plan.plaque_top + 30.0 * plan.scale, f32::max).max(plan.pot[1] + plan.pot[3]);
+    let balance = json!({ "above": top.round(), "below": (canvas_h - bottom).round() });
+
+    let mut numbers = studio_at(db_path)?;
+    let mut paced = delay_spell(5);
+    paced.name = "Paced Agent".to_owned();
+    numbers.update(move |app, _| {
+        app.new_empty_spell();
+        app.load_graph(paced.clone());
+    });
+    click(&mut numbers, "publish")?;
+    numbers.update(|app, _| {
+        app.configs.insert(NodeId::from("wait"), json!({ "ms": 5.0 }));
+        app.sync_spell();
+    });
+    let same_number = json!({ "live": numbers.state.active_release_version, "unchanged": numbers.state.is_unchanged_from_live_release() });
+
+    let mut menu = open(StudioApp::from_registry().spell.clone(), (1280.0, 800.0));
+    let last = magicklala_canvas::recipe_order(&menu.state.canvas)
+        .into_iter()
+        .filter(|id| {
+            magicklala_canvas::brew_plan(&menu.state.canvas, menu.state.canvas_size())
+                .card(id)
+                .is_some_and(|card| card.role == magicklala_canvas::BrewRole::Ingredient)
+        })
+        .last()
+        .ok_or("no ingredient")?;
+    let card_rect = layout_rect(&menu, &format!("node-{}", last.0)).ok_or("no card")?;
+    right_click(&mut menu, (card_rect[0] + card_rect[2] * 0.5, card_rect[1] + card_rect[3] * 0.5));
+    menu.frame(1.0);
+    let card_rect = layout_rect(&menu, &format!("node-{}", last.0)).ok_or("no card")?;
+    let tether = layout_rect(&menu, "context-tether");
+    let panel = layout_rect(&menu, "context-menu");
+    let touches = |a: [f32; 4], b: [f32; 4]| a[0] <= b[0] + b[2] + 2.0 && b[0] <= a[0] + a[2] + 2.0 && a[1] <= b[1] + b[3] + 2.0 && b[1] <= a[1] + a[3] + 2.0;
+    let attached = match (tether, panel) {
+        (Some(tether), Some(panel)) => touches(tether, panel) && touches(tether, card_rect),
+        (None, Some(panel)) => touches(panel, card_rect),
+        _ => false,
+    };
+
+    Ok(json!({
+        "promptSource": prompt_source,
+        "ribbonCrowding": crowding,
+        "balance": balance,
+        "sameNumber": same_number,
+        "menuAttached": attached,
+    }))
+}
 fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
@@ -5239,6 +5338,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("shelf-exact") => shelf_exact(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("cauldron-truths") => cauldron_truths(),
         Some("plain-sight") => plain_sight(),
+        Some("close-quarters") => close_quarters(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("drawn-truths") => drawn_truths(),

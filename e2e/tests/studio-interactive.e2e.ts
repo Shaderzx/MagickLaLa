@@ -1390,6 +1390,19 @@ test('Studio keeps its promises: a prompt typed over a shelf shortcut stays type
   expect(report.spilling).toEqual([]);
   expect(report.chatOnEmpty).toBe(0);
   expect(report.menuHeaderClash).toBe(false);
+});test('Close quarters stay readable: the 960 prompt source shows its whole name, bottle ribbons keep a stream width clear of their own tag and badge, a crowded pot keeps equal room above and below, a setting typed as 5.0 still matches a release saved as 5, and the card menu stays tied to the card it opened from', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-quarters-'));
+  try {
+    const report = await studioProbe(['close-quarters', join(dir, 'studio.sqlite')]);
+
+    expect(report.promptSource).toEqual({ text: 'From On Message · content', whole: true, inside: true });
+    expect(report.ribbonCrowding).toEqual([]);
+    expect(Math.abs(report.balance.above - report.balance.below)).toBeLessThanOrEqual(8);
+    expect(report.sameNumber).toEqual({ live: 1, unchanged: true });
+    expect(report.menuAttached).toBe(true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });test('A brew locks the recipe and the bottles tell the truth: typing, saving, adding, dragging cards and drawing wires all wait until the brew ends and the lit result survives, branch bottles show no step numbers before a brew, a running bottle simmers without a check, a published branch potion shows its sealed version on the bottle, and thirteen-step and thirty-eight-step brews and a many-issue Check keep every log chip and the result inside the log at 960 and 1280', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-locks-'));
   try {
