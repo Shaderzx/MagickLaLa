@@ -7,6 +7,11 @@ fn srgb_channel(byte: u32) -> f32 {
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }
 
+pub fn check_mark(color: Color, size: f32) -> rune::El {
+    let path = Path::new().move_to([size * 0.16, size * 0.55]).line_to([size * 0.42, size * 0.8]).line_to([size * 0.86, size * 0.22]);
+    rune::canvas(Shape::new().stroke_path(&path, (size * 0.16).max(1.4), LineCap::Round, color)).size(size, size)
+}
+
 pub fn ghost_ink(light: bool) -> Color {
     if light { hex(0x857360) } else { hex(0x7E70A6) }
 }

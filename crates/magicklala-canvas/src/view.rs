@@ -254,19 +254,18 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         )
     } else if card.status == ExecutionStatus::Succeeded {
         let ms_text = match card.duration_ms {
-            Some(0) => "✓ <1ms".to_owned(),
-            Some(ms) => format!("✓ {ms}ms"),
-            None => "✓".to_owned(),
+            Some(0) => "<1ms".to_owned(),
+            Some(ms) => format!("{ms}ms"),
+            None => String::new(),
         };
         Some(
-            row()
-                .px(5.5)
-                .py(1.5)
-                .radius(7.0)
-                .fill(p.card)
-                .border(1.0, p.broth_mid)
-                .shadow(2.0, 6.0, p.shadow_card)
-                .child(text(ms_text).font(TextStyle::new(11.0, 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam })),
+            row().px(5.5).py(1.5).radius(7.0).fill(p.card).border(1.0, p.broth_mid).shadow(2.0, 6.0, p.shadow_card).child(
+                row()
+                    .gap(3.0)
+                    .items_center()
+                    .child(crate::hearth::check_mark(if state.light { p.broth_deep } else { p.broth_foam }, 10.0))
+                    .child(text(ms_text).font(TextStyle::new(11.0, 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam })),
+            ),
         )
     } else if card.status == ExecutionStatus::Running {
         Some(
@@ -396,18 +395,17 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     let bottle_art = canvas(potion_bottle_shape(bottle_mood, state.light, width, bottle_h, false, tint)).size(width, bottle_h);
     let pill = if taken {
         let ms_text = match card.duration_ms {
-            Some(0) => "✓ <1ms".to_owned(),
-            Some(ms) => format!("✓ {ms}ms"),
-            None => "✓".to_owned(),
+            Some(0) => "<1ms".to_owned(),
+            Some(ms) => format!("{ms}ms"),
+            None => String::new(),
         };
-        row()
-            .px(5.5)
-            .py(1.5)
-            .radius(7.0)
-            .fill(p.card)
-            .border(1.0, p.broth_mid)
-            .shadow(2.0, 6.0, p.shadow_card)
-            .child(text(ms_text).font(TextStyle::new(11.0, 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam }))
+        row().px(5.5).py(1.5).radius(7.0).fill(p.card).border(1.0, p.broth_mid).shadow(2.0, 6.0, p.shadow_card).child(
+            row()
+                .gap(3.0)
+                .items_center()
+                .child(crate::hearth::check_mark(if state.light { p.broth_deep } else { p.broth_foam }, 10.0))
+                .child(text(ms_text).font(TextStyle::new(11.0, 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam })),
+        )
     } else if untaken {
         row()
             .px(5.5)
@@ -530,18 +528,17 @@ pub(crate) fn potion_stand_view<S: 'static>(
         .child(text(out_kind).font(TextStyle::new(11.0, 500.0).mono()).color(p.mute).truncate());
     if out_brewed {
         let ms_text = match primary_output.and_then(|c| c.duration_ms) {
-            Some(0) => "✓ <1ms".to_owned(),
-            Some(ms) => format!("✓ {ms}ms"),
-            None => "✓".to_owned(),
+            Some(0) => "<1ms".to_owned(),
+            Some(ms) => format!("{ms}ms"),
+            None => String::new(),
         };
-        let timing_pill = row()
-            .px(5.5)
-            .py(1.5)
-            .radius(7.0)
-            .fill(p.card)
-            .border(1.0, p.broth_mid)
-            .shadow(2.0, 6.0, p.shadow_card)
-            .child(text(ms_text).font(TextStyle::new(11.0, 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam }));
+        let timing_pill = row().px(5.5).py(1.5).radius(7.0).fill(p.card).border(1.0, p.broth_mid).shadow(2.0, 6.0, p.shadow_card).child(
+            row()
+                .gap(3.0)
+                .items_center()
+                .child(crate::hearth::check_mark(if state.light { p.broth_deep } else { p.broth_foam }, 10.0))
+                .child(text(ms_text).font(TextStyle::new(11.0, 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam })),
+        );
         let mut wrapped = el().w_full().child(tag_card).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(timing_pill));
         if let Some(num) = step_num {
             let step_badge = row()

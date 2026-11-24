@@ -375,12 +375,13 @@ fn toolbar(app: &StudioApp, t: &HearthPalette) -> El {
     } else {
         format!("{ingredient_count} {i_word} · {bottle_count} {o_word}")
     };
-    let mut left = row().key("toolbar-left").gap(if compact { 7.0 } else { 11.0 }).items_center().child(brand).child(divider()).child(heading(
-        &app.spell.name,
-        14.5,
-        750.0,
-        t.ink,
-    ));
+    let mut left = row()
+        .key("toolbar-left")
+        .gap(if compact { 7.0 } else { 11.0 })
+        .items_center()
+        .child(brand)
+        .child(divider())
+        .child(row().min_w(0.0).shrink().child(heading(&app.spell.name, 14.5, 750.0, t.ink).truncate()));
     if !empty_graph {
         let stats_box =
             row().h(24.0).px(8.5).radius(12.0).continuous_corners().items_center().fill(t.wash_2).border(1.0, t.rule).child(label(stats, 11.0, 550.0, t.ink_2));
@@ -470,7 +471,7 @@ fn toolbar(app: &StudioApp, t: &HearthPalette) -> El {
         .justify_between()
         .fill(t.shelf)
         .border_sides([0.0, 0.0, 1.0, 0.0], t.rule)
-        .child(left)
+        .child(left.min_w(0.0).shrink())
         .child(right)
 }
 
@@ -651,12 +652,12 @@ fn left_rail(app: &StudioApp, t: &HearthPalette) -> El {
                         let mut right_actions = row().gap(4.0).items_center();
                         if in_pot {
                             right_actions = right_actions.child(
-                                row().px(5.0).py(1.0).radius(6.0).fill(if light { hex(0xE6F6EF) } else { with_alpha(t.broth_mid, 0.24) }).child(label(
-                                    "✓",
-                                    10.0,
-                                    750.0,
-                                    if light { t.broth_deep } else { t.broth_foam },
-                                )),
+                                row()
+                                    .px(5.0)
+                                    .py(1.0)
+                                    .radius(6.0)
+                                    .fill(if light { hex(0xE6F6EF) } else { with_alpha(t.broth_mid, 0.24) })
+                                    .child(magicklala_canvas::hearth::check_mark(if light { t.broth_deep } else { t.broth_foam }, 10.0)),
                             );
                         }
                         right_actions = right_actions.child(
@@ -794,6 +795,11 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     }
     agent_names.push("Support Agent".to_owned());
     agent_names.push("Research Agent".to_owned());
+    for (saved, _) in &app.saved_potions {
+        if !agent_names.contains(saved) {
+            agent_names.push(saved.clone());
+        }
+    }
     let agent_rows = agent_names.iter().fold(col().gap(6.0), |list, name| {
         let active = name == &app.spell.name;
         let published = app.active_release_version;
@@ -828,8 +834,12 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                 false,
             )
         } else {
-            let sample_count = if name == "Research Agent" { "3 ingredients" } else { "4 ingredients" };
-            (sample_count.to_owned(), "Open ›", t.card, t.rule_2, t.ink, true)
+            let sample_count = match app.saved_potions.iter().find(|(saved, _)| saved == name) {
+                Some((_, nodes)) => format!("{nodes} steps"),
+                None if name == "Research Agent" => "3 ingredients".to_owned(),
+                None => "4 ingredients".to_owned(),
+            };
+            (sample_count, "Open ›", t.card, t.rule_2, t.ink, true)
         };
         let badge = row()
             .px(if is_action { 7.5 } else { 6.5 })
@@ -1283,7 +1293,11 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
                             .justify_between()
                             .fill(if selected { if t.light { hex(0xE6F6EF) } else { with_alpha(t.broth_mid, 0.22) } } else { Color::TRANSPARENT })
                             .child(label(format!("{choice:?}"), 11.5, if selected { 700.0 } else { 500.0 }, t.ink))
-                            .child(label(if selected { "✓" } else { "" }, 11.0, 750.0, if t.light { t.broth_deep } else { t.broth_foam }))
+                            .child(if selected {
+                                magicklala_canvas::hearth::check_mark(if t.light { t.broth_deep } else { t.broth_foam }, 11.0)
+                            } else {
+                                el().size(11.0, 11.0)
+                            })
                             .on_press(move |app: &mut StudioApp| app.set_variable_type(&pick_name, choice)),
                     )
                 },
@@ -1325,7 +1339,15 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
     let total_ms = app.trace.last().map_or(0, |line| line.at_ms);
     let total_label = if total_ms == 0 { "<1ms total".to_owned() } else { format!("{total_ms}ms total") };
     let succeeded = !app.trace.iter().any(|line| line.status == ExecutionStatus::Failed);
-    let status_label = if succeeded { "Brewed" } else { "Hexed" };
+    let status_label = if app.is_running() {
+        "Brewing"
+    } else if app.canvas.last_brew.is_none() && app.last_run.is_some() {
+        "Last brew"
+    } else if succeeded {
+        "Brewed"
+    } else {
+        "Hexed"
+    };
     let header = row()
         .w_full()
         .px(12.0)
@@ -1459,7 +1481,28 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     let id = card.id.clone();
     let field = editable_field(&card.kind);
     let editor_height = if has_error { 86.0 } else { prompt_editor_height(app.size) };
-    let editor = field.and_then(|field| app.prompts.get(&card.id).map(|edit| (field, edit))).map(|(field, edit)| {
+    let wired_source = field.and_then(|field| {
+        app.canvas.wires.iter().find(|wire| wire.to_node == card.id && wire.to_socket == field).map(|wire| {
+            let title = app.canvas.card(&wire.from_node).map_or_else(|| wire.from_node.0.clone(), |source| source.title.clone());
+            (format!("From {title} · {}", wire.from_socket), wire.id.clone())
+        })
+    });
+    let wired_editor = wired_source.map(|(source, wire)| {
+        col()
+            .key("prompt-field")
+            .w_full()
+            .gap(8.0)
+            .padding(PROMPT_EDITOR_PADDING)
+            .radius(12.0)
+            .continuous_corners()
+            .fill(t.card)
+            .border(1.2, t.rule_2)
+            .child(label(source, 12.5, 650.0, t.ink).wrap())
+            .child(row().child(
+                sized_button("prompt-unplug", "Type it instead", false, false, 10.0, t, |_| {}).on_press(move |app: &mut StudioApp| app.unplug_wire(&wire)),
+            ))
+    });
+    let editor = field.filter(|_| wired_editor.is_none()).and_then(|field| app.prompts.get(&card.id).map(|edit| (field, edit))).map(|(field, edit)| {
         let input = text_input(edit, prompt_font())
             .key("prompt-field")
             .label(format!("{} {field}", card.title))
@@ -1479,7 +1522,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             .scroll(ScrollSpec { stick_bottom: false })
             .child(input);
         if edit.text.is_empty() {
-            box_el = box_el.child(label("Write an incantation or wire the prompt essence…", 11.5, 450.0, t.placeholder).wrap());
+            box_el = box_el.child(label("Prompt…", 11.5, 450.0, t.placeholder).wrap());
         }
         box_el
     });
@@ -1636,7 +1679,11 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                             .justify_between()
                             .fill(if selected { if t.light { hex(0xE6F6EF) } else { with_alpha(t.broth_mid, 0.22) } } else { Color::TRANSPARENT })
                             .child(text(choice).font(font(11.5, if selected { 700.0 } else { 500.0 }).mono()).color(t.ink))
-                            .child(label(if selected { "✓" } else { "" }, 11.0, 750.0, if t.light { t.broth_deep } else { t.broth_foam }))
+                            .child(if selected {
+                                magicklala_canvas::hearth::check_mark(if t.light { t.broth_deep } else { t.broth_foam }, 11.0)
+                            } else {
+                                el().size(11.0, 11.0)
+                            })
                             .on_press(move |app: &mut StudioApp| app.select_model(&pick_provider, &pick_model)),
                     )
                 },
@@ -1645,8 +1692,9 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         }
     }
     let column = column.pb(if compact { 4.0 } else { 8.0 });
-    let column = match (field, editor) {
-        (Some(field), Some(editor)) => column.child(inspector_section_heading(editor_caption(field), t)).child(editor),
+    let column = match (field, editor, wired_editor) {
+        (Some(field), Some(editor), _) => column.child(inspector_section_heading(editor_caption(field), t)).child(editor),
+        (Some(field), None, Some(wired)) => column.child(inspector_section_heading(editor_caption(field), t)).child(wired),
         _ => column,
     };
     match release_version_editor(app, card, t) {

@@ -228,6 +228,21 @@ impl StudioStore {
         self.spell_record_id = None;
     }
 
+    pub fn attach_record(&mut self, id: SpellRecordId) {
+        self.spell_record_id = Some(id);
+    }
+
+    pub fn saved_spells(&self) -> Vec<SpellRecord> {
+        let repository = self.repository.clone();
+        block(move || async move {
+            let Some(project) = repository.list_projects().await?.into_iter().find(|project| project.name == STUDIO_PROJECT) else { return Ok(Vec::new()) };
+            repository.list_spells(project.id).await
+        })
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default()
+    }
+
     fn resolve_spell_record(&mut self, spell: &SpellGraph) -> Result<SpellRecordId, StudioError> {
         let repository = self.repository.clone();
         let spell = spell.clone();
@@ -717,6 +732,7 @@ pub struct StudioApp {
     pub undo_stack: Vec<UndoEntry>,
     pub aside_wires: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
     pub aside_bridges: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
+    pub saved_potions: Vec<(String, usize)>,
     pub pantry_drag: Option<PantryDrag>,
     pub undo_banner: Option<String>,
     pub dirty: bool,
@@ -803,6 +819,7 @@ impl StudioApp {
         app.active_release_version = workspace.and_then(|workspace| workspace.active_release);
         app.canvas.release_badge = app.active_release_version.map(|v| format!("v{v}"));
         app.dirty = false;
+        app.refresh_saved_potions();
         Ok(app)
     }
 
@@ -833,6 +850,7 @@ impl StudioApp {
             undo_stack: Vec::new(),
             aside_wires: HashMap::new(),
             aside_bridges: HashMap::new(),
+            saved_potions: Vec::new(),
             pantry_drag: None,
             undo_banner: None,
             dirty: false,
@@ -1249,7 +1267,27 @@ impl StudioApp {
         self.dirty = false;
     }
 
+    pub fn refresh_saved_potions(&mut self) {
+        self.saved_potions = self
+            .store
+            .as_ref()
+            .map(|store| store.saved_spells().into_iter().map(|record| (record.name.clone(), record.graph.nodes.len())).collect())
+            .unwrap_or_default();
+    }
+
     pub fn open_sample_spell(&mut self, name: &str) {
+        if name != "Research Agent"
+            && name != "Support Agent"
+            && let Some(record) = self.store.as_ref().and_then(|store| store.saved_spells().into_iter().find(|record| record.name == name))
+        {
+            self.detach_spell_history();
+            self.load_graph(record.graph.clone());
+            if let Some(store) = self.store.as_mut() {
+                store.attach_record(record.id);
+            }
+            self.refresh_saved_potions();
+            return;
+        }
         let graph = if name == "Research Agent" {
             let mut spell = SpellGraph::new("Research Agent");
             let place = |id: &str, kind: &str, pos: [f32; 2], config: serde_json::Value| NodeInstance {
@@ -1362,7 +1400,19 @@ impl StudioApp {
         self.place_ingredient(kind, screen, wire_in)
     }
 
+    pub fn unplug_wire(&mut self, wire: &magicklala_graph::WireId) {
+        if self.is_running() {
+            return;
+        }
+        self.canvas.wires.retain(|candidate| &candidate.id != wire);
+        self.validation = ValidationState::Unchecked;
+        self.sync_spell();
+    }
+
     fn place_ingredient(&mut self, kind: &str, screen: [f32; 2], wire_in: bool) -> Option<NodeId> {
+        if self.is_running() {
+            return None;
+        }
         let spec = self.specs.iter().find(|spec| spec.kind == kind)?.clone();
         let center = self.canvas.camera.screen_to_world(screen);
         let id = self.canvas.add_node_from_spec(&spec, center);
@@ -1535,16 +1585,60 @@ impl StudioApp {
         false
     }
 
+    fn season_reply(&mut self, id: &NodeId, spec: &NodeSpec) -> bool {
+        let Some(out) = spec.outputs.iter().find(|socket| !socket.ty.is_flow()) else { return false };
+        let bottles: Vec<NodeId> =
+            self.canvas.nodes.iter().filter(|card| magicklala_canvas::brew::is_bottle(card) && &card.id != id).map(|card| card.id.clone()).collect();
+        for bottle in bottles {
+            let Some(bottle_spec) = self.spec_of(&bottle) else { continue };
+            let Some(words) = bottle_spec.inputs.iter().find(|input| input.required && !input.ty.is_flow()) else { continue };
+            let Some(feed) = self.canvas.wires.iter().find(|wire| wire.to_node == bottle && wire.to_socket == words.name).cloned() else { continue };
+            let Some(intake) = spec.inputs.iter().filter(|input| !input.ty.is_flow()).find(|input| input.ty == feed.ty || input.ty == SocketType::Any) else {
+                continue;
+            };
+            if !(out.ty == words.ty || words.ty == SocketType::Any) {
+                continue;
+            }
+            self.canvas.wires.retain(|wire| wire.id != feed.id);
+            let fed = self.connect((&feed.from_node, &feed.from_socket), (id, &intake.name));
+            let poured = self.connect((id, &out.name), (&bottle, &words.name));
+            if fed && poured {
+                return true;
+            }
+            let _ = self.canvas.connect_sockets(
+                &SocketRef::new(feed.from_node.clone(), feed.from_socket.clone()),
+                &SocketRef::new(feed.to_node.clone(), feed.to_socket.clone()),
+            );
+        }
+        false
+    }
+
     fn auto_wire_cauldron_ingredient(&mut self, id: &NodeId, spec: &NodeSpec) {
+        let my_flow_in_of = |spec: &NodeSpec| spec.inputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone());
+        let my_flow_out_of = |spec: &NodeSpec| spec.outputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone());
         let mut without = self.canvas.clone();
         without.nodes.retain(|card| &card.id != id);
         without.wires.retain(|wire| &wire.from_node != id && &wire.to_node != id);
         let in_pot = magicklala_canvas::brewing_nodes(&without);
+        let waiting: Vec<NodeId> = self
+            .canvas
+            .nodes
+            .iter()
+            .filter(|card| &card.id != id && !self.aside_wires.contains_key(&card.id))
+            .filter(|card| card.inputs.iter().chain(card.outputs.iter()).all(|socket| !socket.ty.is_flow()))
+            .filter(|card| self.canvas.wires.iter().any(|wire| wire.to_node == card.id) && !self.canvas.wires.iter().any(|wire| wire.from_node == card.id))
+            .map(|card| card.id.clone())
+            .collect();
         let order: Vec<NodeId> = magicklala_canvas::recipe_order(&self.canvas)
             .into_iter()
             .filter(|node| node != id)
-            .filter(|node| in_pot.contains(node) || self.canvas.card(node).is_some_and(|card| card.category.eq_ignore_ascii_case("events")))
+            .filter(|node| {
+                in_pot.contains(node) || waiting.contains(node) || self.canvas.card(node).is_some_and(|card| card.category.eq_ignore_ascii_case("events"))
+            })
             .collect();
+        if my_flow_in_of(spec).is_none() && my_flow_out_of(spec).is_none() && !spec.is_trigger && self.season_reply(id, spec) {
+            return;
+        }
         let bottle = |app: &Self, node: &NodeId| app.canvas.card(node).is_some_and(magicklala_canvas::brew::is_bottle);
         let flow_out_of =
             |app: &Self, node: &NodeId| app.canvas.card(node).and_then(|card| card.outputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone()));
@@ -1643,7 +1737,10 @@ impl StudioApp {
             self.connect((id, out), (&next, &input));
         }
 
-        let rest: Vec<NodeId> = order.iter().rev().filter(|node| !sources.contains(node)).cloned().collect();
+        let rest: Vec<NodeId> = order.iter().rev().filter(|node| !sources.contains(node) && !waiting.contains(node)).cloned().collect();
+        let mut fed_first: Vec<NodeId> = waiting.iter().rev().cloned().collect();
+        fed_first.extend(sources);
+        sources = fed_first;
         sources.extend(rest);
         for socket in spec.inputs.iter().filter(|s| s.required && !s.ty.is_flow()) {
             if !self.is_fed(id, &socket.name) {
@@ -1975,8 +2072,7 @@ impl StudioApp {
 
     pub fn is_unchanged_from_live_release(&self) -> bool {
         self.active_release_version.is_some()
-            && !self.canvas.has_run()
-            && !self.dirty
+            && self.spell.nodes.iter().all(|node| node.kind != SUBGRAPH_KIND)
             && self.last_published.as_ref().is_none_or(|release| release.graph == self.spell)
     }
 
@@ -1990,7 +2086,8 @@ impl StudioApp {
 
     fn trigger(&self, prefer: Option<&str>, payload: &serde_json::Value) -> Option<RunTrigger> {
         let spec_of = |node: &NodeInstance| self.specs.iter().find(|spec| spec.kind == node.kind && spec.is_trigger);
-        let triggers: Vec<(&NodeInstance, &NodeSpec)> = self.spell.nodes.iter().filter_map(|node| spec_of(node).map(|spec| (node, spec))).collect();
+        let graph = self.brew_graph();
+        let triggers: Vec<(&NodeInstance, &NodeSpec)> = graph.nodes.iter().filter_map(|node| spec_of(node).map(|spec| (node, spec))).collect();
         let (node, spec) = prefer.and_then(|kind| triggers.iter().find(|(node, _)| node.kind == kind)).or_else(|| triggers.first()).copied()?;
         let socket = spec.outputs.first().map_or_else(|| "out".to_owned(), |socket| socket.name.clone());
         Some(RunTrigger { node: node.id.clone(), socket, payload: Value::from(payload.clone()) })
@@ -2435,6 +2532,7 @@ impl StudioApp {
         self.canvas.release_badge = Some(format!("v{version}"));
         self.publish_status = Some(format!("Published v{version}"));
         self.last_published = Some(release);
+        self.refresh_saved_potions();
         Ok(version)
     }
 
@@ -2455,6 +2553,7 @@ impl StudioApp {
         self.active_release_version = None;
         self.canvas.release_badge = None;
         self.draft_status = Some(DRAFT_SAVED.to_owned());
+        self.refresh_saved_potions();
         Ok(record.id)
     }
 

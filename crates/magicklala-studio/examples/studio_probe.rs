@@ -508,7 +508,11 @@ fn palette() -> serde_json::Value {
 }
 
 fn inspector(size: (f32, f32)) -> Result<serde_json::Value, String> {
-    let rt = sized_runtime(size, Theme::Light);
+    let mut rt = sized_runtime(size, Theme::Light);
+    if rt.find("prompt-unplug").is_some() {
+        click(&mut rt, "prompt-unplug")?;
+        rt.frame(0.0);
+    }
     let [card_x, card_y, card_w, card_h] = rect(&rt, "prompt-editor").ok_or("prompt editor missing")?;
     let [field_x, field_y, field_w, _] = rect(&rt, "prompt-field").ok_or("prompt field missing")?;
     let panel = rect(&rt, "inspector").map(|[_, y, _, h]| y + h);
