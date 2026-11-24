@@ -1807,6 +1807,72 @@ fn plain_words() -> Result<serde_json::Value, String> {
     Ok(json!({ "texts": texts, "headings": headings, "tabs": tabs }))
 }
 
+fn texts_under(rt: &mut Runtime<StudioApp>, key: &str) -> String {
+    rt.frame(0.0);
+    let elements = rt.elements();
+    let Some(root) = elements.iter().position(|element| element.key.as_deref() == Some(key) && !element.exiting) else { return String::new() };
+    let inside = |mut index: usize| loop {
+        if index == root {
+            return true;
+        }
+        match elements[index].parent {
+            Some(parent) => index = parent,
+            None => return false,
+        }
+    };
+    elements.iter().enumerate().filter(|(index, element)| !element.exiting && inside(*index)).filter_map(|(_, element)| element.text.clone()).collect::<Vec<_>>().join(" ")
+}
+
+fn live_finish(rt: &mut Runtime<StudioApp>) -> Result<(), String> {
+    let begun = Instant::now();
+    while rt.state.is_running() {
+        if begun.elapsed() > SETTLE {
+            return Err("run never finished".to_owned());
+        }
+        rt.update(|app, _| {
+            app.poll_background();
+        });
+        rt.frame(0.0);
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    rt.frame(0.0);
+    Ok(())
+}
+
+fn brew_state(rt: &mut Runtime<StudioApp>) -> serde_json::Value {
+    json!({
+        "pill": texts_under(rt, "validation-pill"),
+        "plaque": texts_under(rt, "cauldron-plaque"),
+        "runningBrew": rt.state.canvas.running_brew,
+        "outcome": rt.state.last_run.as_ref().map(|report| report.outcome.label()),
+    })
+}
+
+fn brew_truth() -> Result<serde_json::Value, String> {
+    let mut good = runtime_for(tasting_spell());
+    click(&mut good, "run-spell")?;
+    live_finish(&mut good)?;
+    let succeeded = brew_state(&mut good);
+
+    let mut bad = runtime_for(StudioApp::from_registry().spell.clone());
+    click(&mut bad, "run-spell")?;
+    live_finish(&mut bad)?;
+    let failed = brew_state(&mut bad);
+
+    let mut clock = Clock(0.0);
+    let mut slow = slow_runtime(5_000, Duration::from_secs(600));
+    click_at(&mut slow, "run-spell", clock.tick())?;
+    slow.update(|app, _| {
+        app.wait_until(SETTLE, delay_started);
+    });
+    slow.frame(clock.tick());
+    let running = brew_state(&mut slow);
+    click_at(&mut slow, "cancel-run", clock.tick())?;
+    live_finish(&mut slow)?;
+    let cancelled = brew_state(&mut slow);
+    Ok(json!({ "succeeded": succeeded, "failed": failed, "running": running, "cancelled": cancelled }))
+}
+
 fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
         Some("surfaces") => capture_surfaces(Path::new(args.get(1).ok_or("missing output directory")?)),
@@ -1814,6 +1880,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("pot-layout") => pot_layout(),
         Some("toss") => toss(),
         Some("plain-words") => plain_words(),
+        Some("brew-truth") => brew_truth(),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-ref-edit") => subgraph_ref_edit(Path::new(args.get(1).ok_or("missing database path")?)),
