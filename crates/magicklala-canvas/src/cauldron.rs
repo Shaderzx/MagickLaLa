@@ -62,11 +62,16 @@ fn pouring_cards<'a>(state: &'a CanvasState, plan: &'a BrewPlan) -> impl Iterato
         .filter(|(_, card)| !state.has_run() || matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Running))
 }
 
-pub fn bottle_filled(state: &CanvasState, _bottle: &NodeCardModel) -> bool {
-    cauldron_mood(state) == CauldronMood::Brewed
+pub fn bottle_filled(state: &CanvasState, bottle: &NodeCardModel) -> bool {
+    bottle.status == ExecutionStatus::Succeeded || (!state.has_run() && state.last_brew.is_none() && cauldron_mood(state) == CauldronMood::Brewed)
 }
 
 pub fn potion_tint(state: &CanvasState, plan: &BrewPlan) -> Option<Color> {
+    if state.has_run()
+        && let Some(last) = pouring_cards(state, plan).filter(|(_, card)| card.step_order.is_some()).max_by_key(|(_, card)| card.step_order)
+    {
+        return Some(category_tone(&last.1.category, state.light).liquid);
+    }
     let liquids: Vec<Color> = pouring_cards(state, plan).map(|(_, card)| category_tone(&card.category, state.light).liquid).collect();
     brew_tint(&liquids)
 }

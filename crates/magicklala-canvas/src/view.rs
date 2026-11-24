@@ -483,7 +483,8 @@ pub(crate) fn potion_stand_view<S: 'static>(
     let bottled = state.release_badge.is_some();
     let sealed_vintage = bottled && !matches!(mood, CauldronMood::Brewed | CauldronMood::Simmering | CauldronMood::Hexed | CauldronMood::Empty);
     let bottle_h = 104.0;
-    let bottle_art = canvas(potion_bottle_shape(mood, state.light, width, bottle_h, bottled, tint)).key("hero-potion-bottle").size(width, bottle_h);
+    let art_mood = if mood == CauldronMood::Brewed && !crate::cauldron::bottle_filled(state, output) { CauldronMood::Ready } else { mood };
+    let bottle_art = canvas(potion_bottle_shape(art_mood, state.light, width, bottle_h, bottled, tint)).key("hero-potion-bottle").size(width, bottle_h);
     let spell_label = if state.spell_name.is_empty() { "Potion" } else { state.spell_name.as_str() };
     let out_title = primary_output.map_or("Bottled Potion", |c| c.title.as_str());
     let out_kind = primary_output.map_or("io/send_message", |c| c.kind.as_str());

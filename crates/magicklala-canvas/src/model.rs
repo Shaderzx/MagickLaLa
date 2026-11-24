@@ -328,10 +328,12 @@ impl CanvasState {
                     || other.position[1] + other.size[1] + 24.0 <= at[1]
             })
         };
-        (0..40)
-            .map(|step| [near[0] + (step / 8) as f32 * (size[0] + 32.0), near[1] + ((step % 8) as f32 - 0.0) * 64.0 * if step % 2 == 0 { 1.0 } else { -1.0 }])
-            .find(|at| clear(*at))
-            .unwrap_or(near)
+        let ring = |step: usize| {
+            let lap = (step / 8 + 1) as f32;
+            let angle = (step % 8) as f32 * std::f32::consts::FRAC_PI_4;
+            [near[0] + angle.cos() * lap * (size[0] + 32.0) * 0.5, near[1] + angle.sin() * lap * (size[1] + 32.0)]
+        };
+        std::iter::once(near).chain((0..48).map(ring)).find(|at| clear(*at)).unwrap_or(near)
     }
 
     pub fn move_node(&mut self, id: &NodeId, position: [f32; 2]) -> bool {

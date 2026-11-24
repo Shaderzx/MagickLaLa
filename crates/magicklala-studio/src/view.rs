@@ -319,7 +319,7 @@ fn empty_canvas_overlay(app: &StudioApp, t: &HearthPalette) -> El {
     let size = app.canvas_size();
     let card_w = 400.0_f32.min(size.0 - 32.0).max(240.0);
     let x = ((size.0 - card_w) * 0.5).max(16.0);
-    let y = (size.1 * 0.62).min(size.1 - 152.0).max(216.0);
+    let y = (size.1 * 0.62 + 12.0).min(size.1 - 152.0).max(228.0);
     col().key("empty-canvas").w(card_w).px(16.0).py(12.0).items_center().gap(8.0).absolute(x, y).child(heading("Start a new potion", 24.0, 800.0, t.ink)).child(
         row().pt(4.0).child(sized_button("empty-add-trigger", "Add On Message", true, false, 16.0, t, |app| {
             app.spawn("event/on_message");
