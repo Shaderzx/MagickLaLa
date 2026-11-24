@@ -1282,6 +1282,7 @@ pub fn distillation_point(from: [f32; 2], to: [f32; 2], t: f32) -> [f32; 2] {
     cubic_point(from, c1, c2, to, t)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn distillation_ribbon_shape(
     mut shape: Shape,
     from: [f32; 2],

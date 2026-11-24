@@ -728,7 +728,7 @@ fn left_rail(app: &StudioApp, t: &HearthPalette) -> El {
                     })
                 })
             };
-            let in_pot_count = app.canvas.nodes.iter().filter(|card| card.kind != "io/send_message").count();
+            let in_pot_count = magicklala_canvas::brew_plan(&app.canvas, app.canvas_size()).with_role(magicklala_canvas::BrewRole::Ingredient).count();
             let footer_text = if !query.is_empty() {
                 let m_word = if filtered.len() == 1 { "match" } else { "matches" };
                 format!("{} {m_word} · {} in cauldron", filtered.len(), in_pot_count)

@@ -1485,6 +1485,15 @@ fn capture_surfaces(out_dir: &Path) -> Result<serde_json::Value, String> {
     branch_cauldron.canvas.fit(viewport);
     save("16-branching-cauldron-1280x800.png", branch_cauldron)?;
 
+    let mut crowded = StudioApp::with_spell(dozen_ingredient_spell(), registry_specs());
+    crowded.size = (960.0, 640.0);
+    save("17-dozen-ingredients-960x640.png", crowded)?;
+
+    let mut aside = base_desktop();
+    aside.toss(magicklala_canvas::Toss::Aside(NodeId::from("recall")));
+    aside.undo_banner = None;
+    save("18-set-aside-1280x800.png", aside)?;
+
     Ok(json!({ "surfaces": files }))
 }
 
