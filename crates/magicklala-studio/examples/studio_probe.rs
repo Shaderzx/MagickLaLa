@@ -3356,6 +3356,130 @@ fn shelf_exact(db_path: &Path) -> Result<serde_json::Value, String> {
         "moreIssues": { "chip": more, "rows": issue_rows, "total": issues_total, "opensIngredient": opened },
     }))
 }
+fn cauldron_truths() -> Result<serde_json::Value, String> {
+    let open = |spell: SpellGraph, size: (f32, f32)| {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt
+    };
+    let disabled_labels = |rt: &Runtime<StudioApp>| -> Vec<String> {
+        rt.accessibility_tree().nodes.iter().filter(|(_, node)| node.is_disabled()).filter_map(|(_, node)| node.label().map(str::to_owned)).collect()
+    };
+    let mut through_cards = Vec::new();
+    let mut off_tap = Vec::new();
+    let mut flank_after = Vec::new();
+    let spells = [
+        ("support", StudioApp::from_registry().spell.clone()),
+        ("router", example("webhook_router.json")?),
+        ("research", example("parallel_research.json")?),
+        ("dozen", dozen_ingredient_spell()),
+    ];
+    for (name, spell) in spells {
+        for size in [(1280.0_f32, 800.0_f32), (960.0, 640.0)] {
+            let rt = open(spell.clone(), size);
+            let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+            let pot = plan.pot;
+            let bottles: Vec<&magicklala_canvas::BrewCard> = plan.with_role(magicklala_canvas::BrewRole::Bottle).collect();
+            for (index, points) in magicklala_canvas::cauldron::ribbon_paths(&plan).iter().enumerate() {
+                let own = bottles.get(index).map(|card| card.id.clone());
+                let start = points.first().copied().unwrap_or_default();
+                if start[0] < pot[0] + pot[2] * 0.75 || start[1] < pot[1] + pot[3] * 0.5 {
+                    off_tap.push(format!("{name}@{}: ribbon {index} starts at {:?}", size.0, start));
+                }
+                let body = &points[..points.len().saturating_sub(points.len() / 8)];
+                for card in plan.cards.iter().filter(|card| Some(&card.id) != own.as_ref()) {
+                    if body.iter().any(|point| inside(card.rect, [point[0], point[1], 0.0, 0.0])) {
+                        through_cards.push(format!("{name}@{}: ribbon {index} crosses {}", size.0, card.id.0));
+                    }
+                }
+            }
+        }
+    }
+    for action in ["validate", "run-spell"] {
+        let mut rt = open(dozen_ingredient_spell(), (960.0, 640.0));
+        click(&mut rt, action)?;
+        live_finish(&mut rt)?;
+        rt.frame(3.0);
+        flank_after.push(magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size()).flank);
+    }
+
+    let mut router = open(example("webhook_router.json")?, (1280.0, 800.0));
+    click(&mut router, "run-spell")?;
+    live_finish(&mut router)?;
+    router.frame(3.0);
+    let mut legends = vec![router.find("canvas-legend").is_some()];
+    click(&mut router, "mode-grimoire")?;
+    router.frame(2.0);
+    legends.push(router.find("canvas-legend").is_some());
+    let mut hexed = open(StudioApp::from_registry().spell.clone(), (1280.0, 800.0));
+    hexed.update(|app, _| {
+        app.canvas.wires.retain(|wire| !(wire.to_node.0 == "recall" && wire.to_socket == "query"));
+        app.sync_spell();
+    });
+    click(&mut hexed, "validate")?;
+    hexed.frame(2.0);
+    legends.push(hexed.find("canvas-legend").is_some());
+
+    let mut shelf = open(StudioApp::from_registry().spell.clone(), (1280.0, 800.0));
+    let memory = node_of_kind(&shelf.state, "memory/search").ok_or("no memory step")?;
+    let parked = NodeId::from(memory.as_str());
+    shelf.update(move |app, _| app.toss(magicklala_canvas::Toss::Aside(parked.clone())));
+    shelf.frame(2.0);
+    let shelf_words: Vec<String> = text_lines_under(&shelf, "aside-shelf").into_iter().map(|(line, _)| line).filter(|line| line == "Set aside").collect();
+    let plank = shelf.find("aside-plank").is_some();
+    let mut shelf = open(dozen_ingredient_spell(), (960.0, 640.0));
+    let spare = shelf.state.canvas.nodes[3].id.clone();
+    shelf.update(move |app, _| app.toss(magicklala_canvas::Toss::Aside(spare.clone())));
+    for _ in 0..3 {
+        click(&mut shelf, "zoom-out")?;
+    }
+    shelf.frame(2.0);
+    let plaque = layout_rect(&shelf, "cauldron-plaque").ok_or("no plaque")?;
+    let mut plaque_hits: Vec<String> = shelf
+        .state
+        .canvas
+        .nodes
+        .iter()
+        .filter_map(|card| layout_rect(&shelf, &format!("node-{}", card.id.0)).filter(|rect| rects_touch(plaque, *rect)).map(|_| card.id.0.clone()))
+        .collect();
+    if layout_rect(&shelf, "aside-shelf").is_some_and(|rect| rects_touch(plaque, rect)) {
+        plaque_hits.push("aside-shelf".to_owned());
+    }
+
+    let mut idle = open(StudioApp::from_registry().spell.clone(), (1280.0, 800.0));
+    let trigger = NodeId::from(node_of_kind(&idle.state, "event/on_message").ok_or("no trigger")?.as_str());
+    idle.update(move |app, _| app.toss(magicklala_canvas::Toss::Aside(trigger.clone())));
+    idle.frame(1.0);
+    let brew_disabled = disabled_labels(&idle).iter().any(|label| label.starts_with("Brew"));
+    let ids: Vec<NodeId> = idle.state.canvas.nodes.iter().map(|card| card.id.clone()).collect();
+    idle.update(move |app, _| {
+        for id in &ids {
+            app.toss(magicklala_canvas::Toss::Aside(id.clone()));
+        }
+    });
+    idle.frame(1.0);
+    let empty_mood = format!("{:?}", magicklala_canvas::view::cauldron_mood(&idle.state.canvas));
+
+    let mut tasted = runtime_for(tasting_spell());
+    type_chat(&mut tasted, "What did Finance ask for Q3?")?;
+    tasted.frame(3.0);
+    let stand_words: Vec<String> = all_texts(&tasted);
+
+    Ok(json!({
+        "throughCards": through_cards,
+        "offTap": off_tap,
+        "flankAfter": flank_after,
+        "legends": legends,
+        "shelfWords": shelf_words,
+        "plank": plank,
+        "plaqueHits": plaque_hits,
+        "brewDisabled": brew_disabled,
+        "emptyMood": empty_mood,
+        "standHasTest": stand_words.iter().any(|line| line == "Test"),
+    }))
+}
 fn brew_locks(db_path: &Path) -> Result<serde_json::Value, String> {
     let mut slow_spell = delay_spell(1_500);
     slow_spell.nodes.push(NodeInstance {
@@ -3952,6 +4076,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("geometry-and-polish") => geometry_and_polish(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("shelf-keeps") => shelf_keeps(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("shelf-exact") => shelf_exact(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("cauldron-truths") => cauldron_truths(),
         Some("fit-and-wording") => fit_and_wording(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-recipe") => one_recipe(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("tray-drop") => tray_drop(),

@@ -1255,6 +1255,20 @@ test('Set-aside steps come back exactly as they left: the shelf survives a resta
     await rm(dir, { recursive: true, force: true });
   }
 });
+test('The cauldron draws only what is true: every potion leaves through the brass tap, no bottle ribbon runs behind a card, no legend chip explains the drawing, the set-aside shelf is a drawn plank with no caption, the plaque never covers a card or the shelf when zoomed out, a dozen ingredients keep both shelves after Check and Brew, Brew is disabled when no trigger is in the recipe, an all-shelved pot goes cold, and the potion stand carries no Test pill', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['cauldron-truths']);
+
+  expect(report.offTap).toEqual([]);
+  expect(report.throughCards).toEqual([]);
+  expect(report.legends).toEqual([false, false, false]);
+  expect(report.shelfWords).toEqual([]);
+  expect(report.plank).toBe(true);
+  expect(report.plaqueHits).toEqual([]);
+  expect(report.flankAfter).toEqual([true, true]);
+  expect(report.brewDisabled).toBe(true);
+  expect(report.emptyMood).toBe('Empty');
+  expect(report.standHasTest).toBe(false);
+});
 test('A brew locks the recipe and the bottles tell the truth: typing, saving, adding, dragging cards and drawing wires all wait until the brew ends and the lit result survives, branch bottles show no step numbers before a brew, a running bottle simmers without a check, a published branch potion shows its sealed version on the bottle, and thirteen-step and thirty-eight-step brews and a many-issue Check keep every log chip and the result inside the log at 960 and 1280', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-locks-'));
   try {

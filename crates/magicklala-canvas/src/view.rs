@@ -91,7 +91,7 @@ pub fn interactive_canvas_view<S: 'static>(state: &CanvasState, size: (f32, f32)
     }
 }
 
-pub(crate) fn cauldron_mood(state: &CanvasState) -> CauldronMood {
+pub fn cauldron_mood(state: &CanvasState) -> CauldronMood {
     if state.nodes.is_empty() {
         return CauldronMood::Empty;
     }
