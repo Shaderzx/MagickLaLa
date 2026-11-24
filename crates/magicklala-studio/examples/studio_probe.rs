@@ -2211,6 +2211,59 @@ fn potion_colours() -> Result<serde_json::Value, String> {
     Ok(serde_json::Value::Object(out))
 }
 
+fn inside(outer: [f32; 4], inner: [f32; 4]) -> bool {
+    inner[0] >= outer[0] - 0.5
+        && inner[1] >= outer[1] - 0.5
+        && inner[0] + inner[2] <= outer[0] + outer[2] + 0.5
+        && inner[1] + inner[3] <= outer[1] + outer[3] + 0.5
+}
+
+fn grimoire_place() -> Result<serde_json::Value, String> {
+    let mut app = StudioApp::from_registry();
+    app.size = (960.0, 640.0);
+    app.left_rail_pinned = true;
+    let mut rt = Runtime::new(app, studio_view, (960.0, 640.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    rt.update(|app, _| {
+        app.spawn("ai/generate_text");
+    });
+    let fresh = rt.state.canvas.nodes.last().map(|card| card.id.0.clone()).ok_or("nothing spawned")?;
+    click(&mut rt, "mode-grimoire")?;
+    rt.frame(1.0);
+    rt.frame(2.0);
+    let canvas = rt.presented("canvas").map(|(rect, _)| rect).ok_or("no canvas")?;
+    let ids: Vec<String> = rt.state.canvas.nodes.iter().map(|card| card.id.0.clone()).collect();
+    let offscreen: Vec<String> = ids.iter().filter(|id| rt.presented(&format!("node-{id}")).is_none_or(|(rect, _)| !inside(canvas, rect))).cloned().collect();
+    let world = |id: &str| rt.state.canvas.card(&NodeId::from(id)).map(|card| [card.position[0], card.position[1], card.size[0], card.size[1]]);
+    let fresh_rect = world(&fresh).ok_or("fresh missing")?;
+    let overlaps: Vec<String> =
+        ids.iter().filter(|id| **id != fresh).filter(|id| world(id).is_some_and(|other| rects_overlap(fresh_rect, other))).cloned().collect();
+    let llm_x = world("llm").map(|rect| rect[0]).unwrap_or_default();
+
+    let mut webhook = StudioApp::with_spell(example("webhook_router.json")?, registry_specs());
+    webhook.size = (960.0, 640.0);
+    webhook.left_rail_pinned = true;
+    webhook.run_payload = json!({ "method": "POST", "path": "/hooks/router", "body": { "type": "order", "id": "42" } });
+    let mut hook = Runtime::new(webhook, studio_view, (960.0, 640.0), Env::new(true, 1.0));
+    click(&mut hook, "run-spell")?;
+    live_finish(&mut hook)?;
+    let bottles: Vec<String> = magicklala_canvas::brew_plan(&hook.state.canvas, hook.state.canvas_size())
+        .with_role(magicklala_canvas::BrewRole::Bottle)
+        .map(|card| card.id.0.clone())
+        .collect();
+    let routes: Vec<serde_json::Value> = bottles
+        .iter()
+        .filter_map(|id| {
+            let label = hook.presented(&format!("route-{id}")).map(|(rect, _)| rect)?;
+            let card = hook.presented(&format!("node-{id}")).map(|(rect, _)| rect)?;
+            Some(json!({ "bottle": id, "insideCard": inside(card, label) }))
+        })
+        .collect();
+    Ok(
+        json!({ "offscreen": offscreen, "fresh": fresh, "freshX": fresh_rect[0], "llmX": llm_x, "overlaps": overlaps, "routes": routes, "bottles": bottles.len() }),
+    )
+}
+
 fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
         Some("surfaces") => capture_surfaces(Path::new(args.get(1).ok_or("missing output directory")?)),
@@ -2225,6 +2278,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("toss-safety") => toss_safety(),
         Some("recipe-honesty") => recipe_honesty(),
         Some("potion-colours") => potion_colours(),
+        Some("grimoire-place") => grimoire_place(),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-ref-edit") => subgraph_ref_edit(Path::new(args.get(1).ok_or("missing database path")?)),

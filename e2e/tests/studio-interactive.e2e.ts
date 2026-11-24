@@ -1026,3 +1026,13 @@ test('A brewed potion takes the colour of the last ingredient poured in, so the 
   expect(webhook.potion).toBe(webhook.lastPoured[1]);
   expect(tasting.potion).not.toBe(webhook.potion);
 });
+
+test('Opening the Grimoire for the first time on a 960 by 640 window with the pantry pinned shows every node on screen, a Generate Text tossed in the cauldron sits after the old model without covering any node, and every branch route label sits inside its own bottle card', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['grimoire-place']);
+
+  expect(report.offscreen).toEqual([]);
+  expect(report.overlaps).toEqual([]);
+  expect(report.freshX).toBeGreaterThan(report.llmX);
+  expect(report.routes).toHaveLength(report.bottles);
+  for (const route of report.routes) expect(route.insideCard, route.bottle).toBe(true);
+});
