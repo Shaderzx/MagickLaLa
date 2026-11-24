@@ -844,3 +844,45 @@ test('The cauldron shows every ingredient and bottle of the support, webhook rou
     }
   }
 });
+
+type SocketInfo = { name: string; ty: string; required: boolean };
+type KindSockets = { inputs: SocketInfo[]; outputs: SocketInfo[] };
+
+test('Tossing On Message, Generate Text and Send Message into an empty cauldron from the pantry brews a recipe that checks valid: flow runs trigger to model to reply and each required text input is fed by the step before it', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['toss']);
+  const { ids, specs, wires, validation } = report.built;
+  const [trigger, model, reply] = ids as string[];
+  const flowOut = (kind: string) => (specs[kind] as KindSockets).outputs.find((socket) => socket.ty === 'Flow')!.name;
+  const flowIn = (kind: string) => (specs[kind] as KindSockets).inputs.find((socket) => socket.ty === 'Flow')!.name;
+  const requiredText = (kind: string) => (specs[kind] as KindSockets).inputs.filter((socket) => socket.required && socket.ty === 'String').map((socket) => socket.name);
+  const textOut = (kind: string) => (specs[kind] as KindSockets).outputs.find((socket) => socket.ty === 'String')!.name;
+
+  expect(ids.every((id: string | null) => typeof id === 'string')).toBe(true);
+  const expected = [
+    [trigger, flowOut('event/on_message'), model, flowIn('ai/generate_text')],
+    ...requiredText('ai/generate_text').map((input) => [trigger, textOut('event/on_message'), model, input]),
+    [model, flowOut('ai/generate_text'), reply, flowIn('io/send_message')],
+    ...requiredText('io/send_message').map((input) => [model, textOut('ai/generate_text'), reply, input]),
+  ];
+  expect([...wires].sort()).toEqual([...expected].sort());
+  expect(validation).toBe('valid');
+});
+
+test('Dragging a pantry ingredient onto the cauldron adds exactly one node of that kind and wires it into the recipe', { timeout: 900_000 }, async () => {
+  const { pantryDrop } = await studioProbe(['toss']);
+
+  expect(pantryDrop.nodesAfter).toBe(pantryDrop.nodesBefore + 1);
+  expect(pantryDrop.id).not.toBeNull();
+  expect(pantryDrop.wires.length).toBeGreaterThan(0);
+});
+
+test('Dragging a vial off the cauldron sets it aside with every wire removed, dragging it back pours it in again, and no cauldron drag ever moves a node in the Grimoire', { timeout: 900_000 }, async () => {
+  const { setAside } = await studioProbe(['toss']);
+
+  expect(setAside.wiresBefore).toBeGreaterThan(0);
+  expect(setAside.wiresAside).toBe(0);
+  expect(setAside.roleAside).toBe('Aside');
+  expect(setAside.wiresBack).toBeGreaterThan(0);
+  expect(setAside.roleBack).toBe('Ingredient');
+  expect(setAside.positionsAfter).toEqual(setAside.positionsBefore);
+});

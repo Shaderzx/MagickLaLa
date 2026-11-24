@@ -531,11 +531,15 @@ fn probe(desktop: PathBuf, compact: PathBuf, db_path: PathBuf) -> Result<serde_j
     let nodes_after = rt.state.canvas.nodes.len();
     let spawned_kind = rt.state.canvas.nodes.last().map(|card| card.kind.clone()).unwrap_or_default();
 
+    rt.update(|app, _| app.canvas.mode = magicklala_canvas::WorkbenchMode::Grimoire);
+    rt.frame(0.0);
     let dragged = "search";
     let before = rt.state.canvas.card(&dragged.into()).map(|card| rt.state.canvas.camera.world_to_screen(card.position)).ok_or("search node missing")?;
     let pointer_delta = (64.0_f32, 36.0_f32);
     drag(&mut rt, &format!("node-{dragged}-header"), pointer_delta)?;
     let after = rt.state.canvas.card(&dragged.into()).map(|card| rt.state.canvas.camera.world_to_screen(card.position)).ok_or("search node missing")?;
+    rt.update(|app, _| app.canvas.mode = magicklala_canvas::WorkbenchMode::Cauldron);
+    rt.frame(0.0);
 
     let spawned_id = rt.state.canvas.nodes.last().map(|card| card.id.clone()).ok_or("spawned node missing")?;
     rt.update(|app, _| {
@@ -1785,11 +1789,102 @@ fn pot_layout() -> Result<serde_json::Value, String> {
     Ok(json!({ "cases": cases }))
 }
 
+fn wire_list(app: &StudioApp) -> Vec<serde_json::Value> {
+    app.spell.wires.iter().map(|wire| json!([wire.from_node.0, wire.from_socket, wire.to_node.0, wire.to_socket])).collect()
+}
+
+fn spec_sockets(kind: &str) -> serde_json::Value {
+    let specs = registry_specs();
+    let Some(spec) = specs.iter().find(|spec| spec.kind == kind) else { return json!(null) };
+    let side = |sockets: &[magicklala_graph::SocketSpec]| -> Vec<serde_json::Value> {
+        sockets.iter().map(|socket| json!({ "name": socket.name, "ty": format!("{:?}", socket.ty), "required": socket.required })).collect()
+    };
+    json!({ "inputs": side(&spec.inputs), "outputs": side(&spec.outputs) })
+}
+
+fn node_of_kind(app: &StudioApp, kind: &str) -> Option<String> {
+    app.spell.nodes.iter().rev().find(|node| node.kind == kind).map(|node| node.id.0.clone())
+}
+
+fn toss() -> Result<serde_json::Value, String> {
+    let recipe = ["event/on_message", "ai/generate_text", "io/send_message"];
+    let mut built = headless(StudioApp::with_spell(SpellGraph::new("Tossed"), registry_specs()));
+    let mut clock = 0.0;
+    for kind in recipe {
+        let title = registry_specs().iter().find(|spec| spec.kind == kind).map(|spec| spec.title.clone()).ok_or("unknown kind")?;
+        built.update(|app, _| app.palette_query = rune::TextEdit::new(&title));
+        clock += 0.5;
+        click_at(&mut built, &format!("palette-{}", kind.replace('/', "-")), clock)?;
+    }
+    built.update(|app, _| app.palette_query = rune::TextEdit::new(""));
+    click_at(&mut built, "validate", clock + 1.0)?;
+    let built_report = json!({
+        "ids": recipe.iter().map(|kind| node_of_kind(&built.state, kind)).collect::<Vec<_>>(),
+        "wires": wire_list(&built.state),
+        "validation": built.state.validation.label(),
+        "specs": recipe.iter().map(|kind| (kind.to_string(), spec_sockets(kind))).collect::<serde_json::Map<_, _>>(),
+    });
+
+    let mut rt = headless(StudioApp::from_registry());
+    let positions_before: Vec<[f32; 2]> = rt.state.canvas.nodes.iter().map(|card| card.position).collect();
+    let pot = rt.presented("cauldron-center").map(|(rect, _)| [rect[0] + rect[2] * 0.5, rect[1] + rect[3] * 0.5]).ok_or("no cauldron")?;
+    let row = rt.find("palette-memory-recall").or_else(|| rt.find("palette-text-template")).ok_or("no pantry row")?;
+    let kind_dragged = if rt.find("palette-memory-recall").is_some() { "memory/recall" } else { "text/template" };
+    let nodes_before = rt.state.spell.nodes.len();
+    drag(&mut rt, &format!("palette-{}", kind_dragged.replace('/', "-")), (pot[0] - row.0, pot[1] - row.1))?;
+    let dropped = node_of_kind(&rt.state, kind_dragged);
+    let dropped_wires: Vec<serde_json::Value> = dropped
+        .as_ref()
+        .map(|id| {
+            rt.state
+                .spell
+                .wires
+                .iter()
+                .filter(|wire| &wire.from_node.0 == id || &wire.to_node.0 == id)
+                .map(|wire| json!([wire.from_node.0, wire.from_socket, wire.to_node.0, wire.to_socket]))
+                .collect()
+        })
+        .unwrap_or_default();
+    let pantry_drop =
+        json!({ "kind": kind_dragged, "nodesBefore": nodes_before, "nodesAfter": rt.state.spell.nodes.len(), "id": dropped, "wires": dropped_wires });
+
+    let mut aside_rt = headless(StudioApp::from_registry());
+    let target = "recall";
+    let header = format!("node-{target}-header");
+    let start = aside_rt.find(&header).ok_or("no recall vial")?;
+    let canvas_rect = aside_rt.presented("canvas").map(|(rect, _)| rect).ok_or("no canvas")?;
+    let away = [canvas_rect[0] + 40.0, canvas_rect[1] + canvas_rect[3] - 30.0];
+    let wires_before = aside_rt.state.spell.wires.iter().filter(|wire| wire.from_node.0 == target || wire.to_node.0 == target).count();
+    drag(&mut aside_rt, &header, (away[0] - start.0, away[1] - start.1))?;
+    let wires_aside = aside_rt.state.spell.wires.iter().filter(|wire| wire.from_node.0 == target || wire.to_node.0 == target).count();
+    let role_aside =
+        magicklala_canvas::brew_plan(&aside_rt.state.canvas, aside_rt.state.canvas_size()).card(&NodeId::from(target)).map(|card| format!("{:?}", card.role));
+    let back_from = aside_rt.find(&header).ok_or("vial vanished")?;
+    let pot_now = aside_rt.presented("cauldron-center").map(|(rect, _)| [rect[0] + rect[2] * 0.5, rect[1] + rect[3] * 0.5]).ok_or("no cauldron")?;
+    drag(&mut aside_rt, &header, (pot_now[0] - back_from.0, pot_now[1] - back_from.1))?;
+    let wires_back = aside_rt.state.spell.wires.iter().filter(|wire| wire.from_node.0 == target || wire.to_node.0 == target).count();
+    let role_back =
+        magicklala_canvas::brew_plan(&aside_rt.state.canvas, aside_rt.state.canvas_size()).card(&NodeId::from(target)).map(|card| format!("{:?}", card.role));
+    let positions_after: Vec<[f32; 2]> = aside_rt.state.canvas.nodes.iter().map(|card| card.position).collect();
+    let set_aside = json!({
+        "node": target,
+        "wiresBefore": wires_before,
+        "wiresAside": wires_aside,
+        "roleAside": role_aside,
+        "wiresBack": wires_back,
+        "roleBack": role_back,
+        "positionsBefore": positions_before,
+        "positionsAfter": positions_after,
+    });
+    Ok(json!({ "built": built_report, "pantryDrop": pantry_drop, "setAside": set_aside }))
+}
+
 fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
         Some("surfaces") => capture_surfaces(Path::new(args.get(1).ok_or("missing output directory")?)),
         Some("hex-pinpoint") => hex_pinpoint(),
         Some("pot-layout") => pot_layout(),
+        Some("toss") => toss(),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-ref-edit") => subgraph_ref_edit(Path::new(args.get(1).ok_or("missing database path")?)),
