@@ -1141,6 +1141,24 @@ impl StudioApp {
         self.dirty = true;
     }
 
+    pub fn remove_variable_at(&mut self, index: usize) {
+        if let Some(name) = self.spell.variables.get(index).map(|variable| variable.name.clone()) {
+            self.remove_variable(&name);
+        }
+    }
+
+    pub fn toggle_var_type_menu_at(&mut self, index: usize) {
+        if let Some(name) = self.spell.variables.get(index).map(|variable| variable.name.clone()) {
+            self.toggle_var_type_menu(&name);
+        }
+    }
+
+    pub fn set_variable_type_at(&mut self, index: usize, ty: SocketType) {
+        if let Some(name) = self.spell.variables.get(index).map(|variable| variable.name.clone()) {
+            self.set_variable_type(&name, ty);
+        }
+    }
+
     pub fn remove_variable(&mut self, name: &str) {
         if self.is_running() {
             return;

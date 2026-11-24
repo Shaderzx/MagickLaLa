@@ -3620,7 +3620,7 @@ fn quiet_corners(db_path: &Path) -> Result<serde_json::Value, String> {
     });
     slow.update(|app, _| {
         app.toggle_model_menu();
-        app.toggle_var_type_menu("mood");
+        app.toggle_var_type_menu_at(0);
         app.request_restore_release(1);
         app.pantry_drag_move("io/send_message", [600.0, 300.0]);
     });
@@ -3652,7 +3652,11 @@ fn quiet_corners(db_path: &Path) -> Result<serde_json::Value, String> {
     });
     let added = words.state.spell.variables.last().map(|variable| variable.name.clone()).unwrap_or_default();
     let removed = added.clone();
-    words.update(move |app, _| app.remove_variable(&removed));
+    words.update(move |app, _| {
+        if let Some(index) = app.spell.variables.iter().position(|variable| variable.name == removed) {
+            app.remove_variable_at(index);
+        }
+    });
     let banner = words.state.undo_banner.clone();
     let mut script = runtime_for(example("webhook_router.json")?);
     let rhai = NodeId::from(node_of_kind(&script.state, "code/rhai_script").ok_or("no script")?.as_str());
@@ -3683,7 +3687,9 @@ fn quiet_corners(db_path: &Path) -> Result<serde_json::Value, String> {
     let typed = name.clone();
     vars.update(move |app, _| {
         app.right_tab = RightTab::Variables;
-        app.set_variable_type(&typed, SocketType::Int);
+        if let Some(index) = app.spell.variables.iter().position(|variable| variable.name == typed) {
+            app.set_variable_type_at(index, SocketType::Int);
+        }
         if let Some(edit) = app.var_default_edits.last_mut() {
             *edit = rune::TextEdit::new("abc");
         }
@@ -3693,7 +3699,11 @@ fn quiet_corners(db_path: &Path) -> Result<serde_json::Value, String> {
     let index = vars.state.spell.variables.len() - 1;
     let flagged = vars.find(&format!("var-default-error-{index}")).is_some();
     let opened = name.clone();
-    vars.update(move |app, _| app.toggle_var_type_menu(&opened));
+    vars.update(move |app, _| {
+        if let Some(index) = app.spell.variables.iter().position(|variable| variable.name == opened) {
+            app.toggle_var_type_menu_at(index);
+        }
+    });
     vars.frame(1.0);
     let json_choice = text_lines_under(&vars, &format!("var-type-menu-{name}")).iter().any(|(line, _)| line == "Json");
     let token = format!("{{{{{name}}}}}");
@@ -3805,6 +3815,196 @@ fn quiet_corners(db_path: &Path) -> Result<serde_json::Value, String> {
         "streamModel": stream_model,
         "divider": { "width": divider, "panel": panel },
         "starter": { "clicked": starter, "nodes": starter_nodes },
+    }))
+}
+fn honest_state(db_path: &Path) -> Result<serde_json::Value, String> {
+    let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
+        id: NodeId::from(id),
+        kind: kind.to_owned(),
+        position: [x * 260.0, 0.0],
+        config,
+    };
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let mut pair = SpellGraph::new("Neighbour Agent");
+    pair.nodes = vec![
+        place("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        place("first", "time/delay", 1.0, json!({ "ms": 0 })),
+        place("second", "time/delay", 2.0, json!({ "ms": 0 })),
+        place("reply", "io/send_message", 3.0, serde_json::Value::Null),
+    ];
+    pair.wires = vec![
+        wire("n1", ("trigger", "out"), ("first", "in")),
+        wire("n2", ("first", "out"), ("second", "in")),
+        wire("n3", ("second", "out"), ("reply", "in")),
+        wire("n4", ("trigger", "content"), ("reply", "content")),
+    ];
+    let mut setup = studio_at(db_path)?;
+    setup.update(move |app, _| {
+        app.new_empty_spell();
+        app.load_graph(pair.clone());
+    });
+    setup.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("first"))));
+    setup.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("second"))));
+    let shelved_reply = chat_reply(&mut setup, "solo")?;
+    click(&mut setup, "save")?;
+    let mut orders = Vec::new();
+    for order in [["first", "second"], ["second", "first"]] {
+        let mut rt = studio_at(db_path)?;
+        for id in order {
+            rt.update(move |app, _| app.toss(magicklala_canvas::Toss::IntoPot(NodeId::from(id))));
+        }
+        let feeders: Vec<String> = feeders_of(&rt.state, "reply").into_iter().filter(|line| line.ends_with("->in")).collect();
+        orders.push(json!({ "order": order, "flowIntoReply": feeders, "said": chat_reply(&mut rt, "once")? }));
+    }
+
+    let mut mute = SpellGraph::new("Cut Agent");
+    mute.nodes = vec![
+        place("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        place("wait", "time/delay", 1.0, json!({ "ms": 0 })),
+        place("reply", "io/send_message", 2.0, serde_json::Value::Null),
+    ];
+    mute.wires = vec![wire("c2", ("wait", "out"), ("reply", "in")), wire("c3", ("trigger", "content"), ("reply", "content"))];
+    let cut = runtime_for(mute);
+    let cut_reply = role_of(&cut.state, "reply");
+
+    let mut typed = studio_at(db_path)?;
+    typed.update(|app, _| {
+        app.new_empty_spell();
+        app.load_graph(StudioApp::from_registry().spell.clone());
+        app.add_variable();
+    });
+    let last = typed.state.spell.variables.len() - 1;
+    typed.update(move |app, _| {
+        app.set_variable_type_at(last, SocketType::Int);
+        if let Some(edit) = app.var_default_edits.get_mut(last) {
+            *edit = rune::TextEdit::new("5");
+        }
+        app.sync_spell();
+    });
+    click(&mut typed, "save")?;
+    typed.update(move |app, _| {
+        if let Some(edit) = app.var_default_edits.get_mut(last) {
+            *edit = rune::TextEdit::new("oops");
+        }
+        app.sync_spell();
+    });
+    click(&mut typed, "validate")?;
+    let bad_check = typed.state.validation.label();
+    let _ = click(&mut typed, "save");
+    let bad_save = typed.state.draft_status.clone();
+    let releases_before = typed.state.releases.len();
+    typed.update(|app, _| {
+        let _ = app.publish();
+    });
+    let bad_publish = typed.state.releases.len() - releases_before;
+    typed.update(move |app, _| {
+        app.add_variable();
+        let fresh = app.spell.variables.len() - 1;
+        app.set_variable_type_at(fresh, SocketType::Json);
+    });
+    let json_default = typed.state.spell.variables.last().and_then(|variable| variable.default.clone()).map(|value| format!("{value:?}"));
+
+    let mut live = studio_at(db_path)?;
+    live.update(|app, _| {
+        app.new_empty_spell();
+        app.load_graph(tasting_spell());
+    });
+    click(&mut live, "publish")?;
+    let echo = NodeId::from("echo");
+    let parked = echo.clone();
+    live.update(move |app, _| {
+        app.toss(magicklala_canvas::Toss::Aside(parked.clone()));
+        app.undo();
+    });
+    let after_undo = live.state.active_release_version;
+    live.update(|app, _| {
+        let _ = app.spawn("flow/subgraph");
+        app.sync_spell();
+    });
+    let after_parked_sub = live.state.active_release_version;
+    let count_before = live.state.releases.len();
+    live.update(|app, _| {
+        let _ = app.publish();
+    });
+    let duplicate = live.state.releases.len() - count_before;
+
+    let mut mended = headless(StudioApp::from_registry());
+    mended.update(|app, _| {
+        app.canvas.wires.retain(|wire| !(wire.to_node.0 == "recall" && wire.to_socket == "query"));
+        app.sync_spell();
+    });
+    click(&mut mended, "validate")?;
+    let hexed_first = mended.state.validation.label();
+    let trigger = NodeId::from(node_of_kind(&mended.state, "event/on_message").ok_or("no trigger")?.as_str());
+    mended.update(move |app, _| {
+        let _ = app.canvas.connect_sockets(&SocketRef::new(trigger.clone(), "content"), &SocketRef::new(NodeId::from("recall"), "query"));
+        app.sync_spell();
+    });
+    let mended_state = json!({
+        "before": hexed_first,
+        "after": mended.state.validation.label(),
+        "flagged": mended.state.canvas.nodes.iter().flat_map(|card| card.inputs.iter()).filter(|socket| socket.flagged || socket.mistyped).count(),
+    });
+
+    let mut once = SpellGraph::new("Once Agent");
+    once.nodes = vec![
+        place("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        place("once", "flow/do_once", 1.0, serde_json::Value::Null),
+        place("reply", "io/send_message", 2.0, serde_json::Value::Null),
+    ];
+    once.wires = vec![
+        wire("o1", ("trigger", "out"), ("once", "in")),
+        wire("o2", ("once", "out"), ("reply", "in")),
+        wire("o3", ("trigger", "content"), ("reply", "content")),
+    ];
+    let mut grim = runtime_for(once);
+    grim.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("once"))));
+    grim.update(|app, _| {
+        app.canvas.mode = magicklala_canvas::WorkbenchMode::Grimoire;
+        let _ = app.canvas.connect_sockets(&SocketRef::new(NodeId::from("trigger"), "out"), &SocketRef::new(NodeId::from("once"), "in"));
+        let _ = app.canvas.connect_sockets(&SocketRef::new(NodeId::from("once"), "out"), &SocketRef::new(NodeId::from("reply"), "in"));
+        app.sync_spell();
+    });
+    let mut grim_reply: Vec<String> = feeders_of(&grim.state, "reply").into_iter().filter(|line| line.ends_with("->in")).collect();
+    grim_reply.sort();
+    let mut shelf_grim = runtime_for(StudioApp::from_registry().spell.clone());
+    let memory = NodeId::from(node_of_kind(&shelf_grim.state, "memory/search").ok_or("no memory")?.as_str());
+    let marked = memory.clone();
+    shelf_grim.update(move |app, _| app.toss(magicklala_canvas::Toss::Aside(marked.clone())));
+    click(&mut shelf_grim, "mode-grimoire")?;
+    shelf_grim.frame(1.0);
+    let grim_badge = text_lines_under(&shelf_grim, &format!("node-{}", memory.0)).iter().any(|(line, _)| line == "Set aside");
+
+    let mut tight = runtime_for(dozen_ingredient_spell());
+    tight.update(|app, _| app.size = (960.0, 640.0));
+    tight.set_viewport((960.0, 640.0), 1.0);
+    click(&mut tight, "run-spell")?;
+    live_finish(&mut tight)?;
+    tight.frame(2.0);
+    let model = NodeId::from(node_of_kind(&tight.state, "ai/generate_text").ok_or("no model")?.as_str());
+    tight.update(move |app, _| {
+        app.canvas.select(Some(model.clone()));
+        app.right_tab = RightTab::Inspector;
+    });
+    tight.frame(1.0);
+    let editor = tight.presented("prompt-editor").map(|(rect, _)| rect[1] + rect[3]);
+    let panel = tight.presented("inspector").map(|(rect, _)| rect[1] + rect[3]);
+
+    Ok(json!({
+        "shelvedReply": shelved_reply,
+        "orders": orders,
+        "cutReply": cut_reply,
+        "badDefault": { "check": bad_check, "save": bad_save, "published": bad_publish, "json": json_default },
+        "live": { "afterUndo": after_undo, "afterParkedSub": after_parked_sub, "duplicate": duplicate },
+        "mended": mended_state,
+        "grimoire": { "reply": grim_reply, "badge": grim_badge },
+        "editor": { "bottom": editor, "panel": panel },
     }))
 }
 fn brew_locks(db_path: &Path) -> Result<serde_json::Value, String> {
@@ -4408,6 +4608,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("shelf-keeps") => shelf_keeps(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("shelf-exact") => shelf_exact(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("cauldron-truths") => cauldron_truths(),
+        Some("honest-state") => honest_state(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("quiet-corners") => quiet_corners(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("shot") => shot(args),
         Some("fit-and-wording") => fit_and_wording(Path::new(args.get(1).ok_or("missing database path")?)),

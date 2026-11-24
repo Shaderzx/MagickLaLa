@@ -1299,6 +1299,27 @@ test('Quiet corners tell the truth: saved potions count ingredients, a brew lock
     await rm(dir, { recursive: true, force: true });
   }
 });
+test('Studio state stays honest: two shelved neighbours poured back in either order after a reopen give one reply, a reply no trigger flow reaches is no bottle, a bad typed variable fails Check and blocks Save and Publish while Json resets to no value, undo and parked sub-spells keep a potion live, mending a hex clears it, wiring a shelved step in the Grimoire drops its bypass and the Grimoire marks shelved steps, and the 960 prompt editor fits after Check', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-honest-'));
+  try {
+    const report = await studioProbe(['honest-state', join(dir, 'studio.sqlite')]);
+
+    expect(report.shelvedReply).toBe('solo');
+    for (const poured of report.orders) {
+      expect(poured.flowIntoReply).toEqual(['second.out->in']);
+      expect(poured.said).toBe('once');
+    }
+    expect(report.cutReply).toBe('Aside');
+    expect(report.badDefault).toEqual({ check: 'invalid', save: null, published: 0, json: null });
+    expect(report.live).toEqual({ afterUndo: 1, afterParkedSub: 1, duplicate: 0 });
+    expect(report.mended).toEqual({ before: 'invalid', after: 'unchecked', flagged: 0 });
+    expect(report.grimoire.reply).toEqual(['once.out->in']);
+    expect(report.grimoire.badge).toBe(true);
+    expect(report.editor.bottom).toBeLessThanOrEqual(report.editor.panel);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 test('A brew locks the recipe and the bottles tell the truth: typing, saving, adding, dragging cards and drawing wires all wait until the brew ends and the lit result survives, branch bottles show no step numbers before a brew, a running bottle simmers without a check, a published branch potion shows its sealed version on the bottle, and thirteen-step and thirty-eight-step brews and a many-issue Check keep every log chip and the result inside the log at 960 and 1280', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-locks-'));
   try {
