@@ -5,29 +5,31 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use magicklala_canvas::{CanvasState, ExecutionStatus, category_accent, interactive_canvas_view, status_color};
+use magicklala_canvas::{CanvasState, ExecutionStatus, NodeCardModel, WireModel, WorkbenchMode};
 use magicklala_graph::{
-    EngineServices, EventEmitter, NodeCatalog, NodeId, NodeInstance, NodeSpec, RunStatus, RunSummary, RunTrigger, SUBGRAPH_KIND, SpellEngine, SpellGraph,
-    SpellId, SpellValidator, SubgraphKey, SubgraphRef, SubgraphResolver, TraceEvent, Value, VariableDef, Wire, WireId, resolve_subgraphs_from,
+    EngineServices, EventEmitter, NodeCatalog, NodeId, NodeInstance, NodeSpec, RunStatus, RunSummary, RunTrigger, SUBGRAPH_KIND, SocketType, SpellEngine,
+    SpellGraph, SpellId, SpellValidator, SubgraphKey, SubgraphRef, SubgraphResolver, TraceEvent, Value, VariableDef, Wire, WireId, resolve_subgraphs_from,
 };
 use magicklala_nodes::{HttpLlmGateway, InMemoryKnowledge, InMemoryMemory, LlmGatewayConfig, default_registry};
 use magicklala_store::{NewProject, NewSpell, NewSpellRelease, ProjectId, Repository, SpellRecord, SpellRecordId, SpellRelease, SqliteStore, StoreError};
-use rune::{App, AppSpec, Color, Cx, El, ScrollSpec, TextEdit, TextStyle, Waker, col, el, row, text, text_input};
+use rune::text::TextSystem;
+use rune::{App, AppSpec, TextEdit, Waker};
 use serde_json::json;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 const TITLE: &str = "MagickLaLa Studio";
-pub const TOOLBAR_HEIGHT: f32 = 48.0;
-pub const LEFT_RAIL_WIDTH: f32 = 240.0;
-pub const INSPECTOR_WIDTH: f32 = 300.0;
-pub const TRACE_HEIGHT: f32 = 110.0;
+pub const TOOLBAR_HEIGHT: f32 = 52.0;
+pub const LEFT_RAIL_WIDTH: f32 = 228.0;
+pub const INSPECTOR_WIDTH: f32 = 296.0;
+pub const TRACE_HEIGHT: f32 = 102.0;
+pub const IDLE_TRACE_HEIGHT: f32 = 46.0;
 pub const PALETTE_CATEGORY_ORDER: [&str; 13] =
     ["events", "flow", "ai", "memory", "knowledge", "io", "code", "variables", "text", "logic", "json", "network", "time"];
 pub const LEGACY_KIND_PREFIX: &str = "core/";
-pub const CONTEXT_MENU_SIZE: (f32, f32) = (210.0, 150.0);
+pub const CONTEXT_MENU_SIZE: (f32, f32) = (248.0, 158.0);
 pub const QUICK_ADD_KIND: &str = "ai/generate_text";
-pub const COMPACT_TOOLBAR_BELOW: f32 = 1100.0;
+pub const COMPACT_TOOLBAR_BELOW: f32 = 1120.0;
 pub const STUDIO_PROJECT: &str = "Studio";
 pub const STUDIO_CHANNEL: &str = "studio";
 pub const STUDIO_SENDER: &str = "studio-user";
@@ -35,16 +37,26 @@ pub const CHAT_TRIGGER_KIND: &str = "event/on_message";
 pub const DEFAULT_RUN_TIMEOUT: Duration = Duration::from_secs(60);
 pub const PROMPT_EDITOR_PADDING: f32 = 10.0;
 pub const PROMPT_EDITOR_HEIGHT: f32 = 172.0;
-pub const COMPACT_PROMPT_EDITOR_HEIGHT: f32 = 148.0;
+pub const COMPACT_PROMPT_EDITOR_HEIGHT: f32 = 152.0;
 pub const COMPACT_INSPECTOR_BELOW: f32 = 720.0;
-pub const RUN_SLOT_WIDTH: f32 = 88.0;
+pub const RUN_SLOT_WIDTH: f32 = 90.0;
 pub const COMPACT_RUN_SLOT_WIDTH: f32 = 64.0;
 const PUBLISH_NOTES: &str = "Published from Studio";
+
+static BRICOLAGE_GROTESK: &[u8] = include_bytes!("../assets/fonts/BricolageGrotesque-Variable.ttf");
+static JETBRAINS_MONO: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Variable.ttf");
+pub const STUDIO_FONTS: &[&[u8]] = &[BRICOLAGE_GROTESK, JETBRAINS_MONO];
+pub const STUDIO_FAMILIES: (&str, &str) = ("Bricolage Grotesque, system-ui, sans-serif", "JetBrains Mono, ui-monospace, monospace");
+
+pub fn studio_text_system() -> TextSystem {
+    TextSystem::for_window(STUDIO_FONTS, STUDIO_FAMILIES)
+}
 
 static LAUNCH_SIZE: Mutex<Option<(f32, f32)>> = Mutex::new(None);
 static LAUNCH_THEME: Mutex<Option<Theme>> = Mutex::new(None);
 static LAUNCH_DB: Mutex<Option<PathBuf>> = Mutex::new(None);
 static LAUNCH_RUN_TIMEOUT: Mutex<Option<Duration>> = Mutex::new(None);
+static LAUNCH_PREPARED: Mutex<Option<StudioApp>> = Mutex::new(None);
 static RUNTIME: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
 
 #[derive(Debug, Error)]
@@ -209,6 +221,10 @@ impl StudioStore {
 
     pub fn spell_record_id(&self) -> Option<SpellRecordId> {
         self.spell_record_id
+    }
+
+    pub fn detach_record(&mut self) {
+        self.spell_record_id = None;
     }
 
     fn resolve_spell_record(&mut self, spell: &SpellGraph) -> Result<SpellRecordId, StudioError> {
@@ -556,6 +572,7 @@ pub enum LeftTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RightTab {
     Inspector,
+    Trace,
     Variables,
     Playground,
 }
@@ -583,6 +600,7 @@ pub struct TraceLine {
     pub kind: &'static str,
     pub detail: String,
     pub status: ExecutionStatus,
+    pub node: Option<NodeId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -597,6 +615,18 @@ pub struct Release {
     pub nodes: usize,
 }
 
+#[derive(Debug, Clone)]
+pub enum UndoEntry {
+    Node { card: NodeCardModel, prompt: Option<TextEdit>, version: Option<TextEdit>, config: Option<serde_json::Value>, wires: Vec<WireModel> },
+    Variable { index: usize, variable: VariableDef, name_edit: TextEdit, default_edit: TextEdit },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingSwitch {
+    NewPotion,
+    Sample(String),
+}
+
 pub struct StudioApp {
     pub spell: SpellGraph,
     pub canvas: CanvasState,
@@ -605,6 +635,19 @@ pub struct StudioApp {
     pub theme: Theme,
     pub left_tab: LeftTab,
     pub right_tab: RightTab,
+    pub left_rail_pinned: bool,
+    pub trace_expanded: bool,
+    pub model_menu_open: bool,
+    pub open_var_type: Option<String>,
+    pub pending_type_reset: Option<(String, SocketType)>,
+    pub pending_restore_version: Option<u32>,
+    pub pending_switch: Option<PendingSwitch>,
+    pub var_name_edits: Vec<TextEdit>,
+    pub var_default_edits: Vec<TextEdit>,
+    pub undo_stack: Vec<UndoEntry>,
+    pub undo_banner: Option<String>,
+    pub dirty: bool,
+    pub palette_query: TextEdit,
     pub validation: ValidationState,
     pub trace: Vec<TraceLine>,
     pub trace_events: Vec<TraceEvent>,
@@ -615,6 +658,8 @@ pub struct StudioApp {
     pub chat: Vec<ChatMessage>,
     pub chat_input: TextEdit,
     pub releases: Vec<Release>,
+    pub release_graphs: BTreeMap<u32, SpellGraph>,
+    pub release_notes: BTreeMap<u32, String>,
     pub configs: BTreeMap<NodeId, serde_json::Value>,
     pub run_payload: serde_json::Value,
     pub last_run: Option<RunReport>,
@@ -634,10 +679,15 @@ pub struct StudioApp {
 
 impl StudioApp {
     pub fn demo() -> Self {
+        if let Ok(mut prepared) = LAUNCH_PREPARED.lock()
+            && let Some(app) = prepared.take()
+        {
+            return app;
+        }
         let db_path = LAUNCH_DB.lock().ok().and_then(|path| path.clone());
         let run_timeout = LAUNCH_RUN_TIMEOUT.lock().ok().and_then(|timeout| *timeout).unwrap_or(DEFAULT_RUN_TIMEOUT);
         let mut app = Self::launch(&StudioConfig { db_path, run_timeout, ..StudioConfig::default() });
-        if LAUNCH_THEME.lock().ok().and_then(|theme| *theme) == Some(Theme::Light) {
+        if LAUNCH_THEME.lock().ok().and_then(|theme| *theme) == Some(Theme::Dark) {
             app.toggle_theme();
         }
         app
@@ -660,6 +710,9 @@ impl StudioApp {
             Some(workspace) => {
                 let mut app = Self::with_spell(workspace.graph.clone(), registry_specs());
                 app.releases = workspace.releases.iter().map(|release| Release { version: release.version, nodes: release.graph.nodes.len() }).collect();
+                app.release_graphs = workspace.releases.iter().map(|release| (release.version, release.graph.clone())).collect();
+                app.release_notes =
+                    workspace.releases.iter().map(|release| (release.version, release.created_at.format("%b %d · %H:%M").to_string())).collect();
                 app.last_published = workspace.releases.last().cloned();
                 app
             }
@@ -669,6 +722,8 @@ impl StudioApp {
         app.run_timeout = config.run_timeout;
         app.sync_spell();
         app.active_release_version = workspace.and_then(|workspace| workspace.active_release);
+        app.canvas.release_badge = app.active_release_version.map(|v| format!("v{v}"));
+        app.dirty = false;
         Ok(app)
     }
 
@@ -684,9 +739,22 @@ impl StudioApp {
             canvas,
             size,
             specs,
-            theme: Theme::Dark,
+            theme: Theme::Light,
             left_tab: LeftTab::Palette,
             right_tab: RightTab::Inspector,
+            left_rail_pinned: false,
+            trace_expanded: false,
+            model_menu_open: false,
+            open_var_type: None,
+            pending_type_reset: None,
+            pending_restore_version: None,
+            pending_switch: None,
+            var_name_edits: Vec::new(),
+            var_default_edits: Vec::new(),
+            undo_stack: Vec::new(),
+            undo_banner: None,
+            dirty: false,
+            palette_query: TextEdit::new(""),
             validation: ValidationState::Unchecked,
             trace: Vec::new(),
             trace_events: Vec::new(),
@@ -694,9 +762,11 @@ impl StudioApp {
             runs: 0,
             prompts: BTreeMap::new(),
             versions: BTreeMap::new(),
-            chat: vec![ChatMessage { from_user: false, text: "Hi! Send a message to run this spell.".to_owned() }],
+            chat: vec![ChatMessage { from_user: false, text: "Send a message to run this spell.".to_owned() }],
             chat_input: TextEdit::new(""),
             releases: Vec::new(),
+            release_graphs: BTreeMap::new(),
+            release_notes: BTreeMap::new(),
             configs: BTreeMap::new(),
             run_payload: serde_json::json!({ "channel": STUDIO_CHANNEL, "sender": STUDIO_SENDER, "content": "Hello from Studio" }),
             last_run: None,
@@ -718,14 +788,413 @@ impl StudioApp {
         for (id, kind, config) in nodes {
             app.track_config(id, &kind, config);
         }
+        app.sync_var_edits_from_spell();
         let viewport = app.canvas_size();
         app.canvas.fit(viewport);
         app.canvas.select(app.canvas.nodes.iter().find(|card| card.kind == "ai/generate_text").map(|card| card.id.clone()));
         app
     }
 
+    pub fn left_rail_collapsed(&self) -> bool {
+        self.compact_toolbar() && !self.left_rail_pinned
+    }
+
+    pub fn left_rail_width(&self) -> f32 {
+        if self.left_rail_collapsed() {
+            68.0
+        } else if self.compact_toolbar() {
+            196.0
+        } else {
+            LEFT_RAIL_WIDTH
+        }
+    }
+
+    pub fn inspector_width(&self) -> f32 {
+        if self.compact_toolbar() { 228.0 } else { INSPECTOR_WIDTH }
+    }
+
+    pub fn toggle_left_rail(&mut self) {
+        self.left_rail_pinned = !self.left_rail_pinned;
+        let viewport = self.canvas_size();
+        self.canvas.fit(viewport);
+    }
+
+    pub fn fill_default_prompt_for_selected(&mut self) {
+        let Some(card) = self.canvas.selected_card().cloned() else { return };
+        let prompt = default_prompt(&card.kind);
+        if !prompt.is_empty() {
+            self.prompts.insert(card.id.clone(), TextEdit::new(prompt));
+        }
+        if let Some(card_mut) = self.canvas.card_mut(&card.id) {
+            card_mut.status = ExecutionStatus::Idle;
+            card_mut.inputs.iter_mut().for_each(|socket| socket.flagged = false);
+        }
+        self.validate();
+    }
+
+    pub fn trace_height(&self) -> f32 {
+        if self.trace.is_empty() && !self.is_running() { IDLE_TRACE_HEIGHT } else { TRACE_HEIGHT }
+    }
+
     pub fn canvas_size(&self) -> (f32, f32) {
-        ((self.size.0 - LEFT_RAIL_WIDTH - INSPECTOR_WIDTH).max(200.0), (self.size.1 - TOOLBAR_HEIGHT - TRACE_HEIGHT).max(200.0))
+        ((self.size.0 - self.left_rail_width() - self.inspector_width()).max(200.0), (self.size.1 - TOOLBAR_HEIGHT - self.trace_height()).max(200.0))
+    }
+
+    fn format_value(value: Option<&Value>) -> String {
+        match value {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Int(n)) => n.to_string(),
+            Some(Value::Float(n)) => n.to_string(),
+            Some(Value::Bool(b)) => b.to_string(),
+            Some(other) => serde_json::to_string(other).unwrap_or_default(),
+            None => String::new(),
+        }
+    }
+
+    fn try_parse_value(raw: &str, ty: SocketType) -> Option<Value> {
+        let trimmed = raw.trim();
+        match ty {
+            SocketType::String | SocketType::Any => Some(Value::String(raw.to_owned())),
+            SocketType::Int => trimmed.parse::<i64>().ok().map(Value::Int),
+            SocketType::Float => trimmed.parse::<f64>().ok().filter(|n| n.is_finite()).map(Value::Float),
+            SocketType::Bool => match trimmed.to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" => Some(Value::Bool(true)),
+                "false" | "0" | "no" => Some(Value::Bool(false)),
+                _ => None,
+            },
+            _ => Some(Value::String(raw.to_owned())),
+        }
+    }
+
+    fn zero_value(ty: SocketType) -> Value {
+        match ty {
+            SocketType::Int => Value::Int(0),
+            SocketType::Float => Value::Float(0.0),
+            SocketType::Bool => Value::Bool(false),
+            _ => Value::String(String::new()),
+        }
+    }
+
+    fn sync_var_edits_from_spell(&mut self) {
+        self.var_name_edits = self.spell.variables.iter().map(|v| TextEdit::new(&v.name)).collect();
+        self.var_default_edits = self.spell.variables.iter().map(|v| TextEdit::new(Self::format_value(v.default.as_ref()))).collect();
+    }
+
+    pub fn variable_binding_hint(&self, name: &str) -> (String, bool) {
+        if name.trim().is_empty() {
+            return ("Unused".to_owned(), false);
+        }
+        let template_token = format!("{{{{{name}}}}}");
+        for card in &self.canvas.nodes {
+            let in_prompt = self.prompts.get(&card.id).is_some_and(|e| e.text.contains(&template_token));
+            let in_config = self.configs.get(&card.id).is_some_and(|cfg| {
+                cfg.as_object().is_some_and(|map| map.contains_key(name) || map.values().any(|v| v.as_str().is_some_and(|s| s.contains(&template_token))))
+            });
+            if in_prompt || in_config {
+                return (format!("→ {}", card.title), true);
+            }
+        }
+        ("Unused".to_owned(), false)
+    }
+
+    pub fn add_variable(&mut self) {
+        let mut index = self.spell.variables.len() + 1;
+        let name = loop {
+            let candidate = format!("var_{index}");
+            if self.spell.variables.iter().all(|v| v.name != candidate) {
+                break candidate;
+            }
+            index += 1;
+        };
+        self.spell.variables.push(VariableDef { name: name.clone(), ty: SocketType::String, default: Some(Value::String(String::new())), exposed: true });
+        self.var_name_edits.push(TextEdit::new(&name));
+        self.var_default_edits.push(TextEdit::new(""));
+        self.validation = ValidationState::Unchecked;
+        self.canvas.validated = false;
+        self.dirty = true;
+    }
+
+    pub fn remove_variable(&mut self, name: &str) {
+        let Some(index) = self.spell.variables.iter().position(|v| v.name == name) else { return };
+        let variable = self.spell.variables.remove(index);
+        let name_edit = if index < self.var_name_edits.len() { self.var_name_edits.remove(index) } else { TextEdit::new(&variable.name) };
+        let default_edit = if index < self.var_default_edits.len() {
+            self.var_default_edits.remove(index)
+        } else {
+            TextEdit::new(Self::format_value(variable.default.as_ref()))
+        };
+        self.undo_stack.push(UndoEntry::Variable { index, variable, name_edit, default_edit });
+        self.undo_banner = Some(format!("Removed spice {name}"));
+        if self.open_var_type.as_deref() == Some(name) {
+            self.open_var_type = None;
+        }
+        if self.pending_type_reset.as_ref().is_some_and(|(n, _)| n == name) {
+            self.pending_type_reset = None;
+        }
+        self.validation = ValidationState::Unchecked;
+        self.canvas.validated = false;
+        self.dirty = true;
+        self.sync_spell();
+    }
+
+    pub fn toggle_var_type_menu(&mut self, name: &str) {
+        self.pending_type_reset = None;
+        if self.open_var_type.as_deref() == Some(name) {
+            self.open_var_type = None;
+        } else {
+            self.open_var_type = Some(name.to_owned());
+        }
+    }
+
+    pub fn set_variable_type(&mut self, name: &str, ty: SocketType) {
+        self.open_var_type = None;
+        let Some(index) = self.spell.variables.iter().position(|v| v.name == name) else { return };
+        if self.spell.variables[index].ty == ty {
+            self.pending_type_reset = None;
+            return;
+        }
+        let raw = self.var_default_edits.get(index).map(|e| e.text.clone()).unwrap_or_else(|| Self::format_value(self.spell.variables[index].default.as_ref()));
+        if raw.trim().is_empty() {
+            self.spell.variables[index].ty = ty;
+            self.spell.variables[index].default = Some(Self::zero_value(ty));
+            if let Some(edit) = self.var_default_edits.get_mut(index) {
+                *edit = TextEdit::new(Self::format_value(self.spell.variables[index].default.as_ref()));
+            }
+            self.pending_type_reset = None;
+            self.dirty = true;
+            return;
+        }
+        if let Some(parsed) = Self::try_parse_value(&raw, ty) {
+            self.spell.variables[index].ty = ty;
+            self.spell.variables[index].default = Some(parsed);
+            if let Some(edit) = self.var_default_edits.get_mut(index) {
+                *edit = TextEdit::new(Self::format_value(self.spell.variables[index].default.as_ref()));
+            }
+            self.pending_type_reset = None;
+            self.dirty = true;
+        } else {
+            self.pending_type_reset = Some((name.to_owned(), ty));
+        }
+    }
+
+    pub fn confirm_variable_type_reset(&mut self) {
+        let Some((name, ty)) = self.pending_type_reset.take() else { return };
+        let Some(index) = self.spell.variables.iter().position(|v| v.name == name) else { return };
+        self.spell.variables[index].ty = ty;
+        let val = Self::zero_value(ty);
+        self.spell.variables[index].default = Some(val);
+        if let Some(edit) = self.var_default_edits.get_mut(index) {
+            *edit = TextEdit::new(Self::format_value(self.spell.variables[index].default.as_ref()));
+        }
+        self.dirty = true;
+    }
+
+    pub fn cancel_variable_type_reset(&mut self) {
+        self.pending_type_reset = None;
+    }
+
+    pub fn selected_model_name(&self) -> String {
+        let Some(id) = self.canvas.selection.as_ref() else { return "gpt-4o-mini".to_owned() };
+        self.configs.get(id).and_then(|c| c.get("model")).and_then(serde_json::Value::as_str).filter(|s| !s.is_empty()).unwrap_or("gpt-4o-mini").to_owned()
+    }
+
+    pub fn toggle_model_menu(&mut self) {
+        self.model_menu_open = !self.model_menu_open;
+    }
+
+    pub fn select_model(&mut self, provider: &str, model: &str) {
+        self.model_menu_open = false;
+        let Some(id) = self.canvas.selection.clone() else { return };
+        let entry = self.configs.entry(id).or_insert_with(|| json!({}));
+        if !entry.is_object() {
+            *entry = json!({});
+        }
+        if let Some(map) = entry.as_object_mut() {
+            map.insert("provider".to_owned(), serde_json::Value::String(provider.to_owned()));
+            map.insert("model".to_owned(), serde_json::Value::String(model.to_owned()));
+        }
+        self.sync_spell();
+    }
+
+    pub fn load_graph(&mut self, graph: SpellGraph) {
+        let mode = self.canvas.mode;
+        let light = self.theme == Theme::Light;
+        self.spell = graph;
+        self.canvas = CanvasState::from_graph(&self.spell, &self.specs);
+        self.canvas.mode = mode;
+        self.canvas.light = light;
+        self.prompts.clear();
+        self.versions.clear();
+        self.configs.clear();
+        self.trace.clear();
+        self.trace_events.clear();
+        self.pending_trace.clear();
+        self.model_menu_open = false;
+        self.open_var_type = None;
+        self.pending_type_reset = None;
+        self.pending_restore_version = None;
+        self.pending_switch = None;
+        self.undo_stack.clear();
+        self.undo_banner = None;
+        self.validation = ValidationState::Unchecked;
+        let nodes: Vec<(NodeId, String, serde_json::Value)> =
+            self.spell.nodes.iter().map(|node| (node.id.clone(), node.kind.clone(), node.config.clone())).collect();
+        for (id, kind, config) in nodes {
+            self.track_config(id, &kind, config);
+        }
+        self.sync_var_edits_from_spell();
+        let viewport = self.canvas_size();
+        self.canvas.fit(viewport);
+        self.canvas.select(self.canvas.nodes.iter().find(|card| card.kind == "ai/generate_text").map(|card| card.id.clone()));
+    }
+
+    pub fn request_new_spell(&mut self) {
+        if self.dirty && !self.canvas.nodes.is_empty() {
+            self.pending_switch = Some(PendingSwitch::NewPotion);
+        } else {
+            self.new_empty_spell();
+        }
+    }
+
+    pub fn request_open_sample(&mut self, name: &str) {
+        if self.spell.name == name {
+            return;
+        }
+        if self.dirty && !self.canvas.nodes.is_empty() {
+            self.pending_switch = Some(PendingSwitch::Sample(name.to_owned()));
+        } else {
+            self.open_sample_spell(name);
+        }
+    }
+
+    pub fn confirm_switch(&mut self) {
+        let Some(target) = self.pending_switch.take() else { return };
+        match target {
+            PendingSwitch::NewPotion => self.new_empty_spell(),
+            PendingSwitch::Sample(name) => self.open_sample_spell(&name),
+        }
+    }
+
+    pub fn cancel_switch(&mut self) {
+        self.pending_switch = None;
+    }
+
+    fn detach_spell_history(&mut self) {
+        if let Some(store) = self.store.as_mut() {
+            store.detach_record();
+        }
+        self.releases.clear();
+        self.release_graphs.clear();
+        self.release_notes.clear();
+        self.last_published = None;
+        self.active_release_version = None;
+        self.draft_status = None;
+        self.publish_status = None;
+        self.store_error = None;
+        self.canvas.release_badge = None;
+        self.canvas.brew_summary = None;
+        self.dirty = false;
+    }
+
+    pub fn open_sample_spell(&mut self, name: &str) {
+        let graph = if name == "Research Agent" {
+            let mut spell = SpellGraph::new("Research Agent");
+            let place = |id: &str, kind: &str, pos: [f32; 2], config: serde_json::Value| NodeInstance {
+                id: NodeId::from(id),
+                kind: kind.to_owned(),
+                position: pos,
+                config,
+            };
+            spell.nodes = vec![
+                place("trigger", "event/on_message", [0.0, 90.0], serde_json::Value::Null),
+                place("search", "knowledge/search", [260.0, 40.0], json!({ "limit": 5 })),
+                place("llm", "ai/generate_text", [530.0, 90.0], json!({ "prompt": "Summarize research findings:\n{{knowledge}}\n\nQuestion: {{content}}" })),
+                place("reply", "io/send_message", [800.0, 90.0], serde_json::Value::Null),
+            ];
+            let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+                id: WireId::from(id),
+                from_node: NodeId::from(from.0),
+                from_socket: from.1.to_owned(),
+                to_node: NodeId::from(to.0),
+                to_socket: to.1.to_owned(),
+            };
+            spell.wires = vec![
+                wire("w1", ("trigger", "out"), ("search", "in")),
+                wire("w2", ("trigger", "content"), ("search", "query")),
+                wire("w3", ("search", "out"), ("llm", "in")),
+                wire("w4", ("search", "results"), ("llm", "prompt")),
+                wire("w5", ("llm", "out"), ("reply", "in")),
+                wire("w6", ("llm", "text"), ("reply", "content")),
+            ];
+            spell
+        } else {
+            demo_spell()
+        };
+        self.detach_spell_history();
+        self.load_graph(graph);
+    }
+
+    pub fn request_restore_release(&mut self, version: u32) {
+        self.pending_restore_version = Some(version);
+    }
+
+    pub fn cancel_restore_release(&mut self) {
+        self.pending_restore_version = None;
+    }
+
+    pub fn confirm_restore_to_draft(&mut self) {
+        let Some(version) = self.pending_restore_version.take() else { return };
+        let graph = self
+            .store
+            .as_ref()
+            .and_then(|store| store.releases_of(&self.spell).ok())
+            .and_then(|list| list.into_iter().find(|r| r.version == version).map(|r| r.graph))
+            .or_else(|| self.release_graphs.get(&version).cloned());
+        if let Some(graph) = graph {
+            self.load_graph(graph);
+        }
+        self.active_release_version = None;
+        self.canvas.release_badge = None;
+        self.dirty = true;
+        self.draft_status = Some(format!("Loaded v{version} into draft"));
+    }
+
+    pub fn selected_temperature(&self) -> f64 {
+        if let Some(id) = self.canvas.selection.as_ref()
+            && let Some(val) = self.configs.get(id).and_then(|c| c.get("temperature")).and_then(serde_json::Value::as_f64)
+        {
+            return val;
+        }
+        self.spell.variables.iter().find(|v| v.name == "temperature").and_then(|v| v.default.as_ref()).map_or(0.4, |v| match v {
+            Value::Float(n) => *n,
+            Value::Int(n) => *n as f64,
+            _ => 0.4,
+        })
+    }
+
+    pub fn adjust_temperature(&mut self, delta: f64) {
+        let current = self.selected_temperature();
+        let next = ((current + delta).clamp(0.0, 2.0) * 10.0).round() / 10.0;
+        if let Some(id) = self.canvas.selection.clone() {
+            let entry = self.configs.entry(id).or_insert_with(|| json!({}));
+            if !entry.is_object() {
+                *entry = json!({});
+            }
+            if let Some(map) = entry.as_object_mut() {
+                map.insert("temperature".to_owned(), serde_json::json!(next));
+            }
+        }
+        if let Some(index) = self.spell.variables.iter().position(|v| v.name == "temperature") {
+            self.spell.variables[index].default = Some(Value::Float(next));
+            if let Some(edit) = self.var_default_edits.get_mut(index) {
+                *edit = TextEdit::new(next.to_string());
+            }
+        }
+        self.sync_spell();
+    }
+
+    pub fn clear_chat(&mut self) {
+        self.chat.clear();
     }
 
     pub fn spawn(&mut self, kind: &str) -> Option<NodeId> {
@@ -739,9 +1208,46 @@ impl StudioApp {
         let center = self.canvas.camera.screen_to_world(screen);
         let id = self.canvas.add_node_from_spec(&spec, center);
         self.track_config(id.clone(), kind, serde_json::Value::Null);
+        if self.canvas.mode == WorkbenchMode::Cauldron && kind != SUBGRAPH_KIND {
+            self.auto_wire_cauldron_ingredient(&id, &spec);
+        }
         self.validation = ValidationState::Unchecked;
         self.sync_spell();
         Some(id)
+    }
+
+    fn auto_wire_cauldron_ingredient(&mut self, id: &NodeId, spec: &NodeSpec) {
+        if spec.is_trigger {
+            return;
+        }
+        let has_flow_in = spec.inputs.iter().any(|s| s.ty.is_flow());
+        let has_flow_out = spec.outputs.iter().any(|s| s.ty.is_flow());
+        if has_flow_in {
+            let source = self
+                .canvas
+                .nodes
+                .iter()
+                .find(|card| card.id != *id && card.kind == "event/on_message")
+                .or_else(|| self.canvas.nodes.iter().find(|card| card.id != *id && card.outputs.iter().any(|s| s.ty.is_flow())))
+                .and_then(|card| card.outputs.iter().find(|s| s.ty.is_flow()).map(|s| (card.id.clone(), s.name.clone())));
+            if let (Some((from_id, from_sock)), Some(to_sock)) = (source, spec.inputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone())) {
+                let _ = self
+                    .canvas
+                    .connect_sockets(&magicklala_canvas::SocketRef::new(from_id, from_sock), &magicklala_canvas::SocketRef::new(id.clone(), to_sock));
+            }
+        }
+        if has_flow_out && spec.kind != "io/send_message" {
+            let target = self
+                .canvas
+                .nodes
+                .iter()
+                .find(|card| card.id != *id && (card.kind == "ai/generate_text" || card.kind == "io/send_message"))
+                .and_then(|card| card.inputs.iter().find(|s| s.ty.is_flow()).map(|s| (card.id.clone(), s.name.clone())));
+            if let (Some(from_sock), Some((to_id, to_sock))) = (spec.outputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone()), target) {
+                let _ =
+                    self.canvas.connect_sockets(&magicklala_canvas::SocketRef::new(id.clone(), from_sock), &magicklala_canvas::SocketRef::new(to_id, to_sock));
+            }
+        }
     }
 
     fn track_config(&mut self, id: NodeId, kind: &str, config: serde_json::Value) {
@@ -796,8 +1302,25 @@ impl StudioApp {
     }
 
     pub fn sync_edits(&mut self) -> bool {
+        let mut vars_changed = false;
+        for (idx, var) in self.spell.variables.iter_mut().enumerate() {
+            if let Some(edit) = self.var_name_edits.get(idx) {
+                let next_name = edit.text.trim();
+                if !next_name.is_empty() && next_name != var.name {
+                    var.name = next_name.to_owned();
+                    vars_changed = true;
+                }
+            }
+            if let Some(edit) = self.var_default_edits.get(idx)
+                && let Some(parsed) = Self::try_parse_value(&edit.text, var.ty)
+                && var.default.as_ref() != Some(&parsed)
+            {
+                var.default = Some(parsed);
+                vars_changed = true;
+            }
+        }
         let (nodes, wires, subgraphs) = self.rebuilt_parts();
-        if nodes == self.spell.nodes && wires == self.spell.wires && subgraphs == self.spell.subgraphs {
+        if !vars_changed && nodes == self.spell.nodes && wires == self.spell.wires && subgraphs == self.spell.subgraphs {
             return false;
         }
         self.spell.nodes = nodes;
@@ -807,6 +1330,12 @@ impl StudioApp {
         self.publish_status = None;
         self.store_error = None;
         self.active_release_version = None;
+        self.dirty = true;
+        self.canvas.spell_name = self.spell.name.clone();
+        self.canvas.release_badge = None;
+        self.canvas.validated = matches!(self.validation, ValidationState::Valid);
+        self.canvas.invalid_brew = matches!(self.validation, ValidationState::Invalid(_));
+        self.canvas.running_brew = self.is_running();
         true
     }
 
@@ -878,14 +1407,71 @@ impl StudioApp {
 
     pub fn validate(&mut self) -> &ValidationState {
         self.sync_spell();
+        for card in &mut self.canvas.nodes {
+            if card.status == ExecutionStatus::Failed {
+                card.status = ExecutionStatus::Idle;
+            }
+            for socket in &mut card.inputs {
+                socket.flagged = false;
+            }
+        }
         self.validation = match self.check_spell() {
-            Ok(()) => ValidationState::Valid,
-            Err(errors) => ValidationState::Invalid(errors),
+            Ok(()) => {
+                self.trace.retain(|line| line.kind != "RunRejected");
+                if self.canvas.brew_summary.as_deref().is_some_and(|s| s.starts_with("Hexed")) {
+                    self.canvas.brew_summary = None;
+                }
+                ValidationState::Valid
+            }
+            Err(errors) => {
+                let mut first_socket: Option<String> = None;
+                let mut rejected: Vec<TraceLine> = Vec::new();
+                for err in &errors {
+                    let mut matched_node: Option<NodeId> = None;
+                    for card in &mut self.canvas.nodes {
+                        let id_pat = format!("\"{}\"", card.id.0);
+                        if err.contains(&id_pat) || err.contains(&card.id.0) || err.contains(&card.title) {
+                            card.status = ExecutionStatus::Failed;
+                            matched_node = Some(card.id.clone());
+                            for socket in &mut card.inputs {
+                                let sock_pat = format!("\"{}\"", socket.name);
+                                if err.contains(&sock_pat) || (err.contains("required input") && socket.name == "prompt") {
+                                    socket.flagged = true;
+                                    if first_socket.is_none() {
+                                        first_socket = Some(socket.name.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    rejected.push(TraceLine { at_ms: 0, kind: "RunRejected", detail: err.clone(), status: ExecutionStatus::Failed, node: matched_node });
+                }
+                self.canvas.brew_summary = Some(match first_socket {
+                    Some(sock) => format!("Hexed · missing \"{sock}\""),
+                    None => "Hexed · check crimson vial".to_owned(),
+                });
+                if self.trace.is_empty() || self.trace.iter().all(|line| line.kind == "RunRejected") {
+                    self.trace = rejected;
+                }
+                ValidationState::Invalid(errors)
+            }
         };
+        self.canvas.validated = matches!(self.validation, ValidationState::Valid);
+        self.canvas.invalid_brew = matches!(self.validation, ValidationState::Invalid(_));
         &self.validation
     }
 
+    pub fn is_unchanged_from_live_release(&self) -> bool {
+        self.active_release_version.is_some()
+            && !self.canvas.has_run()
+            && !self.dirty
+            && self.last_published.as_ref().is_none_or(|release| release.graph == self.spell)
+    }
+
     pub fn run_spell(&mut self) -> bool {
+        if self.canvas.nodes.is_empty() || matches!(self.validation, ValidationState::Invalid(_)) {
+            return false;
+        }
         let payload = self.run_payload.clone();
         self.start_run(None, payload, false)
     }
@@ -928,7 +1514,9 @@ impl StudioApp {
                 true
             }
             Err(error) => {
-                self.trace.push(TraceLine { at_ms: 0, kind: "RunRejected", detail: error.clone(), status: ExecutionStatus::Failed });
+                if self.trace.is_empty() {
+                    self.trace.push(TraceLine { at_ms: 0, kind: "RunRejected", detail: error.clone(), status: ExecutionStatus::Failed, node: None });
+                }
                 self.conclude(RunReport::invalid(error), reply_to_chat);
                 false
             }
@@ -994,6 +1582,11 @@ impl StudioApp {
             };
             self.apply_background(message);
         }
+        self.canvas.spell_name = self.spell.name.clone();
+        self.canvas.release_badge = self.active_release_version.map(|v| format!("v{v}"));
+        self.canvas.validated = matches!(self.validation, ValidationState::Valid);
+        self.canvas.invalid_brew = matches!(self.validation, ValidationState::Invalid(_));
+        self.canvas.running_brew = self.is_running();
         true
     }
 
@@ -1042,7 +1635,7 @@ impl StudioApp {
 
     fn close_run(&mut self, kind: &'static str, detail: String, report: RunReport) {
         let at_ms = self.elapsed_ms();
-        self.trace.push(TraceLine { at_ms, kind, detail, status: ExecutionStatus::Failed });
+        self.trace.push(TraceLine { at_ms, kind, detail, status: ExecutionStatus::Failed, node: None });
         self.canvas.nodes.iter_mut().filter(|card| card.status == ExecutionStatus::Running).for_each(|card| card.status = ExecutionStatus::Failed);
         let reply_to_chat = self.release_active();
         self.conclude(report, reply_to_chat);
@@ -1085,6 +1678,11 @@ impl StudioApp {
         let at_ms = self.elapsed_ms();
         self.trace.push(trace_line(&event, at_ms, &self.canvas));
         self.trace_events.push(event);
+        self.canvas.spell_name = self.spell.name.clone();
+        self.canvas.release_badge = self.active_release_version.map(|v| format!("v{v}"));
+        self.canvas.validated = matches!(self.validation, ValidationState::Valid);
+        self.canvas.invalid_brew = matches!(self.validation, ValidationState::Invalid(_));
+        self.canvas.running_brew = self.is_running();
         true
     }
 
@@ -1092,20 +1690,105 @@ impl StudioApp {
         self.canvas.context_menu = None;
     }
 
+    pub fn open_grimoire(&mut self) {
+        self.canvas.mode = WorkbenchMode::Grimoire;
+        self.close_context_menu();
+        let viewport = self.canvas_size();
+        self.canvas.fit(viewport);
+    }
+
+    pub fn new_empty_spell(&mut self) {
+        self.detach_spell_history();
+        self.spell = SpellGraph::new("New Potion");
+        self.canvas = CanvasState::from_graph(&self.spell, &self.specs);
+        self.canvas.light = self.theme == Theme::Light;
+        self.prompts.clear();
+        self.versions.clear();
+        self.configs.clear();
+        self.trace.clear();
+        self.trace_events.clear();
+        self.pending_trace.clear();
+        self.open_var_type = None;
+        self.pending_type_reset = None;
+        self.pending_restore_version = None;
+        self.pending_switch = None;
+        self.undo_stack.clear();
+        self.undo_banner = None;
+        self.validation = ValidationState::Unchecked;
+        self.sync_var_edits_from_spell();
+    }
+
     pub fn quick_add_from_menu(&mut self) {
         let anchor = self.canvas.context_menu.unwrap_or([self.canvas_size().0 * 0.5, self.canvas_size().1 * 0.5]);
+        let selected_clone = self.canvas.selected_card().filter(|card| card.kind == QUICK_ADD_KIND).map(|card| {
+            (self.configs.get(&card.id).cloned(), self.prompts.get(&card.id).map(|e| e.text.clone()), self.versions.get(&card.id).map(|e| e.text.clone()))
+        });
         self.close_context_menu();
-        self.spawn_at(QUICK_ADD_KIND, anchor);
+        if let Some(new_id) = self.spawn_at(QUICK_ADD_KIND, anchor)
+            && let Some((cfg, prompt, version)) = selected_clone
+        {
+            if let Some(cfg) = cfg {
+                self.configs.insert(new_id.clone(), cfg);
+            }
+            if let Some(prompt) = prompt {
+                self.prompts.insert(new_id.clone(), TextEdit::new(prompt));
+            }
+            if let Some(version) = version {
+                self.versions.insert(new_id.clone(), TextEdit::new(version));
+            }
+            self.sync_spell();
+        }
     }
 
     pub fn delete_selected_node(&mut self) {
         self.close_context_menu();
+        let Some(selected_id) = self.canvas.selection.clone() else { return };
+        let attached_wires: Vec<WireModel> = self.canvas.wires.iter().filter(|w| w.from_node == selected_id || w.to_node == selected_id).cloned().collect();
         if let Some(removed) = self.canvas.remove_selected_node() {
-            self.prompts.remove(&removed.id);
-            self.versions.remove(&removed.id);
-            self.configs.remove(&removed.id);
+            let prompt = self.prompts.remove(&removed.id);
+            let version = self.versions.remove(&removed.id);
+            let config = self.configs.remove(&removed.id);
+            let title = removed.title.clone();
+            self.undo_stack.push(UndoEntry::Node { card: removed, prompt, version, config, wires: attached_wires });
+            self.undo_banner = Some(format!("Removed {title}"));
             self.validation = ValidationState::Unchecked;
+            self.dirty = true;
             self.sync_spell();
+        }
+    }
+
+    pub fn undo(&mut self) {
+        let Some(entry) = self.undo_stack.pop() else { return };
+        self.undo_banner = None;
+        match entry {
+            UndoEntry::Node { card, prompt, version, config, wires } => {
+                let id = card.id.clone();
+                if let Some(prompt) = prompt {
+                    self.prompts.insert(id.clone(), prompt);
+                }
+                if let Some(version) = version {
+                    self.versions.insert(id.clone(), version);
+                }
+                if let Some(config) = config {
+                    self.configs.insert(id.clone(), config);
+                }
+                self.canvas.restore_node(card, wires);
+                self.validation = ValidationState::Unchecked;
+                self.dirty = true;
+                self.sync_spell();
+            }
+            UndoEntry::Variable { index, variable, name_edit, default_edit } => {
+                let at = index.min(self.spell.variables.len());
+                self.spell.variables.insert(at, variable);
+                let name_at = at.min(self.var_name_edits.len());
+                self.var_name_edits.insert(name_at, name_edit);
+                let def_at = at.min(self.var_default_edits.len());
+                self.var_default_edits.insert(def_at, default_edit);
+                self.validation = ValidationState::Unchecked;
+                self.canvas.validated = false;
+                self.dirty = true;
+                self.sync_spell();
+            }
         }
     }
 
@@ -1149,18 +1832,37 @@ impl StudioApp {
 
     fn refresh_releases(&mut self, published: &SpellRelease) {
         let stored = self.store.as_ref().map(|store| store.releases_of(&self.spell));
-        self.releases = match stored {
-            Some(Ok(releases)) => releases.iter().map(|release| Release { version: release.version, nodes: release.graph.nodes.len() }).collect(),
+        match stored {
+            Some(Ok(releases)) => {
+                self.release_graphs = releases.iter().map(|release| (release.version, release.graph.clone())).collect();
+                self.release_notes = releases.iter().map(|release| (release.version, release.created_at.format("%b %d · %H:%M").to_string())).collect();
+                self.releases = releases.iter().map(|release| Release { version: release.version, nodes: release.graph.nodes.len() }).collect();
+            }
             _ => {
+                self.release_graphs.insert(published.version, published.graph.clone());
+                self.release_notes.insert(published.version, published.created_at.format("%b %d · %H:%M").to_string());
                 let mut releases = std::mem::take(&mut self.releases);
                 releases.push(Release { version: published.version, nodes: published.graph.nodes.len() });
-                releases
+                self.releases = releases;
             }
-        };
+        }
+    }
+
+    pub fn explain_publish_blocked(&mut self) {
+        if let ValidationState::Invalid(errors) = &self.validation {
+            let message = format!("cannot publish an invalid spell: {}", errors.join("; "));
+            self.store_error = Some(message);
+        }
     }
 
     pub fn publish(&mut self) -> Result<u32, StudioError> {
         self.sync_spell();
+        if self.canvas.nodes.is_empty() {
+            return Err(self.refuse("cannot publish an empty potion".to_owned()));
+        }
+        if self.is_unchanged_from_live_release() {
+            return Err(self.refuse("no changes since the live release".to_owned()));
+        }
         self.publish_status = None;
         self.require_disk("publish releases")?;
         let next = match self.next_release_version() {
@@ -1180,8 +1882,13 @@ impl StudioApp {
         self.refresh_releases(&release);
         self.store_error = None;
         self.draft_status = None;
+        self.dirty = false;
         self.active_release_version = Some(release.version);
         let version = release.version;
+        let ingr_count = self.canvas.nodes.iter().filter(|card| card.kind != "io/send_message").count();
+        let word = if ingr_count == 1 { "ingredient" } else { "ingredients" };
+        self.canvas.release_badge = Some(format!("v{version}"));
+        self.canvas.brew_summary = Some(format!("Published v{version} · {ingr_count} {word}"));
         self.publish_status = Some(format!("Published v{version}"));
         self.last_published = Some(release);
         Ok(version)
@@ -1200,7 +1907,9 @@ impl StudioApp {
         let saved = store.save_draft(&self.spell);
         let record = saved.inspect_err(|error| self.store_error = Some(error.to_string()))?;
         self.store_error = None;
+        self.dirty = false;
         self.active_release_version = None;
+        self.canvas.release_badge = None;
         self.draft_status = Some(DRAFT_SAVED.to_owned());
         Ok(record.id)
     }
@@ -1229,7 +1938,7 @@ impl Drop for StudioApp {
 }
 
 pub fn run_studio(config: StudioConfig) -> Result<(), StudioError> {
-    remember_launch(&config, Theme::Dark);
+    remember_launch(&config, Theme::Light);
     App::new(spec(config)).args(Vec::new()).try_run().map_err(StudioError::Rune)
 }
 
@@ -1238,7 +1947,7 @@ pub fn render_headless_snapshot(out_path: &Path) -> Result<(), StudioError> {
 }
 
 pub fn render_headless_snapshot_sized(out_path: &Path, size: (f32, f32)) -> Result<(), StudioError> {
-    render_headless_snapshot_themed(out_path, size, Theme::Dark)
+    render_headless_snapshot_themed(out_path, size, Theme::Light)
 }
 
 pub fn render_headless_snapshot_themed(out_path: &Path, size: (f32, f32), theme: Theme) -> Result<(), StudioError> {
@@ -1255,10 +1964,32 @@ pub fn render_headless_snapshot_with_config(out_path: &Path, config: StudioConfi
     if out_path.is_file() { Ok(()) } else { Err(StudioError::MissingSnapshot(target)) }
 }
 
+pub fn render_headless_snapshot_state(out_path: &Path, app: StudioApp) -> Result<(), StudioError> {
+    let size = app.size;
+    let theme = app.theme;
+    let config = StudioConfig { size, ..StudioConfig::default() };
+    remember_launch(&config, theme);
+    if let Ok(mut slot) = LAUNCH_PREPARED.lock() {
+        *slot = Some(app);
+    }
+    let target = out_path.display().to_string();
+    let args =
+        vec!["--snap".to_owned(), target.clone(), "--size".to_owned(), format!("{}x{}", size.0 as u32, size.1 as u32), "--scale".to_owned(), "1".to_owned()];
+    let result = App::new(spec(config)).args(args).try_run().map_err(StudioError::Rune);
+    if let Ok(mut slot) = LAUNCH_PREPARED.lock() {
+        *slot = None;
+    }
+    result?;
+    if out_path.is_file() { Ok(()) } else { Err(StudioError::MissingSnapshot(target)) }
+}
+
 fn remember_launch(config: &StudioConfig, theme: Theme) {
     remember_size(config.size);
     if let Ok(mut slot) = LAUNCH_DB.lock() {
         slot.clone_from(&config.db_path);
+    }
+    if let Ok(mut slot) = LAUNCH_PREPARED.lock() {
+        *slot = None;
     }
     remember_theme(theme);
 }
@@ -1278,6 +2009,8 @@ fn remember_size(size: (f32, f32)) {
 fn spec(config: StudioConfig) -> AppSpec<StudioApp> {
     remember_run_timeout(config.run_timeout);
     AppSpec {
+        fonts: STUDIO_FONTS,
+        families: STUDIO_FAMILIES,
         setup: Some(StudioApp::set_waker),
         poll: Some(|app, _, _| app.poll_background() | app.sync_edits()),
         ..AppSpec::new(TITLE, config.size, StudioApp::demo, studio_view)
@@ -1290,560 +2023,57 @@ fn remember_run_timeout(timeout: Duration) {
     }
 }
 
-struct Tones {
-    background: Color,
-    panel: Color,
-    raised: Color,
-    line: Color,
-    ink: Color,
-    muted: Color,
-    accent: Color,
-    accent_ink: Color,
-}
-
-fn rgba(r: f32, g: f32, b: f32, a: f32) -> Color {
-    Color { r, g, b, a }
-}
-
-fn tones(theme: Theme) -> Tones {
-    match theme {
-        Theme::Dark => Tones {
-            background: rgba(0.04, 0.043, 0.052, 1.0),
-            panel: rgba(0.078, 0.082, 0.098, 1.0),
-            raised: rgba(0.12, 0.126, 0.148, 1.0),
-            line: rgba(1.0, 1.0, 1.0, 0.07),
-            ink: rgba(0.92, 0.93, 0.95, 1.0),
-            muted: rgba(0.55, 0.58, 0.64, 1.0),
-            accent: rgba(0.47, 0.4, 0.98, 1.0),
-            accent_ink: rgba(1.0, 1.0, 1.0, 1.0),
-        },
-        Theme::Light => Tones {
-            background: rgba(0.93, 0.935, 0.945, 1.0),
-            panel: rgba(0.985, 0.987, 0.99, 1.0),
-            raised: rgba(0.93, 0.935, 0.95, 1.0),
-            line: rgba(0.0, 0.0, 0.0, 0.09),
-            ink: rgba(0.1, 0.11, 0.13, 1.0),
-            muted: rgba(0.4, 0.42, 0.47, 1.0),
-            accent: rgba(0.4, 0.33, 0.93, 1.0),
-            accent_ink: rgba(1.0, 1.0, 1.0, 1.0),
-        },
-    }
-}
-
-fn font(size: f32, weight: f32) -> TextStyle {
-    TextStyle::new(size, weight)
-}
-
-fn label(content: impl Into<String>, size: f32, weight: f32, color: Color) -> El {
-    text(content).font(font(size, weight)).color(color)
-}
-
-fn button(key: &str, caption: &str, primary: bool, t: &Tones, action: fn(&mut StudioApp)) -> El {
-    sized_button(key, caption, primary, 12.0, t, action)
-}
-
-fn sized_button(key: &str, caption: &str, primary: bool, padding: f32, t: &Tones, action: fn(&mut StudioApp)) -> El {
-    let (fill, ink) = if primary { (t.accent, t.accent_ink) } else { (t.raised, t.ink) };
-    row().key(key).h(30.0).px(padding).items_center().radius(7.0).fill(fill).border(1.0, t.line).child(label(caption, 12.5, 600.0, ink)).on_press(action)
-}
-
-fn menu_item(key: &str, caption: &str, enabled: bool, t: &Tones, action: fn(&mut StudioApp)) -> El {
-    row()
-        .key(key)
-        .w_full()
-        .h(30.0)
-        .px(10.0)
-        .items_center()
-        .radius(6.0)
-        .fill(t.raised)
-        .child(label(caption, 12.5, 550.0, if enabled { t.ink } else { t.muted }))
-        .on_press(action)
-}
-
-fn context_menu(app: &StudioApp, t: &Tones) -> Option<El> {
-    let anchor = app.canvas.context_menu?;
-    let view = app.canvas_size();
-    let x = anchor[0].min(view.0 - CONTEXT_MENU_SIZE.0).max(0.0);
-    let y = anchor[1].min(view.1 - CONTEXT_MENU_SIZE.1).max(0.0);
-    let quick_add = app.specs.iter().find(|spec| spec.kind == QUICK_ADD_KIND).map_or_else(|| QUICK_ADD_KIND.to_owned(), |spec| format!("Add {}", spec.title));
-    let delete = app.canvas.selected_card().map_or_else(|| "Delete node (none selected)".to_owned(), |card| format!("Delete {}", card.title));
-    Some(
-        col()
-            .key("context-menu")
-            .size(CONTEXT_MENU_SIZE.0, CONTEXT_MENU_SIZE.1)
-            .padding(6.0)
-            .gap(4.0)
-            .radius(9.0)
-            .fill(t.panel)
-            .border(1.0, t.line)
-            .shadow(6.0, 18.0, rgba(0.0, 0.0, 0.0, 0.35))
-            .absolute(x, y)
-            .child(menu_item(&palette_key(QUICK_ADD_KIND).replacen("palette-", "context-add-", 1), &quick_add, true, t, StudioApp::quick_add_from_menu))
-            .child(menu_item("context-delete-node", &delete, app.canvas.selection.is_some(), t, StudioApp::delete_selected_node))
-            .child(menu_item("context-fit-view", "Fit view", true, t, StudioApp::fit_view))
-            .child(menu_item("context-dismiss", "Dismiss", true, t, StudioApp::close_context_menu)),
-    )
-}
-
-fn pill(caption: impl Into<String>, color: Color, t: &Tones) -> El {
-    row()
-        .gap(6.0)
-        .h(24.0)
-        .px(9.0)
-        .items_center()
-        .radius(12.0)
-        .fill(t.raised)
-        .child(el().size(7.0, 7.0).radius(3.5).fill(color))
-        .child(label(caption, 11.5, 550.0, t.ink))
-}
-
-pub fn studio_view(app: &StudioApp, _: &mut Cx<StudioApp>) -> El {
-    let t = tones(app.theme);
-    let middle = row()
-        .key("workspace")
-        .w_full()
-        .grow(1.0)
-        .min_h(0.0)
-        .child(left_rail(app, &t))
-        .child(el().key("center").grow(1.0).min_w(0.0).h_full().child(canvas_with_menu(app, &t)))
-        .child(inspector(app, &t));
-    col().key("studio").w_full().h_full().fill(t.background).child(toolbar(app, &t)).child(middle).child(trace_strip(app, &t))
-}
-
-fn canvas_with_menu(app: &StudioApp, t: &Tones) -> El {
-    let board = interactive_canvas_view::<StudioApp>(&app.canvas, app.canvas_size(), |app| &mut app.canvas);
-    match context_menu(app, t) {
-        Some(menu) => board.child(menu),
-        None => board,
-    }
-}
-
-fn toolbar(app: &StudioApp, t: &Tones) -> El {
-    let compact = app.compact_toolbar();
-    let (padding, gap, readout) = if compact { (9.0, 6.0, 44.0) } else { (12.0, 8.0, 52.0) };
-    let tool = |key: &str, caption: &str, primary: bool, action: fn(&mut StudioApp)| sized_button(key, caption, primary, padding, t, action);
-    let brand = row()
-        .gap(8.0)
-        .items_center()
-        .child(el().size(22.0, 22.0).radius(6.0).fill(t.accent).center().child(label("M", 13.0, 800.0, t.accent_ink)))
-        .child(label("MagickLaLa", 14.0, 700.0, t.ink));
-    let validation_color = match app.validation {
-        ValidationState::Unchecked => t.muted,
-        ValidationState::Valid => status_color(ExecutionStatus::Succeeded),
-        ValidationState::Invalid(_) => status_color(ExecutionStatus::Failed),
-    };
-    let zoom = row()
-        .gap(4.0)
-        .items_center()
-        .child(tool("zoom-out", "-", false, |app| app.canvas.camera.zoom_by(1.0 / 1.2, [app.canvas_size().0 / 2.0, app.canvas_size().1 / 2.0])))
-        .child(row().key("zoom-readout").w(readout).justify_center().child(label(format!("{}%", app.canvas.camera.zoom_percent()), 12.0, 600.0, t.ink)))
-        .child(tool("zoom-in", "+", false, |app| app.canvas.camera.zoom_by(1.2, [app.canvas_size().0 / 2.0, app.canvas_size().1 / 2.0])))
-        .child(tool("zoom-fit", "Fit", false, StudioApp::fit_view));
-    let stats = if compact {
-        format!("{}n · {}w", app.canvas.nodes.len(), app.canvas.wires.len())
-    } else {
-        format!("{} nodes · {} wires", app.canvas.nodes.len(), app.canvas.wires.len())
-    };
-    let left = row()
-        .key("toolbar-left")
-        .gap(if compact { 10.0 } else { 14.0 })
-        .items_center()
-        .child(brand)
-        .child(el().w(1.0).h(22.0).fill(t.line))
-        .child(label(&app.spell.name, 13.0, 600.0, t.ink))
-        .child(pill(stats, t.accent, t));
-    let right = row()
-        .gap(gap)
-        .items_center()
-        .child(pill(app.validation.label(), validation_color, t).key("validation-pill"))
-        .child(tool("validate", "Validate", false, |app| {
-            app.validate();
-        }))
-        .child(
-            row().key("run-slot").w(if compact { COMPACT_RUN_SLOT_WIDTH } else { RUN_SLOT_WIDTH }).child(
-                if app.is_running() {
-                    tool("cancel-run", "Cancel", true, StudioApp::cancel_run)
-                } else {
-                    tool("run-spell", if compact { "Run" } else { "Run Spell" }, true, |app| {
-                        app.run_spell();
-                    })
-                }
-                .w_full()
-                .justify_center(),
-            ),
-        )
-        .child(tool("save", "Save", false, |app| {
-            app.save_draft().ok();
-        }))
-        .child(tool("publish", "Publish", false, |app| {
-            app.publish().ok();
-        }))
-        .child(tool("theme-toggle", if app.theme == Theme::Dark { "Light" } else { "Dark" }, false, StudioApp::toggle_theme))
-        .child(zoom);
-    row()
-        .key("toolbar")
-        .w_full()
-        .h(TOOLBAR_HEIGHT)
-        .px(if compact { 10.0 } else { 14.0 })
-        .gap(gap)
-        .items_center()
-        .justify_between()
-        .fill(t.panel)
-        .border_sides([0.0, 0.0, 1.0, 0.0], t.line)
-        .child(left)
-        .child(right)
-}
-
-fn tab(key: &str, caption: &str, active: bool, t: &Tones, action: fn(&mut StudioApp)) -> El {
-    row()
-        .key(key)
-        .grow(1.0)
-        .h(28.0)
-        .justify_center()
-        .items_center()
-        .radius(6.0)
-        .fill(if active { t.raised } else { rgba(0.0, 0.0, 0.0, 0.0) })
-        .child(label(caption, 12.0, if active { 650.0 } else { 500.0 }, if active { t.ink } else { t.muted }))
-        .on_press(action)
-}
-
-fn palette_key(kind: &str) -> String {
-    format!("palette-{}", kind.replace('/', "-"))
-}
-
-fn left_rail(app: &StudioApp, t: &Tones) -> El {
-    let tabs = row()
-        .gap(4.0)
-        .p_all(4.0, t)
-        .child(tab("tab-palette", "Nodes", app.left_tab == LeftTab::Palette, t, |app| app.left_tab = LeftTab::Palette))
-        .child(tab("tab-agents", "Agents & Releases", app.left_tab == LeftTab::Agents, t, |app| app.left_tab = LeftTab::Agents));
-    let body = match app.left_tab {
-        LeftTab::Palette => palette_categories(&app.specs).iter().fold(col().gap(4.0), |list, category| {
-            let entries: Vec<&NodeSpec> = app.specs.iter().filter(|spec| spec.category.eq_ignore_ascii_case(category)).collect();
-            if entries.is_empty() {
-                return list;
-            }
-            let heading = row().gap(6.0).items_center().pt(8.0).pb(2.0).child(el().size(6.0, 6.0).radius(3.0).fill(category_accent(category))).child(label(
-                category.to_uppercase(),
-                10.5,
-                700.0,
-                t.muted,
-            ));
-            entries.into_iter().fold(list.child(heading), |list, spec| {
-                let kind = spec.kind.clone();
-                list.child(
-                    row()
-                        .key(palette_key(&spec.kind))
-                        .w_full()
-                        .h(30.0)
-                        .px(10.0)
-                        .gap(8.0)
-                        .items_center()
-                        .radius(6.0)
-                        .fill(t.raised)
-                        .child(el().w(3.0).h(14.0).radius(1.5).fill(category_accent(&spec.category)))
-                        .child(label(&spec.title, 12.5, 500.0, t.ink))
-                        .on_press(move |app: &mut StudioApp| {
-                            app.spawn(&kind);
-                        }),
-                )
-            })
-        }),
-        LeftTab::Agents => {
-            let agents = ["Support Agent", "Research Agent"].iter().fold(col().gap(6.0).child(label("AGENTS", 10.5, 700.0, t.muted)), |list, name| {
-                list.child(
-                    row().h(34.0).px(10.0).items_center().radius(6.0).fill(t.raised).justify_between().child(label(*name, 12.5, 550.0, t.ink)).child(pill(
-                        "live",
-                        status_color(ExecutionStatus::Succeeded),
-                        t,
-                    )),
-                )
-            });
-            let heading = agents.child(label("RELEASES", 10.5, 700.0, t.muted));
-            let heading = match (&app.store_error, app.releases.is_empty()) {
-                (Some(error), _) => heading.child(label(error, 11.5, 500.0, status_color(ExecutionStatus::Failed)).wrap()),
-                (None, true) => heading.child(label("Nothing published yet. Press Publish.", 11.5, 500.0, t.muted)),
-                (None, false) => heading,
-            };
-            let heading = match (&app.store_error, app.draft_status.as_ref().or(app.publish_status.as_ref())) {
-                (None, Some(status)) => heading.child(label(status, 11.5, 500.0, t.muted).key("draft-status")),
-                _ => heading,
-            };
-            app.releases
-                .iter()
-                .rev()
-                .fold(heading, |list, release| list.child(label(format!("v{} · {} nodes", release.version, release.nodes), 12.0, 500.0, t.ink)))
-        }
-    };
-    col()
-        .key("left-rail")
-        .w(LEFT_RAIL_WIDTH)
-        .h_full()
-        .min_h(0.0)
-        .fill(t.panel)
-        .border_sides([0.0, 1.0, 0.0, 0.0], t.line)
-        .child(tabs)
-        .child(col().key("left-rail-scroll").w_full().grow(1.0).min_h(0.0).px(10.0).pb(10.0).scroll(ScrollSpec { stick_bottom: false }).child(body))
-}
-
-trait PanelPadding {
-    fn p_all(self, amount: f32, t: &Tones) -> Self;
-}
-
-impl PanelPadding for El {
-    fn p_all(self, amount: f32, t: &Tones) -> Self {
-        self.padding(amount).mx(8.0).mt(8.0).mb(4.0).radius(8.0).fill(t.background)
-    }
-}
-
-fn inspector(app: &StudioApp, t: &Tones) -> El {
-    let tabs = row()
-        .gap(4.0)
-        .p_all(4.0, t)
-        .child(tab("tab-inspector", "Inspector", app.right_tab == RightTab::Inspector, t, |app| app.right_tab = RightTab::Inspector))
-        .child(tab("tab-variables", "Variables", app.right_tab == RightTab::Variables, t, |app| app.right_tab = RightTab::Variables))
-        .child(tab("tab-playground", "Playground", app.right_tab == RightTab::Playground, t, |app| app.right_tab = RightTab::Playground));
-    let body = match app.right_tab {
-        RightTab::Inspector => inspector_body(app, t),
-        RightTab::Variables => app.spell.variables.iter().fold(col().gap(6.0), |list, variable| {
-            list.child(
-                row()
-                    .h(32.0)
-                    .px(10.0)
-                    .items_center()
-                    .justify_between()
-                    .radius(6.0)
-                    .fill(t.raised)
-                    .child(label(&variable.name, 12.5, 600.0, t.ink))
-                    .child(label(format!("{:?}", variable.ty), 11.5, 500.0, t.muted)),
-            )
-        }),
-        RightTab::Playground => playground(app, t),
-    };
-    col()
-        .key("inspector")
-        .w(INSPECTOR_WIDTH)
-        .h_full()
-        .min_h(0.0)
-        .fill(t.panel)
-        .border_sides([1.0, 0.0, 0.0, 0.0], t.line)
-        .child(tabs)
-        .child(col().key("inspector-scroll").w_full().grow(1.0).min_h(0.0).px(12.0).pb(12.0).scroll(ScrollSpec { stick_bottom: false }).child(body))
-}
-
-fn inspector_body(app: &StudioApp, t: &Tones) -> El {
-    let Some(card) = app.canvas.selected_card() else {
-        return col().pt(12.0).child(label("Select a node on the canvas to inspect it.", 12.5, 500.0, t.muted));
-    };
-    let sockets = card.inputs.iter().map(|socket| ("in", socket)).chain(card.outputs.iter().map(|socket| ("out", socket))).fold(
-        col().gap(4.0),
-        |list, (side, socket)| {
-            list.child(
-                row()
-                    .gap(8.0)
-                    .items_center()
-                    .child(el().size(8.0, 8.0).radius(4.0).fill(magicklala_canvas::socket_color(socket.ty)))
-                    .child(label(format!("{side} · {}", socket.name), 12.0, 500.0, t.ink))
-                    .child(label(format!("{:?}", socket.ty), 11.0, 500.0, t.muted)),
-            )
-        },
-    );
-    let id = card.id.clone();
-    let field = editable_field(&card.kind);
-    let editor_height = prompt_editor_height(app.size);
-    let editor = field.and_then(|field| app.prompts.get(&card.id).map(|edit| (field, edit))).map(|(field, edit)| {
-        let input = text_input(edit, prompt_font())
-            .key("prompt-field")
-            .label(format!("{} {field}", card.title))
-            .w_full()
-            .color(t.ink)
-            .on_edit(move |app: &mut StudioApp| app.prompts.entry(id.clone()).or_insert_with(|| TextEdit::new("")));
-        col()
-            .key("prompt-editor")
-            .w_full()
-            .h(editor_height)
-            .padding(PROMPT_EDITOR_PADDING)
-            .radius(8.0)
-            .fill(t.background)
-            .border(1.0, t.line)
-            .clip_rounded(8.0)
-            .scroll(ScrollSpec { stick_bottom: false })
-            .child(input)
-    });
-    let column = col()
-        .gap(10.0)
-        .pt(10.0)
-        .child(row().gap(8.0).items_center().child(el().w(4.0).h(28.0).radius(2.0).fill(category_accent(&card.category))).child(
-            col().gap(2.0).child(label(&card.title, 15.0, 700.0, t.ink)).child(label(format!("{} · {}", card.kind, card.status.label()), 11.5, 500.0, t.muted)),
-        ))
-        .child(label("SOCKETS", 10.5, 700.0, t.muted))
-        .child(sockets)
-        .pb(14.0);
-    let column = match (field, editor) {
-        (Some(field), Some(editor)) => column.child(label(editor_caption(field), 10.5, 700.0, t.muted)).child(editor),
-        _ => column,
-    };
-    match release_version_editor(app, card, t) {
-        Some(version) => column.child(label("RELEASE VERSION", 10.5, 700.0, t.muted)).child(version),
-        None => column,
-    }
-}
-
-fn release_version_editor(app: &StudioApp, card: &magicklala_canvas::NodeCardModel, t: &Tones) -> Option<El> {
-    let edit = app.versions.get(&card.id).filter(|_| card.kind == SUBGRAPH_KIND)?;
-    let id = card.id.clone();
-    Some(
-        text_input(edit, prompt_font())
-            .single_line()
-            .key("release-version-field")
-            .label(format!("{} release version, blank runs the saved draft", card.title))
-            .w_full()
-            .h(32.0)
-            .px(10.0)
-            .radius(8.0)
-            .fill(t.background)
-            .border(1.0, t.line)
-            .color(t.ink)
-            .on_edit(move |app: &mut StudioApp| app.versions.entry(id.clone()).or_insert_with(|| TextEdit::new(""))),
-    )
-}
-
-pub fn prompt_font() -> TextStyle {
-    font(12.5, 450.0).mono()
-}
-
-pub fn prompt_editor_height(size: (f32, f32)) -> f32 {
-    if size.1 < COMPACT_INSPECTOR_BELOW { COMPACT_PROMPT_EDITOR_HEIGHT } else { PROMPT_EDITOR_HEIGHT }
-}
-
-fn editor_caption(field: &str) -> &'static str {
-    match field {
-        "script" => "RHAI SCRIPT",
-        "template" => "TEMPLATE",
-        SUBGRAPH_SPELL_FIELD => "SPELL ID",
-        _ => "PROMPT",
-    }
-}
-
-fn playground(app: &StudioApp, t: &Tones) -> El {
-    let messages = app.chat.iter().fold(col().gap(8.0).pt(10.0), |list, message| {
-        let bubble = el()
-            .max_w(230.0)
-            .padding(10.0)
-            .radius(10.0)
-            .fill(if message.from_user { t.accent } else { t.raised })
-            .child(label(&message.text, 12.5, 500.0, if message.from_user { t.accent_ink } else { t.ink }).wrap());
-        list.child(if message.from_user { row().w_full().justify_end().child(bubble) } else { row().w_full().child(bubble) })
-    });
-    let composer = row()
-        .gap(8.0)
-        .pt(10.0)
-        .items_center()
-        .child(
-            text_input(&app.chat_input, font(12.5, 450.0))
-                .single_line()
-                .key("chat-input")
-                .label("Chat message")
-                .grow(1.0)
-                .h(32.0)
-                .px(10.0)
-                .radius(8.0)
-                .fill(t.background)
-                .border(1.0, t.line)
-                .color(t.ink)
-                .on_edit(|app: &mut StudioApp| &mut app.chat_input)
-                .on_submit(|app: &mut StudioApp, _| app.send_chat()),
-        )
-        .child(button("chat-send", "Send", true, t, StudioApp::send_chat));
-    col().child(messages).child(composer)
-}
-
-pub fn studio_status(app: &StudioApp) -> Option<(&str, bool)> {
-    match (&app.store_error, &app.draft_status, &app.publish_status) {
-        (Some(error), _, _) => Some((error, true)),
-        (None, Some(status), _) | (None, None, Some(status)) => Some((status, false)),
-        (None, None, None) => None,
-    }
-}
-
-fn status_badge(app: &StudioApp, t: &Tones) -> Option<El> {
-    let (message, failed) = studio_status(app)?;
-    let color = if failed { status_color(ExecutionStatus::Failed) } else { status_color(ExecutionStatus::Succeeded) };
-    Some(
-        row()
-            .key("studio-status-badge")
-            .gap(6.0)
-            .min_w(0.0)
-            .items_center()
-            .child(el().size(7.0, 7.0).radius(3.5).fill(color))
-            .child(label(message, 11.5, 600.0, if failed { color } else { t.ink }).key("studio-status").truncate()),
-    )
-}
-
-fn trace_strip(app: &StudioApp, t: &Tones) -> El {
-    let header = row().w_full().gap(10.0).items_center().child(label("TRACE", 10.5, 700.0, t.muted)).child(label(
-        match (app.runs, app.is_running()) {
-            (0, _) => "No runs yet. Press Run Spell.".to_owned(),
-            (runs, true) => format!("run #{runs} · running · {} events · Cancel stops it", app.trace.len()),
-            (runs, false) => format!("run #{runs} · {} events", app.trace.len()),
-        },
-        11.5,
-        500.0,
-        t.muted,
-    ));
-    let header = match status_badge(app, t) {
-        Some(badge) => header.child(el().grow(1.0).min_w(0.0)).child(badge),
-        None => header,
-    };
-    let entries = app.trace.iter().fold(row().gap(6.0).flex_wrap(), |list, line| {
-        list.child(
-            row()
-                .gap(6.0)
-                .h(22.0)
-                .px(8.0)
-                .items_center()
-                .radius(5.0)
-                .fill(t.raised)
-                .child(el().size(6.0, 6.0).radius(3.0).fill(status_color(line.status)))
-                .child(label(format!("+{}ms", line.at_ms), 10.5, 500.0, t.muted).font(font(10.5, 500.0).mono()))
-                .child(label(line.kind, 11.0, 650.0, t.ink))
-                .child(label(&line.detail, 11.0, 450.0, t.muted)),
-        )
-    });
-    col()
-        .key("trace-strip")
-        .w_full()
-        .h(TRACE_HEIGHT)
-        .min_h(0.0)
-        .padding(10.0)
-        .gap(6.0)
-        .fill(t.panel)
-        .border_sides([0.0, 0.0, 0.0, 1.0], t.line)
-        .child(header)
-        .child(col().key("trace-scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: true }).child(entries))
-}
+mod view;
+pub use view::{prompt_editor_height, prompt_font, studio_status, studio_view};
 
 fn trace_line(event: &TraceEvent, at_ms: u64, canvas: &CanvasState) -> TraceLine {
     let path = event.subgraph_path();
     let along_path = |leaf: &str| path.iter().map(|step| step.0.as_str()).chain(std::iter::once(leaf)).collect::<Vec<_>>().join(" › ");
     let title = |id: &NodeId| {
-        if path.is_empty() { canvas.card(id).map_or_else(|| id.0.clone(), |card| card.title.clone()) } else { along_path(&id.0) }
+        if !path.is_empty() {
+            return along_path(&id.0);
+        }
+        let Some(card) = canvas.card(id) else {
+            return id.0.clone();
+        };
+        let dup = canvas.nodes.iter().filter(|other| other.title == card.title).count() > 1;
+        if dup {
+            let branch = id.0.strip_suffix("_reply").unwrap_or(&id.0);
+            let head = card.title.split_whitespace().next().unwrap_or(&card.title);
+            format!("{head} · {branch}")
+        } else {
+            card.title.clone()
+        }
     };
-    let (kind, detail, status) = match event {
-        TraceEvent::RunStarted { .. } => ("RunStarted", String::new(), ExecutionStatus::Running),
-        TraceEvent::NodeStarted { node_id, .. } => ("NodeStarted", title(node_id), ExecutionStatus::Running),
-        TraceEvent::NodeFinished { node_id, duration_ms, .. } => ("NodeFinished", format!("{} {duration_ms}ms", title(node_id)), ExecutionStatus::Succeeded),
-        TraceEvent::NodeFailed { node_id, error, .. } => ("NodeFailed", format!("{} {error}", title(node_id)), ExecutionStatus::Failed),
-        TraceEvent::WireActivated { wire_id, .. } => ("WireActivated", along_path(&wire_id.0), ExecutionStatus::Succeeded),
-        TraceEvent::StreamChunk { node_id, .. } => ("StreamChunk", title(node_id), ExecutionStatus::Running),
-        TraceEvent::VariableSet { name, .. } => ("VariableSet", name.clone(), ExecutionStatus::Succeeded),
+    let wire_label = |wire_id: &WireId| {
+        if !path.is_empty() {
+            return along_path(&wire_id.0);
+        }
+        canvas
+            .wires
+            .iter()
+            .find(|wire| &wire.id == wire_id)
+            .map_or_else(|| wire_id.0.clone(), |wire| format!("{}.{} → {}.{}", title(&wire.from_node), wire.from_socket, title(&wire.to_node), wire.to_socket))
+    };
+    let (kind, detail, status, node) = match event {
+        TraceEvent::RunStarted { .. } => ("RunStarted", String::new(), ExecutionStatus::Running, None),
+        TraceEvent::NodeStarted { node_id, .. } => ("NodeStarted", title(node_id), ExecutionStatus::Running, Some(node_id.clone())),
+        TraceEvent::NodeFinished { node_id, duration_ms, .. } => {
+            let timing = if *duration_ms == 0 { "<1ms".to_owned() } else { format!("{duration_ms}ms") };
+            ("NodeFinished", format!("{} · {timing}", title(node_id)), ExecutionStatus::Succeeded, Some(node_id.clone()))
+        }
+        TraceEvent::NodeFailed { node_id, error, .. } => ("NodeFailed", format!("{}: {error}", title(node_id)), ExecutionStatus::Failed, Some(node_id.clone())),
+        TraceEvent::WireActivated { wire_id, .. } => ("WireActivated", wire_label(wire_id), ExecutionStatus::Succeeded, None),
+        TraceEvent::StreamChunk { node_id, .. } => ("StreamChunk", title(node_id), ExecutionStatus::Running, Some(node_id.clone())),
+        TraceEvent::VariableSet { name, .. } => ("VariableSet", name.clone(), ExecutionStatus::Succeeded, None),
         TraceEvent::RunFinished { summary, .. } => (
             "RunFinished",
             format!("{:?}", summary.status),
             if summary.status == RunStatus::Succeeded { ExecutionStatus::Succeeded } else { ExecutionStatus::Failed },
+            None,
         ),
     };
-    TraceLine { at_ms, kind, detail, status }
+    TraceLine { at_ms, kind, detail, status, node }
 }
 
 fn default_prompt(kind: &str) -> String {
@@ -1876,13 +2106,18 @@ pub fn palette_categories(specs: &[NodeSpec]) -> Vec<String> {
 fn demo_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Support Agent");
     let place =
-        |id: &str, kind: &str, position: [f32; 2]| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position, config: serde_json::Value::Null };
+        |id: &str, kind: &str, position: [f32; 2], config: serde_json::Value| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position, config };
     spell.nodes = vec![
-        place("trigger", "event/on_message", [40.0, 170.0]),
-        place("recall", "memory/search", [310.0, 40.0]),
-        place("search", "knowledge/search", [310.0, 290.0]),
-        place("llm", "ai/generate_text", [590.0, 140.0]),
-        place("reply", "io/send_message", [870.0, 210.0]),
+        place("trigger", "event/on_message", [0.0, 108.0], serde_json::Value::Null),
+        place("recall", "memory/search", [228.0, 12.0], json!({ "max_memories": 5 })),
+        place("search", "knowledge/search", [228.0, 208.0], serde_json::Value::Null),
+        place(
+            "llm",
+            "ai/generate_text",
+            [468.0, 86.0],
+            json!({ "provider": "openai", "model": "gpt-4o-mini", "temperature": 0.4, "prompt": default_prompt("ai/generate_text") }),
+        ),
+        place("reply", "io/send_message", [692.0, 128.0], json!({ "agent_name": "Support Agent" })),
     ];
     let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
         id: WireId::from(id),
@@ -1906,10 +2141,9 @@ fn demo_spell() -> SpellGraph {
     spell
 }
 fn variables() -> Vec<VariableDef> {
-    serde_json::from_value(json!([
-        { "name": "agent_name", "ty": "string", "default": "Support Agent" },
-        { "name": "max_memories", "ty": "int", "default": 5 },
-        { "name": "temperature", "ty": "float", "default": 0.4 }
-    ]))
-    .unwrap_or_default()
+    vec![
+        VariableDef { name: "agent_name".to_owned(), ty: SocketType::String, default: Some(Value::String("Support Agent".to_owned())), exposed: true },
+        VariableDef { name: "max_memories".to_owned(), ty: SocketType::Int, default: Some(Value::Int(5)), exposed: true },
+        VariableDef { name: "temperature".to_owned(), ty: SocketType::Float, default: Some(Value::Float(0.4)), exposed: true },
+    ]
 }

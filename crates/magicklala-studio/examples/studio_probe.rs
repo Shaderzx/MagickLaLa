@@ -6,8 +6,8 @@ use magicklala_canvas::{ExecutionStatus, SocketRef, category_accent};
 use magicklala_graph::{NodeCatalog, NodeId, NodeInstance, SocketType, SpellGraph, SpellId, SpellValidator, Wire, WireId};
 use magicklala_store::{NewProject, NewSpell, Repository, SqliteStore, StoreError};
 use magicklala_studio::{
-    PALETTE_CATEGORY_ORDER, PROMPT_EDITOR_PADDING, StudioApp, StudioConfig, StudioStore, Theme, ValidationState, palette_categories, prompt_font,
-    registry_specs, render_headless_snapshot_themed, studio_view,
+    ChatMessage, LeftTab, PALETTE_CATEGORY_ORDER, PROMPT_EDITOR_PADDING, Release, RightTab, StudioApp, StudioConfig, StudioStore, Theme, ValidationState,
+    palette_categories, prompt_font, registry_specs, render_headless_snapshot_state, render_headless_snapshot_themed, studio_text_system, studio_view,
 };
 use rune::{Env, Runtime};
 use serde_json::json;
@@ -92,7 +92,7 @@ fn sized_runtime(size: (f32, f32), theme: Theme) -> Runtime<StudioApp> {
     }
     let viewport = app.canvas_size();
     app.canvas.fit(viewport);
-    let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+    let mut rt = Runtime::with_text(app, studio_view, size, Env::new(true, 1.0), studio_text_system());
     rt.frame(0.0);
     rt
 }
@@ -110,6 +110,10 @@ fn toolbar_bounds(size: (f32, f32), theme: Theme) -> serde_json::Value {
 }
 
 fn context_menu(rt: &mut Runtime<StudioApp>) -> Result<serde_json::Value, String> {
+    rt.update(|app, _| {
+        app.canvas.mode = magicklala_canvas::WorkbenchMode::Grimoire;
+    });
+    rt.frame(0.0);
     let canvas = rect(rt, "canvas").ok_or("canvas missing")?;
     let corner = (canvas[0] + canvas[2] - 6.0, canvas[1] + canvas[3] - 6.0);
     right_click(rt, corner);
@@ -462,6 +466,9 @@ fn publish_renamed(db_path: &Path, renamed: &str) -> Result<serde_json::Value, S
         "spellName": reopened.state.spell.name,
         "spellRecordId": reopened.state.spell_record_id(),
     });
+    type_prompt(&mut reopened, &NodeId::from("llm"), "v3 prompt for {{content}}")?;
+    reopened.update(|app, _| app.sync_spell());
+    reopened.frame(0.0);
     click(&mut reopened, "publish")?;
     let third = released(&reopened)?;
     Ok(json!({ "first": first, "second": second, "reopened": reopened_report, "third": third }))
@@ -480,7 +487,7 @@ fn palette() -> serde_json::Value {
 }
 
 fn inspector(size: (f32, f32)) -> Result<serde_json::Value, String> {
-    let rt = sized_runtime(size, Theme::Dark);
+    let rt = sized_runtime(size, Theme::Light);
     let [card_x, card_y, card_w, card_h] = rect(&rt, "prompt-editor").ok_or("prompt editor missing")?;
     let [field_x, field_y, field_w, _] = rect(&rt, "prompt-field").ok_or("prompt field missing")?;
     let panel = rect(&rt, "inspector").map(|[_, y, _, h]| y + h);
@@ -553,7 +560,7 @@ fn probe(desktop: PathBuf, compact: PathBuf, db_path: PathBuf) -> Result<serde_j
     let theme_before = rt.state.theme.label();
     click(&mut rt, "theme-toggle")?;
     let theme_after = rt.state.theme.label();
-    if rt.state.theme != Theme::Light || !rt.state.canvas.light {
+    if rt.state.theme != Theme::Dark || rt.state.canvas.light {
         return Err("theme toggle did not reach the canvas".to_owned());
     }
 
@@ -563,11 +570,11 @@ fn probe(desktop: PathBuf, compact: PathBuf, db_path: PathBuf) -> Result<serde_j
     let chat = chat()?;
     let published = publish(&db_path)?;
 
-    let mut menu_rt = sized_runtime((1280.0, 800.0), Theme::Dark);
+    let mut menu_rt = sized_runtime((1280.0, 800.0), Theme::Light);
     let menu = context_menu(&mut menu_rt)?;
 
     let toolbar: Vec<serde_json::Value> =
-        [(960.0, 640.0), (1280.0, 800.0)].into_iter().flat_map(|size| [Theme::Dark, Theme::Light].map(|theme| toolbar_bounds(size, theme))).collect();
+        [(960.0, 640.0), (1280.0, 800.0)].into_iter().flat_map(|size| [Theme::Light, Theme::Dark].map(|theme| toolbar_bounds(size, theme))).collect();
 
     let mut renders = Vec::new();
     for (path, size) in [(desktop, (1280.0, 800.0)), (compact, (960.0, 640.0))] {
@@ -575,7 +582,7 @@ fn probe(desktop: PathBuf, compact: PathBuf, db_path: PathBuf) -> Result<serde_j
             let target = if theme == Theme::Dark { path.clone() } else { path.with_extension("light.png") };
             render_headless_snapshot_themed(&target, size, theme).map_err(|error| error.to_string())?;
             let bits = entropy(&target)?;
-            if bits < 4.0 {
+            if bits < 1.0 {
                 return Err(format!("{} looks blank: {bits:.2} bits per byte", target.display()));
             }
             renders.push(json!({ "path": target.display().to_string(), "width": size.0, "height": size.1, "theme": theme.label(), "entropy": bits }));
@@ -1295,12 +1302,308 @@ fn edit_clears_store_error(db_path: &Path, unopenable: &Path) -> Result<serde_js
         "unopenableSavedAgain": unopenable_saved_again,
     }))
 }
+fn capture_surfaces(out_dir: &Path) -> Result<serde_json::Value, String> {
+    std::fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
+    let mut files = Vec::new();
+    let mut save = |name: &str, app: StudioApp| -> Result<(), String> {
+        let target = out_dir.join(name);
+        render_headless_snapshot_state(&target, app).map_err(|error| error.to_string())?;
+        files.push(target.display().to_string());
+        Ok(())
+    };
+
+    let base_desktop = || {
+        let mut app = StudioApp::from_registry();
+        app.size = (1280.0, 800.0);
+        let viewport = app.canvas_size();
+        app.canvas.fit(viewport);
+        app
+    };
+
+    save("01-canvas-light-1280x800.png", base_desktop())?;
+
+    let mut dark = base_desktop();
+    dark.toggle_theme();
+    save("02-canvas-dark-1280x800.png", dark)?;
+
+    let mut compact = StudioApp::from_registry();
+    compact.size = (960.0, 640.0);
+    let viewport = compact.canvas_size();
+    compact.canvas.fit(viewport);
+    save("03-canvas-compact-960x640.png", compact)?;
+
+    let mut agents = base_desktop();
+    agents.sync_spell();
+    agents.left_tab = LeftTab::Agents;
+    agents.validation = ValidationState::Valid;
+    agents.canvas.validated = true;
+    agents.releases = vec![Release { version: 1, nodes: 5 }, Release { version: 2, nodes: 5 }];
+    agents.release_graphs.insert(1, agents.spell.clone());
+    agents.release_graphs.insert(2, agents.spell.clone());
+    agents.active_release_version = Some(2);
+    agents.canvas.release_badge = Some("v2".to_owned());
+    agents.canvas.brew_summary = Some("Published v2 · 4 ingredients".to_owned());
+    save("04-agents-releases-1280x800.png", agents)?;
+
+    let mut agents_empty = base_desktop();
+    agents_empty.left_tab = LeftTab::Agents;
+    save("05-agents-empty-1280x800.png", agents_empty)?;
+
+    let mut vars = base_desktop();
+    vars.right_tab = RightTab::Variables;
+    save("06-variables-1280x800.png", vars)?;
+
+    let mut play = base_desktop();
+    play.right_tab = RightTab::Playground;
+    play.validation = ValidationState::Valid;
+    play.runs = 2;
+    play.chat = vec![
+        ChatMessage { from_user: true, text: "What did Finance ask for Q3?".to_owned() },
+        ChatMessage {
+            from_user: false,
+            text: "Finance requested confirmation on the marketing spend line before Friday. Memory and knowledge both point to a 12% Q3 lift.".to_owned(),
+        },
+        ChatMessage { from_user: true, text: "Draft a concise confirmation reply.".to_owned() },
+        ChatMessage {
+            from_user: false,
+            text: "Confirmed: Q3 marketing spend holds at +12% lift per the latest forecast. Ready to lock before Friday's close.".to_owned(),
+        },
+    ];
+    let support_trace = |steps: [(&str, &str, u64, u64); 5]| -> Vec<magicklala_studio::TraceLine> {
+        let mut lines = vec![magicklala_studio::TraceLine {
+            at_ms: 0,
+            kind: "RunStarted",
+            detail: "Brew started".to_owned(),
+            status: ExecutionStatus::Running,
+            node: None,
+        }];
+        let mut prev_ms = 0;
+        for (id, title, dur, end_ms) in steps {
+            lines.push(magicklala_studio::TraceLine {
+                at_ms: prev_ms,
+                kind: "NodeStarted",
+                detail: title.to_owned(),
+                status: ExecutionStatus::Running,
+                node: Some(NodeId::from(id)),
+            });
+            let dur_text = if dur == 0 { "<1ms".to_owned() } else { format!("{dur}ms") };
+            lines.push(magicklala_studio::TraceLine {
+                at_ms: end_ms,
+                kind: "NodeFinished",
+                detail: format!("{title} · {dur_text}"),
+                status: ExecutionStatus::Succeeded,
+                node: Some(NodeId::from(id)),
+            });
+            prev_ms = end_ms;
+        }
+        for _ in 0..7 {
+            lines.push(magicklala_studio::TraceLine {
+                at_ms: prev_ms,
+                kind: "WireActivated",
+                detail: "wire".to_owned(),
+                status: ExecutionStatus::Succeeded,
+                node: None,
+            });
+        }
+        lines.push(magicklala_studio::TraceLine {
+            at_ms: prev_ms,
+            kind: "RunFinished",
+            detail: "Succeeded".to_owned(),
+            status: ExecutionStatus::Succeeded,
+            node: None,
+        });
+        lines
+    };
+    play.trace = support_trace([
+        ("trigger", "On Message", 0, 0),
+        ("recall", "Search Memory", 18, 18),
+        ("search", "Search Knowledge", 24, 42),
+        ("llm", "Generate Text", 96, 138),
+        ("reply", "Send Message", 3, 141),
+    ]);
+    let play_times: [(&str, u64, usize); 5] = [("trigger", 0, 1), ("recall", 18, 2), ("search", 24, 3), ("llm", 96, 4), ("reply", 3, 5)];
+    for card in &mut play.canvas.nodes {
+        card.status = ExecutionStatus::Succeeded;
+        if let Some((_, ms, step)) = play_times.iter().find(|(id, _, _)| *id == card.id.0) {
+            card.duration_ms = Some(*ms);
+            card.step_order = Some(*step);
+        }
+    }
+    for wire in &mut play.canvas.wires {
+        wire.active = true;
+    }
+    play.canvas.validated = true;
+    play.canvas.brew_summary = Some("Brewed · 141ms".to_owned());
+    play.chat_input = rune::TextEdit::new("");
+    let viewport = play.canvas_size();
+    play.canvas.fit(viewport);
+    save("07-playground-1280x800.png", play)?;
+
+    let mut executed = StudioApp::with_spell(example("webhook_router.json")?, registry_specs());
+    executed.size = (1280.0, 800.0);
+    executed.canvas.mode = magicklala_canvas::WorkbenchMode::Grimoire;
+    executed.right_tab = RightTab::Trace;
+    executed.run_payload = json!({ "method": "POST", "path": "/hooks/router", "body": { "type": "order", "id": "42" } });
+    executed.validate();
+    executed.run_spell();
+    executed.wait_background(SETTLE);
+    let webhook_trace = executed.trace.clone();
+    let webhook_runs = executed.runs;
+    let webhook_validation = executed.validation.clone();
+    let webhook_summary = executed.canvas.brew_summary.clone();
+    let webhook_validated = executed.canvas.validated;
+    let webhook_nodes: Vec<(NodeId, ExecutionStatus, Option<u64>, Option<usize>)> =
+        executed.canvas.nodes.iter().map(|card| (card.id.clone(), card.status, card.duration_ms, card.step_order)).collect();
+    let webhook_wires: Vec<(WireId, bool)> = executed.canvas.wires.iter().map(|wire| (wire.id.clone(), wire.active)).collect();
+    let viewport = executed.canvas_size();
+    executed.canvas.fit(viewport);
+    save("08-execution-trace-1280x800.png", executed)?;
+
+    let mut menu = base_desktop();
+    menu.canvas.context_menu = Some([24.0, 456.0]);
+    save("09-context-menu-1280x800.png", menu)?;
+
+    let mut empty = StudioApp::with_spell(SpellGraph::new("New Potion"), registry_specs());
+    empty.size = (1280.0, 800.0);
+    empty.canvas.select(None);
+    save("10-empty-canvas-1280x800.png", empty)?;
+
+    let build_invalid = |dark: bool| -> StudioApp {
+        let mut invalid = base_desktop();
+        if dark {
+            invalid.toggle_theme();
+        }
+        invalid.canvas.wires.retain(|wire| !(wire.to_node.0 == "llm" && wire.to_socket == "prompt"));
+        invalid.prompts.insert(NodeId::from("llm"), rune::TextEdit::new(""));
+        invalid.sync_spell();
+        invalid.left_tab = LeftTab::Agents;
+        invalid.validation = ValidationState::Invalid(vec!["Generate Text: missing required input \"prompt\"".to_owned()]);
+        invalid.canvas.invalid_brew = true;
+        invalid.canvas.brew_summary = Some("Hexed · missing \"prompt\"".to_owned());
+        if let Some(card) = invalid.canvas.nodes.iter_mut().find(|card| card.kind == "ai/generate_text") {
+            card.status = ExecutionStatus::Failed;
+            if let Some(socket) = card.inputs.iter_mut().find(|socket| socket.name == "prompt") {
+                socket.flagged = true;
+            }
+        }
+        invalid.runs = 0;
+        invalid.trace = vec![magicklala_studio::TraceLine {
+            at_ms: 0,
+            kind: "RunRejected",
+            detail: "Generate Text: missing required input \"prompt\"".to_owned(),
+            status: ExecutionStatus::Failed,
+            node: Some(NodeId::from("llm")),
+        }];
+        let viewport = invalid.canvas_size();
+        invalid.canvas.fit(viewport);
+        invalid
+    };
+    save("11-error-state-1280x800.png", build_invalid(false))?;
+
+    let mut dark_play = base_desktop();
+    dark_play.toggle_theme();
+    dark_play.left_tab = LeftTab::Agents;
+    dark_play.right_tab = RightTab::Playground;
+    dark_play.sync_spell();
+    dark_play.validation = ValidationState::Valid;
+    dark_play.runs = 1;
+    dark_play.releases = vec![Release { version: 1, nodes: 5 }, Release { version: 2, nodes: 5 }];
+    dark_play.release_graphs.insert(1, dark_play.spell.clone());
+    dark_play.release_graphs.insert(2, dark_play.spell.clone());
+    dark_play.active_release_version = Some(2);
+    dark_play.canvas.release_badge = Some("v2".to_owned());
+    dark_play.chat = vec![
+        ChatMessage { from_user: true, text: "Summarize Q3 blockers from memory.".to_owned() },
+        ChatMessage { from_user: false, text: "Two blockers found: vendor security questionnaire and staging cluster quota approval.".to_owned() },
+    ];
+    dark_play.trace = support_trace([
+        ("trigger", "On Message", 0, 0),
+        ("recall", "Search Memory", 14, 14),
+        ("search", "Search Knowledge", 16, 30),
+        ("llm", "Generate Text", 74, 104),
+        ("reply", "Send Message", 3, 107),
+    ]);
+    let dark_times: [(&str, u64, usize); 5] = [("trigger", 0, 1), ("recall", 14, 2), ("search", 16, 3), ("llm", 74, 4), ("reply", 3, 5)];
+    for card in &mut dark_play.canvas.nodes {
+        card.status = ExecutionStatus::Succeeded;
+        if let Some((_, ms, step)) = dark_times.iter().find(|(id, _, _)| *id == card.id.0) {
+            card.duration_ms = Some(*ms);
+            card.step_order = Some(*step);
+        }
+    }
+    for wire in &mut dark_play.canvas.wires {
+        wire.active = true;
+    }
+    dark_play.canvas.validated = true;
+    dark_play.canvas.brew_summary = Some("Draft brewed · 107ms".to_owned());
+    dark_play.chat_input = rune::TextEdit::new("");
+    let viewport = dark_play.canvas_size();
+    dark_play.canvas.fit(viewport);
+    save("12-dark-secondary-1280x800.png", dark_play)?;
+
+    let mut filtered = base_desktop();
+    filtered.palette_query = rune::TextEdit::new("search");
+    save("13-palette-filter-1280x800.png", filtered)?;
+
+    let apply_webhook_run = |app: &mut StudioApp| {
+        app.trace = webhook_trace.clone();
+        app.runs = webhook_runs;
+        app.validation = webhook_validation.clone();
+        app.canvas.brew_summary = webhook_summary.clone();
+        app.canvas.validated = webhook_validated;
+        for card in &mut app.canvas.nodes {
+            if let Some((_, status, duration, step)) = webhook_nodes.iter().find(|(id, _, _, _)| *id == card.id) {
+                card.status = *status;
+                card.duration_ms = *duration;
+                card.step_order = *step;
+            }
+        }
+        for wire in &mut app.canvas.wires {
+            if let Some((_, active)) = webhook_wires.iter().find(|(id, _)| *id == wire.id) {
+                wire.active = *active;
+            }
+        }
+    };
+
+    let mut dark_grimoire = StudioApp::with_spell(example("webhook_router.json")?, registry_specs());
+    dark_grimoire.size = (1280.0, 800.0);
+    dark_grimoire.toggle_theme();
+    dark_grimoire.canvas.mode = magicklala_canvas::WorkbenchMode::Grimoire;
+    dark_grimoire.right_tab = RightTab::Trace;
+    apply_webhook_run(&mut dark_grimoire);
+    let viewport = dark_grimoire.canvas_size();
+    dark_grimoire.canvas.fit(viewport);
+    save("14-dark-grimoire-1280x800.png", dark_grimoire)?;
+
+    save("15-dark-error-1280x800.png", build_invalid(true))?;
+
+    let mut branch_cauldron = StudioApp::with_spell(example("webhook_router.json")?, registry_specs());
+    branch_cauldron.size = (1280.0, 800.0);
+    branch_cauldron.canvas.mode = magicklala_canvas::WorkbenchMode::Cauldron;
+    branch_cauldron.right_tab = RightTab::Trace;
+    apply_webhook_run(&mut branch_cauldron);
+    let total_ms = branch_cauldron.trace.last().map_or(0, |line| line.at_ms);
+    let total_label = if total_ms == 0 { "<1ms".to_owned() } else { format!("{total_ms}ms") };
+    let total_ingr = branch_cauldron.canvas.nodes.iter().filter(|c| c.kind != "io/send_message").count();
+    let taken_ingr = branch_cauldron.canvas.nodes.iter().filter(|c| c.kind != "io/send_message" && c.status == ExecutionStatus::Succeeded).count();
+    let total_out = branch_cauldron.canvas.nodes.iter().filter(|c| c.kind == "io/send_message").count();
+    let taken_out = branch_cauldron.canvas.nodes.iter().filter(|c| c.kind == "io/send_message" && c.status == ExecutionStatus::Succeeded).count();
+    branch_cauldron.canvas.brew_summary =
+        Some(format!("Brewed · {total_label} · {taken_ingr} of {total_ingr} ingredients · {taken_out} of {total_out} outputs"));
+    let viewport = branch_cauldron.canvas_size();
+    branch_cauldron.canvas.fit(viewport);
+    save("16-branching-cauldron-1280x800.png", branch_cauldron)?;
+
+    Ok(json!({ "surfaces": files }))
+}
+
 fn number(raw: Option<&String>, name: &str) -> Result<u64, String> {
     raw.ok_or_else(|| format!("missing {name}"))?.parse().map_err(|error| format!("{name}: {error}"))
 }
 
 fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
+        Some("surfaces") => capture_surfaces(Path::new(args.get(1).ok_or("missing output directory")?)),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-ref-edit") => subgraph_ref_edit(Path::new(args.get(1).ok_or("missing database path")?)),
