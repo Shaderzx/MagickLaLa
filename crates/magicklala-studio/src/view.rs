@@ -72,9 +72,9 @@ fn button_el(key: &str, caption: &str, kind: ButtonKind, padding: f32, t: &Heart
         ButtonKind::Danger => (t.hex_tint, t.hex, t.hex, 1.4),
         ButtonKind::Disabled => {
             if t.light {
-                (t.off_bg, with_alpha(t.off_ink, 0.50), with_alpha(t.rule, 0.55), 1.0)
+                (t.off_bg, t.off_ink, with_alpha(t.rule, 0.55), 1.0)
             } else {
-                (with_alpha(t.wash_2, 0.72), with_alpha(t.off_ink, 0.58), with_alpha(t.rule_2, 0.45), 1.0)
+                (with_alpha(t.wash_2, 0.72), t.off_ink, with_alpha(t.rule_2, 0.45), 1.0)
             }
         }
     };
@@ -296,12 +296,6 @@ fn pantry_ghost(app: &StudioApp, t: &HearthPalette) -> Option<El> {
     let light = app.theme == Theme::Light;
     let tone = category_tone(&spec.category, light);
     let over = app.pantry_drag_over_pot();
-    let hint = match (app.canvas.mode, over, app.pantry_drag_point().is_some()) {
-        (WorkbenchMode::Cauldron, true, _) => "Drop to stir in",
-        (WorkbenchMode::Cauldron, false, true) => "Drop to set aside",
-        (WorkbenchMode::Grimoire, _, true) => "Drop to place",
-        _ => "Drag onto the cauldron",
-    };
     Some(
         row()
             .key("pantry-ghost")
@@ -317,7 +311,7 @@ fn pantry_ghost(app: &StudioApp, t: &HearthPalette) -> Option<El> {
             .opacity(0.94)
             .absolute(drag.at[0] + 12.0, drag.at[1] + 10.0)
             .child(canvas(mini_vial_icon(&spec.category, light, 20.0)).size(20.0, 20.0))
-            .child(col().gap(1.0).child(label(&spec.title, 12.0, 700.0, t.ink)).child(label(hint, 10.0, 550.0, if over { t.simmer_ink() } else { t.mute }))),
+            .child(label(&spec.title, 12.0, 700.0, t.ink)),
     )
 }
 
@@ -326,24 +320,11 @@ fn empty_canvas_overlay(app: &StudioApp, t: &HearthPalette) -> El {
     let card_w = 400.0_f32.min(size.0 - 32.0).max(240.0);
     let x = ((size.0 - card_w) * 0.5).max(16.0);
     let y = (size.1 * 0.62).min(size.1 - 152.0).max(216.0);
-    col()
-        .key("empty-canvas")
-        .w(card_w)
-        .px(16.0)
-        .py(12.0)
-        .items_center()
-        .gap(8.0)
-        .absolute(x, y)
-        .child(heading("Start a new potion", 24.0, 800.0, t.ink))
-        .child(col().items_center().gap(2.0).child(label("Add an ingredient from the Pantry,", 13.0, 450.0, t.mute)).child(label(
-            "or start with On Message.",
-            13.0,
-            450.0,
-            t.mute,
-        )))
-        .child(row().pt(4.0).child(sized_button("empty-add-trigger", "Add On Message", true, false, 16.0, t, |app| {
+    col().key("empty-canvas").w(card_w).px(16.0).py(12.0).items_center().gap(8.0).absolute(x, y).child(heading("Start a new potion", 24.0, 800.0, t.ink)).child(
+        row().pt(4.0).child(sized_button("empty-add-trigger", "Add On Message", true, false, 16.0, t, |app| {
             app.spawn("event/on_message");
-        })))
+        })),
+    )
 }
 
 fn canvas_with_menu(app: &StudioApp, t: &HearthPalette) -> El {
@@ -752,7 +733,7 @@ fn left_rail(app: &StudioApp, t: &HearthPalette) -> El {
                 let m_word = if filtered.len() == 1 { "match" } else { "matches" };
                 format!("{} {m_word} · {} in cauldron", filtered.len(), in_pot_count)
             } else if app.canvas.nodes.is_empty() {
-                format!("{} ingredients · click + to add", app.specs.len())
+                format!("{} ingredients", app.specs.len())
             } else {
                 format!("{} ingredients · {} in cauldron", app.specs.len(), in_pot_count)
             };
@@ -936,7 +917,7 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                 .child(label(error, 11.5, 600.0, t.hex).wrap()),
         );
     } else if app.releases.is_empty() {
-        let mut empty_card = col()
+        let empty_card = col()
             .w_full()
             .py(18.0)
             .px(10.0)
@@ -958,9 +939,6 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                     app.publish().ok();
                 },
             )));
-        if spell_invalid {
-            empty_card = empty_card.child(label("Fix the hex to publish", 10.5, 600.0, t.hex));
-        }
         column = column.child(empty_card);
     }
     let show_status = app.draft_status.as_ref().or_else(|| app.publish_status.as_ref().filter(|_| app.active_release_version.is_none()));
@@ -1420,13 +1398,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             .items_center()
             .gap(10.0)
             .child(canvas(empty_bottle_mark(light, 42.0)).key("inspector-empty-bobbin").size(42.0, 42.0))
-            .child(heading("No ingredient picked", 15.5, 800.0, t.ink))
-            .child(col().items_center().gap(2.0).child(label("Select an ingredient in the cauldron", 12.0, 450.0, t.mute)).child(label(
-                "to edit it.",
-                12.0,
-                450.0,
-                t.mute,
-            )));
+            .child(heading("No ingredient picked", 15.5, 800.0, t.ink));
     };
     let compact = app.size.1 < COMPACT_INSPECTOR_BELOW;
     let socket_h = if compact { 21.0 } else { 24.0 };
@@ -1453,7 +1425,12 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         };
         let mut right_meta = row().gap(8.0).items_center();
         if flagged {
-            right_meta = right_meta.child(row().px(6.0).py(1.0).radius(6.0).border(1.0, t.hex).fill(t.hex_tint).child(label("Missing", 9.5, 700.0, t.hex)));
+            right_meta = right_meta.child(row().px(6.0).py(1.0).radius(6.0).border(1.0, t.hex).fill(t.hex_tint).child(label(
+                if socket.mistyped { "Wrong type" } else { "Missing" },
+                9.5,
+                700.0,
+                t.hex,
+            )));
         }
         right_meta = right_meta.child(label(format!("{:?}", socket.ty), if compact { 10.5 } else { 11.0 }, 550.0, if flagged { t.hex } else { t.mute }));
         row()

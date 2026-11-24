@@ -110,8 +110,25 @@ pub fn recipe_order(state: &CanvasState) -> Vec<NodeId> {
     order
 }
 
+pub fn potion_ends(state: &CanvasState) -> Vec<NodeId> {
+    let outputs: Vec<NodeId> = state.nodes.iter().filter(|card| is_bottle(card)).map(|card| card.id.clone()).collect();
+    if !outputs.is_empty() {
+        return outputs;
+    }
+    state
+        .nodes
+        .iter()
+        .filter(|card| state.wires.iter().any(|wire| wire.to_node == card.id && wire.ty.is_flow()))
+        .filter(|card| !state.wires.iter().any(|wire| wire.from_node == card.id))
+        .map(|card| card.id.clone())
+        .collect()
+}
+
 pub fn brewing_nodes(state: &CanvasState) -> HashSet<NodeId> {
-    let bottles: Vec<NodeId> = state.nodes.iter().filter(|card| is_bottle(card)).map(|card| card.id.clone()).collect();
+    let bottles = potion_ends(state);
+    if bottles.is_empty() && state.wires.is_empty() {
+        return state.nodes.iter().map(|card| card.id.clone()).collect();
+    }
     if bottles.is_empty() {
         return state
             .nodes
@@ -149,7 +166,8 @@ fn stack_height(count: usize, item: f32, gap: f32) -> f32 {
 pub fn brew_plan(state: &CanvasState, size: (f32, f32)) -> BrewPlan {
     let order = recipe_order(state);
     let brewing = brewing_nodes(state);
-    let bottles: Vec<NodeId> = order.iter().filter(|id| state.card(id).is_some_and(is_bottle)).cloned().collect();
+    let ends = potion_ends(state);
+    let bottles: Vec<NodeId> = order.iter().filter(|id| ends.contains(id)).cloned().collect();
     let ingredients: Vec<NodeId> = order.iter().filter(|id| brewing.contains(*id) && !bottles.contains(*id)).cloned().collect();
     let aside: Vec<NodeId> = order.iter().filter(|id| !brewing.contains(*id) && !bottles.contains(*id)).cloned().collect();
 

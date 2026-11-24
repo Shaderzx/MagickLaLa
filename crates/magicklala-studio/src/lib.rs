@@ -584,11 +584,12 @@ pub struct HexFinding {
     pub socket: Option<String>,
     pub message: String,
     pub readable: String,
+    pub mistyped: bool,
 }
 
 impl HexFinding {
     fn loose(message: String) -> Self {
-        Self { node: None, socket: None, readable: message.clone(), message }
+        Self { node: None, socket: None, readable: message.clone(), message, mistyped: false }
     }
 
     fn from_validation(error: &ValidationError, spell: &SpellGraph, title_of: &dyn Fn(&NodeId) -> String) -> Self {
@@ -624,7 +625,7 @@ impl HexFinding {
             ValidationError::ValueCycle(nodes) => (nodes.first().cloned(), None),
             _ => (None, None),
         };
-        Self { node, socket, message, readable }
+        Self { node, socket, message, readable, mistyped: matches!(error, ValidationError::TypeMismatch { .. }) }
     }
 }
 
@@ -930,7 +931,11 @@ impl StudioApp {
         }
         if let Some(card_mut) = self.canvas.card_mut(&card.id) {
             card_mut.status = ExecutionStatus::Idle;
-            card_mut.inputs.iter_mut().for_each(|socket| socket.flagged = false);
+            card_mut.inputs.iter_mut().for_each(|socket| {
+                socket.flagged = false;
+                socket.mistyped = false;
+                socket.mistyped = false;
+            });
         }
         self.validate();
     }
@@ -1251,7 +1256,8 @@ impl StudioApp {
                 wire("w1", ("trigger", "out"), ("search", "in")),
                 wire("w2", ("trigger", "content"), ("search", "query")),
                 wire("w3", ("search", "out"), ("llm", "in")),
-                wire("w4", ("search", "results"), ("llm", "prompt")),
+                wire("w4", ("trigger", "content"), ("llm", "prompt")),
+                wire("w7", ("search", "text"), ("llm", "system")),
                 wire("w5", ("llm", "out"), ("reply", "in")),
                 wire("w6", ("llm", "text"), ("reply", "content")),
             ];
@@ -1494,7 +1500,15 @@ impl StudioApp {
     }
 
     fn auto_wire_cauldron_ingredient(&mut self, id: &NodeId, spec: &NodeSpec) {
-        let order: Vec<NodeId> = magicklala_canvas::recipe_order(&self.canvas).into_iter().filter(|node| node != id).collect();
+        let mut without = self.canvas.clone();
+        without.nodes.retain(|card| &card.id != id);
+        without.wires.retain(|wire| &wire.from_node != id && &wire.to_node != id);
+        let in_pot = magicklala_canvas::brewing_nodes(&without);
+        let order: Vec<NodeId> = magicklala_canvas::recipe_order(&self.canvas)
+            .into_iter()
+            .filter(|node| node != id)
+            .filter(|node| in_pot.contains(node) || self.canvas.card(node).is_some_and(|card| card.category.eq_ignore_ascii_case("events")))
+            .collect();
         let bottle = |app: &Self, node: &NodeId| app.canvas.card(node).is_some_and(magicklala_canvas::brew::is_bottle);
         let flow_out_of =
             |app: &Self, node: &NodeId| app.canvas.card(node).and_then(|card| card.outputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone()));
@@ -1534,14 +1548,15 @@ impl StudioApp {
                     .find(|wire| &wire.from_node == node && wire.from_socket == out && bottle(self, &wire.to_node))
                     .map(|wire| (node.clone(), wire.id.clone(), wire.to_node.clone(), wire.to_socket.clone()))
             });
-            match (free_tail, before_bottle) {
+            let splice = before_bottle.filter(|_| !bottle(self, id) && my_flow_out.is_some());
+            match (free_tail.filter(|_| splice.is_none()), splice) {
                 (Some(tail), _) => {
                     let out = flow_out_of(self, &tail).unwrap_or_default();
                     if self.connect((&tail, &out), (id, input)) {
                         sources.push(tail);
                     }
                 }
-                (None, Some((prev, wire, next, next_in))) if !bottle(self, id) && my_flow_out.is_some() => {
+                (None, Some((prev, wire, next, next_in))) => {
                     let out = flow_out_of(self, &prev).unwrap_or_default();
                     self.canvas.wires.retain(|candidate| candidate.id != wire);
                     if self.connect((&prev, &out), (id, input)) {
@@ -1549,11 +1564,12 @@ impl StudioApp {
                     }
                     let mine = my_flow_out.clone().unwrap_or_default();
                     self.connect((id, &mine), (&next, &next_in));
+                    let makes_content = spec.category.eq_ignore_ascii_case("ai") || spec.category.eq_ignore_ascii_case("text");
                     let handed: Vec<(WireModel, String)> = self
                         .canvas
                         .wires
                         .iter()
-                        .filter(|wire| wire.from_node == prev && wire.to_node == next && !wire.ty.is_flow())
+                        .filter(|wire| makes_content && wire.from_node == prev && wire.to_node == next && !wire.ty.is_flow())
                         .filter_map(|wire| spec.outputs.iter().find(|out| out.ty == wire.ty).map(|out| (wire.clone(), out.name.clone())))
                         .collect();
                     for (wire, out) in handed {
@@ -1777,7 +1793,7 @@ impl StudioApp {
             .filter_map(|node| {
                 configured_release_version(node).err().map(|error| {
                     let message = format!("node {:?}: {error}", node.id.0);
-                    HexFinding { node: Some(node.id.clone()), socket: None, readable: message.clone(), message }
+                    HexFinding { node: Some(node.id.clone()), socket: None, readable: message.clone(), message, mistyped: false }
                 })
             })
             .collect();
@@ -1843,6 +1859,7 @@ impl StudioApp {
                         card.status = ExecutionStatus::Failed;
                         if let Some(socket) = finding.socket.as_ref().and_then(|name| card.inputs.iter_mut().find(|socket| &socket.name == name)) {
                             socket.flagged = true;
+                            socket.mistyped = finding.mistyped;
                         }
                     }
                     rejected.push(TraceLine {
@@ -2537,6 +2554,7 @@ pub fn palette_categories(specs: &[NodeSpec]) -> Vec<String> {
 fn hex_plaque(findings: &[HexFinding], cards: &[NodeCardModel]) -> String {
     let title_of = |id: &NodeId| cards.iter().find(|card| &card.id == id).map(|card| card.title.clone());
     match findings.first() {
+        Some(HexFinding { socket: Some(socket), mistyped: true, .. }) => format!("Hexed · wrong type \"{socket}\""),
         Some(HexFinding { socket: Some(socket), .. }) => format!("Hexed · missing \"{socket}\""),
         Some(HexFinding { node: Some(node), .. }) => format!("Hexed · {}", title_of(node).unwrap_or_else(|| node.0.clone())),
         _ => "Hexed".to_owned(),

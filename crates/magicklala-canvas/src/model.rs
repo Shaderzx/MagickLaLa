@@ -14,6 +14,7 @@ pub struct SocketModel {
     pub ty: SocketType,
     pub offset: [f32; 2],
     pub flagged: bool,
+    pub mistyped: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -80,6 +81,7 @@ impl NodeCardModel {
                     ty: socket.ty,
                     offset: [x, CARD_HEADER + BODY_TOP + SOCKET_ROW * (row as f32 + 0.5)],
                     flagged: false,
+                    mistyped: false,
                 })
                 .collect()
         };
@@ -106,7 +108,7 @@ impl NodeCardModel {
         if sockets.iter().any(|socket| socket.name == name) {
             return;
         }
-        let socket = SocketModel { name: name.to_owned(), ty, offset: [x, 0.0], flagged: false };
+        let socket = SocketModel { name: name.to_owned(), ty, offset: [x, 0.0], flagged: false, mistyped: false };
         if output && name != "default" && sockets.last().is_some_and(|last| last.name == "default") {
             let insert_at = sockets.len() - 1;
             sockets.insert(insert_at, socket);

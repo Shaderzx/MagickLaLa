@@ -8,7 +8,7 @@ fn srgb_channel(byte: u32) -> f32 {
 }
 
 pub fn ghost_ink(light: bool) -> Color {
-    if light { hex(0xB8A690) } else { hex(0x5B4D7A) }
+    if light { hex(0x857360) } else { hex(0x7E70A6) }
 }
 
 pub fn hex(value: u32) -> Color {

@@ -230,7 +230,11 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     });
 
     let status_pill = if hexed {
-        let missing_label = card.inputs.iter().find(|s| s.flagged).map_or_else(|| "Hexed".to_owned(), |s| format!("Missing \"{}\"", s.name));
+        let missing_label = card
+            .inputs
+            .iter()
+            .find(|s| s.flagged)
+            .map_or_else(|| "Hexed".to_owned(), |s| if s.mistyped { format!("Wrong type \"{}\"", s.name) } else { format!("Missing \"{}\"", s.name) });
         Some(
             row()
                 .px(6.0)
