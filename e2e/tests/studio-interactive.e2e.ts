@@ -1131,7 +1131,7 @@ test('Every step keeps one name and every card keeps its words: ingredient title
   expect(report.empty.secondAdd).toBe(false);
   expect(report.empty.belowPot).toBeGreaterThanOrEqual(24);
 });
-test('Studio fits and counts honestly at 960 by 640: variable names keep their own line, the hex card keeps its buttons inside, the empty pot leaves room for its heading, the opened pantry can be folded away again, the Grimoire draws its checkmarks and chevrons instead of font glyphs, the recipe panel uses the same bottle name as the cauldron, the toolbar counts ingredients, set-aside cards and bottles the way the pot does, and a Check before any brew never reads Brew #0', { timeout: 900_000 }, async () => {
+test('Studio fits and counts honestly at 960 by 640: variable names keep their own line, the hex card keeps its buttons inside, the empty pot leaves room for its heading, the opened pantry can be folded away again, the Grimoire draws its checkmarks and chevrons instead of font glyphs, the recipe panel uses the same bottle name as the cauldron, the plaque counts ingredients and set-aside cards the way the pot does, and a Check before any brew never reads Brew #0', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['compact-fit']);
 
   expect(report.varLabelWidths.length).toBeGreaterThan(0);
@@ -1142,7 +1142,7 @@ test('Studio fits and counts honestly at 960 by 640: variable names keep their o
   expect(report.rail).toEqual({ opened: true, collapsed: true });
   expect(report.grimoireGlyphs).toEqual([]);
   expect(report.recipeTitle).toBe('Send · orders');
-  expect(report.stats).toEqual({ aside: '3 ingredients · 1 aside · 1 output', relay: '2 ingredients · 1 output' });
+  expect(report.stats).toEqual({ aside: 'Draft · 3 ingredients · 1 aside', relay: 'Draft · 2 ingredients' });
   expect(report.checkHeader).toMatch(/^Check/);
   expect(report.singularPlurals).toEqual([]);
 });
@@ -1333,6 +1333,22 @@ test('Every drawn line keeps to itself: crowded lanes never share a run, ribbons
   expect(report.twinNames.some((title: string) => /out_\d/.test(title))).toBe(false);
   expect(report.twinNames.length).toBeGreaterThan(0);
   expect(report.hookBrew).toBe('Some(Succeeded)');
+});
+test('One voice for status: a published potion set aside and poured back still reads Published v1 in the header, plaque and bottle, a moved and saved potion reopens live and refuses a duplicate release, the Cauldron tells its counts only on the plaque while the Grimoire keeps its chip, and no bottle ribbon climbs far above its mouth', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-voice-'));
+  try {
+    const report = await studioProbe(['one-voice', join(dir, 'studio.sqlite')]);
+
+    expect(report.roundTrip.header).toContain('Published v1');
+    expect(report.roundTrip.plaque).toContain('Published v1');
+    expect(report.roundTrip.bottle).toContain('v1');
+    expect(report.liveAfterReopen).toBe(1);
+    expect(report.releasesAfterReopen).toEqual([1]);
+    expect(report.counts).toEqual({ toolbar: false, pantry: false, grimoire: true });
+    expect(report.peaks).toEqual([]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 test('A brew locks the recipe and the bottles tell the truth: typing, saving, adding, dragging cards and drawing wires all wait until the brew ends and the lit result survives, branch bottles show no step numbers before a brew, a running bottle simmers without a check, a published branch potion shows its sealed version on the bottle, and thirteen-step and thirty-eight-step brews and a many-issue Check keep every log chip and the result inside the log at 960 and 1280', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-locks-'));
