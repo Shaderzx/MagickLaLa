@@ -2309,7 +2309,7 @@ fn cut_titles(rt: &Runtime<StudioApp>, text: &mut rune::text::TextSystem) -> Vec
             let (_, rect) = text_lines_under(rt, &format!("node-{}", card.id.0)).into_iter().find(|(line, _)| line == &card.title)?;
             let (natural, line_h) = text.measure(&card.title, rune::TextStyle::new(13.0, 750.0), 1.0);
             let lines = (rect[3] / (line_h * plan.scale)).round().max(1.0);
-            (natural * plan.scale > rect[2] * lines + 1.0).then(|| card.title.clone())
+            (natural * plan.scale > rect[2] * lines + 3.0).then(|| card.title.clone())
         })
         .collect()
 }
@@ -2352,7 +2352,11 @@ fn r3_look() -> Result<serde_json::Value, String> {
         magicklala_canvas::cauldron::potion_tint(&demo.state.canvas, &magicklala_canvas::brew_plan(&demo.state.canvas, demo.state.canvas_size())),
     );
     let last_liquid = magicklala_canvas::hearth::category_tone(&last.category, true).liquid;
-    let pot_width = demo.presented("cauldron-center").map(|(rect, _)| rect[2]).unwrap_or_default();
+    let mut roomy_app = StudioApp::from_registry();
+    roomy_app.size = (1600.0, 1000.0);
+    let mut roomy = Runtime::new(roomy_app, studio_view, (1600.0, 1000.0), Env::new(true, 1.0));
+    roomy.frame(0.0);
+    let pot_width = roomy.presented("cauldron-center").map(|(rect, _)| rect[2]).unwrap_or_default();
 
     let place =
         |id: &str, kind: &str, x: f32| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position: [x, 0.0], config: serde_json::Value::Null };
@@ -2400,7 +2404,8 @@ fn r3_look() -> Result<serde_json::Value, String> {
 
     let mut aside_rt = headless(StudioApp::from_registry());
     aside_rt.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("recall"))));
-    aside_rt.frame(0.0);
+    aside_rt.frame(1.0);
+    aside_rt.frame(3.0);
     let shelf = aside_rt.presented("aside-shelf").map(|(rect, _)| rect);
     let recall = aside_rt.presented("node-recall").map(|(rect, _)| rect);
     let aside_shelf = json!({ "shelf": shelf.is_some(), "holdsCard": matches!((shelf, recall), (Some(s), Some(c)) if inside(s, c)) });

@@ -293,7 +293,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     };
 
     let top_row =
-        row().w_full().items_center().child(text(&card.title).font(TextStyle::new(13.0, 750.0)).color(if dimmed { untaken_title } else { p.ink }).truncate());
+        row().w_full().items_center().child(text(&card.title).font(TextStyle::new(13.0, 750.0)).color(if dimmed { untaken_title } else { p.ink }).wrap());
 
     let sub_color = if hexed {
         p.hex
@@ -368,6 +368,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     card: &NodeCardModel,
     step_num: Option<usize>,
     frame: [f32; 3],
+    tint: Option<Color>,
     has_run: bool,
     p: &HearthPalette,
     lens: fn(&mut S) -> &mut CanvasState,
@@ -383,28 +384,15 @@ pub(crate) fn branch_bottle_view<S: 'static>(
         CauldronMood::Ready
     };
     let bottle_h = 66.0;
-    let title = card.title.clone();
-    let route = crate::cauldron::route_label(state, &card.id).map(|label| {
-        row()
-            .key(format!("route-{}", card.id.0))
-            .px(6.0)
-            .py(1.0)
-            .radius(7.0)
-            .fill(if taken { p.route_taken_fill() } else { p.card })
-            .border(1.0, if taken { p.broth_mid } else { p.rule_2 })
-            .child(
-                text(label).font(TextStyle::new(11.0, if taken { 700.0 } else { 600.0 }).mono()).color(if taken { p.broth_ink() } else { p.ink_2 }).truncate(),
-            )
-    });
-    let bottle_art = canvas(potion_bottle_shape(
-        bottle_mood,
-        state.light,
-        width,
-        bottle_h,
-        false,
-        crate::cauldron::potion_tint(state, &crate::brew::brew_plan(state, (1280.0, 800.0))),
-    ))
-    .size(width, bottle_h);
+    let route = crate::cauldron::route_label(state, &card.id);
+    let twins = state.nodes.iter().filter(|other| other.title == card.title).count() > 1;
+    let short = card.title.split_whitespace().next().unwrap_or(&card.title);
+    let title = match (&route, twins) {
+        (Some(route), true) => format!("{short} · {route}"),
+        _ => card.title.clone(),
+    };
+    let route_key = route.as_ref().map(|_| format!("route-{}", card.id.0));
+    let bottle_art = canvas(potion_bottle_shape(bottle_mood, state.light, width, bottle_h, false, tint)).size(width, bottle_h);
     let pill = if taken {
         let ms_text = match card.duration_ms {
             Some(0) => "✓ <1ms".to_owned(),
@@ -450,11 +438,11 @@ pub(crate) fn branch_bottle_view<S: 'static>(
         .fill(card_bg)
         .border(if taken || card.selected { 1.6 } else { 1.1 }, card_border)
         .shadow(2.0, 8.0, if untaken { Color::TRANSPARENT } else { p.shadow_card })
-        .child(text(title).font(TextStyle::new(12.5, 750.0)).color(title_col).truncate())
-        .child(match route {
-            Some(route) => row().w_full().child(route),
-            None => row().w_full().child(text(&card.kind).font(TextStyle::new(11.0, 500.0).mono()).color(sub_col).truncate()),
-        });
+        .child(match route_key {
+            Some(key) => row().key(key).w_full().child(text(title).font(TextStyle::new(12.5, 750.0)).color(title_col).wrap()),
+            None => row().w_full().child(text(title).font(TextStyle::new(12.5, 750.0)).color(title_col).wrap()),
+        })
+        .child(text(&card.kind).font(TextStyle::new(11.0, 500.0).mono()).color(sub_col).truncate());
     let mut tag_wrap = el().w_full().child(tag_inner).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(pill));
     if let Some(num) = step_num {
         let step_badge = row()
@@ -484,6 +472,7 @@ pub(crate) fn potion_stand_view<S: 'static>(
     output: &NodeCardModel,
     step_num: Option<usize>,
     frame: [f32; 3],
+    tint: Option<Color>,
     mood: CauldronMood,
     p: &HearthPalette,
     lens: fn(&mut S) -> &mut CanvasState,
@@ -494,16 +483,7 @@ pub(crate) fn potion_stand_view<S: 'static>(
     let bottled = state.release_badge.is_some();
     let sealed_vintage = bottled && !matches!(mood, CauldronMood::Brewed | CauldronMood::Simmering | CauldronMood::Hexed | CauldronMood::Empty);
     let bottle_h = 104.0;
-    let bottle_art = canvas(potion_bottle_shape(
-        mood,
-        state.light,
-        width,
-        bottle_h,
-        bottled,
-        crate::cauldron::potion_tint(state, &crate::brew::brew_plan(state, (1280.0, 800.0))),
-    ))
-    .key("hero-potion-bottle")
-    .size(width, bottle_h);
+    let bottle_art = canvas(potion_bottle_shape(mood, state.light, width, bottle_h, bottled, tint)).key("hero-potion-bottle").size(width, bottle_h);
     let spell_label = if state.spell_name.is_empty() { "Potion" } else { state.spell_name.as_str() };
     let out_title = primary_output.map_or("Bottled Potion", |c| c.title.as_str());
     let out_kind = primary_output.map_or("io/send_message", |c| c.kind.as_str());
@@ -855,7 +835,7 @@ fn grimoire_card_view<S: 'static>(
     let header_bg = if dimmed { dimmed_header } else { tone.tint };
     let header_h = CARD_HEADER * zoom;
     let title_size = (13.6 * zoom).clamp(11.8, 15.5);
-    let kind_size = (10.8 * zoom).clamp(10.2, 11.6);
+    let kind_size = (10.8 * zoom).clamp(11.0, 11.6);
     let title_color = if dimmed { if state.light { hex(0x362E45) } else { hex(0xDFD8F2) } } else { p.ink };
     let kind_color = if dimmed { if state.light { hex(0x3F3652) } else { hex(0xD4CCE8) } } else { p.mute };
     let vial_size = (22.0 * zoom).clamp(17.0, 26.0);

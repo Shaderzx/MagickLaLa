@@ -756,7 +756,9 @@ pub fn broth_mid(mood: CauldronMood, light: bool, tint: Option<Color>) -> Color 
 fn tinted_broth(mood: CauldronMood, p: &HearthPalette, tint: Option<Color>) -> (Color, Color, Color, Color) {
     let base = broth_colors(mood, p);
     match tint {
-        Some(t) if matches!(mood, CauldronMood::Simmering | CauldronMood::Brewed) => (mix(t, hex(0x0B0814), 0.45), t, mix(t, hex(0xFFFFFF), 0.42), base.3),
+        Some(t) if matches!(mood, CauldronMood::Simmering | CauldronMood::Brewed | CauldronMood::Ready) => {
+            (mix(t, hex(0x0B0814), 0.45), t, mix(t, hex(0xFFFFFF), 0.42), base.3)
+        }
         _ => base,
     }
 }

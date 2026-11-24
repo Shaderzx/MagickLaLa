@@ -80,32 +80,31 @@ fn drips(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &HearthPal
     if matches!(mood, CauldronMood::Hexed | CauldronMood::Empty) {
         return Vec::new();
     }
-    let ingredients: Vec<&BrewCard> = plan.with_role(BrewRole::Ingredient).collect();
-    let spread = ingredients.len().max(2) as f32 - 1.0;
+    let paths = pour_paths(state, plan);
     let mut out = Vec::new();
-    for (index, placed) in ingredients.iter().enumerate() {
-        let Some(card) = state.card(&placed.id) else { continue };
+    for (index, (id, points)) in paths.iter().enumerate() {
+        let Some(card) = state.card(id) else { continue };
         let lift = (36.0 - index as f32 * 10.0).max(0.0) * plan.scale;
         let style = stream_for(state, card, mood, p, lift);
-        if style.untaken || style.blocked || style.hexed {
+        if style.untaken || style.blocked || style.hexed || points.len() < 4 {
             continue;
         }
-        let from = vial_mouth(placed, plan);
-        let to = rim_point(plan, index as f32 / spread.max(1.0));
         let r = (if style.active { 3.4 } else { 2.6 }) * plan.scale.max(0.6);
         let period = if style.active { 0.9 } else { 1.8 };
-        for (k, t) in [0.22_f32, 0.48, 0.74].into_iter().enumerate() {
-            let at = pour_point(from, to, lift, t);
+        let third = points.len() / 3;
+        for k in 0..3 {
+            let start = points[k * third];
+            let end = points[((k + 1) * third).min(points.len() - 1)];
             let delay = period * k as f64 / 3.0 + index as f64 * 0.17;
-            out.push(
-                el().key(format!("drip-{}-{k}", placed.id.0))
-                    .size(r * 2.0, r * 2.0)
-                    .radius(r)
-                    .fill(with_alpha(if style.active { style.glow } else { style.color }, 0.95))
-                    .border(1.0, with_alpha(p.card, 0.8))
-                    .absolute(at[0] - r, at[1] - r)
-                    .looping(LoopSpec::opacity(period, delay, 0.0, 1.0)),
-            );
+            let mut travel = LoopSpec::slide(period, [0.0, 0.0], [end[0] - start[0], end[1] - start[1]]);
+            travel.delay = delay;
+            let dot = el()
+                .size(r * 2.0, r * 2.0)
+                .radius(r)
+                .fill(with_alpha(if style.active { style.glow } else { style.color }, 0.95))
+                .border(1.0, with_alpha(p.card, 0.8))
+                .looping(LoopSpec::opacity(period, delay, 0.2, 1.0));
+            out.push(el().key(format!("drip-{}-{k}", id.0)).absolute(start[0] - r, start[1] - r).child(dot).looping(travel));
         }
     }
     out
@@ -119,19 +118,65 @@ fn vial_mouth(placed: &BrewCard, plan: &BrewPlan) -> [f32; 2] {
 }
 
 pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32; 2]>)> {
-    let ingredients: Vec<&BrewCard> = plan.with_role(BrewRole::Ingredient).collect();
+    let ingredients: Vec<&BrewCard> = plan.with_role(BrewRole::Ingredient).filter(|placed| state.card(&placed.id).is_some()).collect();
     let spread = ingredients.len().max(2) as f32 - 1.0;
+    let mut columns: Vec<f32> = ingredients.iter().map(|placed| placed.rect[0]).collect();
+    columns.sort_by(f32::total_cmp);
+    columns.dedup_by(|a, b| (*a - *b).abs() < 1.0);
     ingredients
         .iter()
         .enumerate()
-        .filter(|(_, placed)| state.card(&placed.id).is_some())
         .map(|(index, placed)| {
             let from = vial_mouth(placed, plan);
-            let to = rim_point(plan, index as f32 / spread.max(1.0));
-            let lift = (36.0 - index as f32 * 10.0).max(0.0) * plan.scale;
-            (placed.id.clone(), (0..=40).map(|step| pour_point(from, to, lift, step as f32 / 40.0)).collect())
+            let points = match plan.lanes {
+                Some([shelf_bottom, gap]) => {
+                    let column = columns.iter().position(|x| (x - placed.rect[0]).abs() < 1.0).unwrap_or(0);
+                    let to = rim_point(plan, column as f32 / (columns.len().max(2) - 1) as f32);
+                    let lane_x = placed.rect[0] + placed.rect[2] + gap * 0.5;
+                    let turn = [lane_x, shelf_bottom + gap];
+                    let mut points: Vec<[f32; 2]> = (0..=4).map(|step| [from[0] + (lane_x - from[0]) * step as f32 / 4.0, from[1]]).collect();
+                    points.extend((1..=12).map(|step| [lane_x, from[1] + (turn[1] - from[1]) * step as f32 / 12.0]));
+                    points.extend((1..=16).map(|step| {
+                        let t = step as f32 / 16.0;
+                        let c1 = [lane_x, turn[1] + 4.0 * plan.scale];
+                        let c2 = [to[0] + (lane_x - to[0]) * 0.15, to[1] - 70.0 * plan.scale];
+                        let u = 1.0 - t;
+                        [
+                            u * u * u * turn[0] + 3.0 * u * u * t * c1[0] + 3.0 * u * t * t * c2[0] + t * t * t * to[0],
+                            u * u * u * turn[1] + 3.0 * u * u * t * c1[1] + 3.0 * u * t * t * c2[1] + t * t * t * to[1],
+                        ]
+                    }));
+                    points
+                }
+                None => {
+                    let to = rim_point(plan, index as f32 / spread.max(1.0));
+                    let lift = (36.0 - index as f32 * 10.0).max(0.0) * plan.scale;
+                    (0..=40).map(|step| pour_point(from, to, lift, step as f32 / 40.0)).collect()
+                }
+            };
+            (placed.id.clone(), points)
         })
         .collect()
+}
+
+fn lane_stream(shape: Shape, points: &[[f32; 2]], style: StreamStyle, p: &HearthPalette) -> Shape {
+    let Some((first, rest)) = points.split_first() else { return shape };
+    let path = rest.iter().fold(rune::Path::new().move_to(*first), |path, point| path.line_to(*point));
+    let ink = if style.untaken || style.blocked {
+        p.untaken_ink()
+    } else if style.hexed {
+        p.hex
+    } else {
+        style.color
+    };
+    let core = if style.active { 3.2 } else { 2.4 };
+    let shape = shape.stroke_path(
+        &path,
+        core + 4.0,
+        rune::LineCap::Round,
+        with_alpha(if style.active { style.glow } else { ink }, if style.active { 0.32 } else { 0.16 }),
+    );
+    shape.stroke_path(&path, core, rune::LineCap::Round, ink)
 }
 
 fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &HearthPalette) -> Shape {
@@ -140,12 +185,15 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
     let bottles: Vec<&BrewCard> = plan.with_role(BrewRole::Bottle).collect();
     let multi = bottles.len() > 1;
     let spread = ingredients.len().max(2) as f32 - 1.0;
+    let paths = pour_paths(state, plan);
     for (index, placed) in ingredients.iter().enumerate() {
         let Some(card) = state.card(&placed.id) else { continue };
-        let from = vial_mouth(placed, plan);
         let lift = (36.0 - index as f32 * 10.0).max(0.0) * plan.scale;
         let style = stream_for(state, card, mood, p, lift);
-        shape = pouring_stream_shape(shape, from, rim_point(plan, index as f32 / spread.max(1.0)), style);
+        shape = match (plan.lanes, paths.iter().find(|(id, _)| id == &placed.id)) {
+            (Some(_), Some((_, points))) => lane_stream(shape, points, style, p),
+            _ => pouring_stream_shape(shape, vial_mouth(placed, plan), rim_point(plan, index as f32 / spread.max(1.0)), style),
+        };
     }
     let spout = spout_point(plan);
     for placed in &bottles {
@@ -455,6 +503,25 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
 
     let bottles: Vec<&BrewCard> = plan.with_role(BrewRole::Bottle).collect();
     let multi = bottles.len() > 1;
+    let aside_rects: Vec<[f32; 4]> = plan.with_role(BrewRole::Aside).map(|card| card.rect).collect();
+    if let Some(first) = aside_rects.first() {
+        let pad = 12.0 * plan.scale;
+        let head = 24.0 * plan.scale.max(0.8);
+        let left = aside_rects.iter().map(|r| r[0]).fold(first[0], f32::min) - pad;
+        let top = aside_rects.iter().map(|r| r[1]).fold(first[1], f32::min) - pad - head;
+        let right = aside_rects.iter().map(|r| r[0] + r[2]).fold(first[0] + first[2], f32::max) + pad;
+        let bottom = aside_rects.iter().map(|r| r[1] + r[3]).fold(first[1] + first[3], f32::max) + pad;
+        board = board.child(
+            el().key("aside-shelf")
+                .size(right - left, bottom - top)
+                .absolute(left, top)
+                .radius(16.0)
+                .continuous_corners()
+                .fill(with_alpha(p.wash_2, 0.75))
+                .border(1.2, p.rule_2)
+                .child(row().absolute(12.0, 5.0).child(text("Set aside").font(TextStyle::new(11.0, 700.0)).color(p.ink_2))),
+        );
+    }
     for placed in plan.cards.iter().filter(|card| card.role != BrewRole::Bottle) {
         let Some(card) = state.card(&placed.id) else { continue };
         let step = if placed.role == BrewRole::Aside {
@@ -474,9 +541,9 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         let natural = if multi { MULTI_BOTTLE_SIZE } else { SINGLE_BOTTLE_SIZE };
         let origin = card_frame(placed.rect, natural, plan.scale, [0.0, 0.0]);
         let view = if multi {
-            branch_bottle_view(state, card, step, [0.0, 0.0, natural[0]], has_run, &p, lens)
+            branch_bottle_view(state, card, step, [0.0, 0.0, natural[0]], bottle_tint(state, &plan, &placed.id), has_run, &p, lens)
         } else {
-            potion_stand_view(state, card, step, [0.0, 0.0, natural[0]], mood, &p, lens)
+            potion_stand_view(state, card, step, [0.0, 0.0, natural[0]], potion_tint(state, &plan), mood, &p, lens)
         };
         board =
             board.child(el().key(format!("node-{}", placed.id.0)).size(natural[0], natural[1]).absolute(origin[0], origin[1]).child(view).scale(plan.scale));

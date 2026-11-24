@@ -1049,7 +1049,7 @@ test('The cauldron is the biggest thing on the support canvas and every ingredie
   }
 });
 
-test('The cauldron reads cleanly at any size: no ingredient name is cut off, no pour line runs over another card, the idle broth already shows the last ingredient colour, steps number in feeding order, a Send that carries on is not the bottle, set-aside cards sit on a visible shelf, the pot is big, branch bottles have distinct names, and Grimoire text stays 11px or taller', { timeout: 900_000 }, async () => {
+test('The cauldron reads cleanly at any size: no ingredient name is cut off, no pour line runs over another card, the idle broth already shows the last ingredient colour, steps number in feeding order, a Send that carries on is not the bottle, set-aside cards sit on a visible shelf, the pot grows on a roomy 1600 by 1000 window, branch bottles have distinct names, and Grimoire text stays 11px or taller', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['r3-look']);
 
   expect(report.cut).toEqual([]);

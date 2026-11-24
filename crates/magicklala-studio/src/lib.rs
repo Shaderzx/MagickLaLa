@@ -1601,11 +1601,15 @@ impl StudioApp {
                     let mine = my_flow_out.clone().unwrap_or_default();
                     self.connect((id, &mine), (&next, &next_in));
                     let makes_content = spec.category.eq_ignore_ascii_case("ai") || spec.category.eq_ignore_ascii_case("text");
+                    let reply_words = self
+                        .spec_of(&next)
+                        .and_then(|bottle| bottle.inputs.iter().find(|input| input.required && !input.ty.is_flow()).map(|input| input.name.clone()));
                     let handed: Vec<(WireModel, String)> = self
                         .canvas
                         .wires
                         .iter()
                         .filter(|wire| makes_content && wire.from_node == prev && wire.to_node == next && !wire.ty.is_flow())
+                        .filter(|wire| reply_words.as_deref() == Some(wire.to_socket.as_str()))
                         .filter_map(|wire| spec.outputs.iter().find(|out| out.ty == wire.ty).map(|out| (wire.clone(), out.name.clone())))
                         .collect();
                     for (wire, out) in handed {
