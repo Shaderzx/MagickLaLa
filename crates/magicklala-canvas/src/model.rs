@@ -2,7 +2,7 @@ use magicklala_graph::{DYNAMIC_SOCKET, NodeId, NodeSpec, RunStatus, SocketSpec, 
 
 use crate::Camera;
 
-pub const CARD_WIDTH: f32 = 204.0;
+pub const CARD_WIDTH: f32 = 218.0;
 pub const CARD_HEADER: f32 = 44.0;
 pub const SOCKET_ROW: f32 = 22.0;
 pub const SOCKET_HIT_RADIUS: f32 = 14.0;

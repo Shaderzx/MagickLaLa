@@ -31,6 +31,31 @@ fn spout_point(plan: &BrewPlan) -> [f32; 2] {
     [pot[0] + pot[2] * 0.76, pot[1] + pot[3] * 0.42]
 }
 
+pub fn ribbon_paths(plan: &BrewPlan) -> Vec<Vec<[f32; 2]>> {
+    let bottles: Vec<&BrewCard> = plan.with_role(BrewRole::Bottle).collect();
+    let multi = bottles.len() > 1;
+    let spout = spout_point(plan);
+    let ghost = plan.ghost_bottle.map(|ghost| [ghost[0] + ghost[2] * 0.5, ghost[1] + ghost[3] * 0.15]);
+    bottles
+        .iter()
+        .map(|placed| bottle_neck(placed, multi))
+        .chain(ghost)
+        .map(|to| {
+            let (c1, c2) = crate::hearth::distillation_curve(spout, to);
+            (0..=44)
+                .map(|step| {
+                    let t = step as f32 / 44.0;
+                    let u = 1.0 - t;
+                    [
+                        u * u * u * spout[0] + 3.0 * u * u * t * c1[0] + 3.0 * u * t * t * c2[0] + t * t * t * to[0],
+                        u * u * u * spout[1] + 3.0 * u * u * t * c1[1] + 3.0 * u * t * t * c2[1] + t * t * t * to[1],
+                    ]
+                })
+                .collect()
+        })
+        .collect()
+}
+
 fn bottle_neck(card: &BrewCard, multi: bool) -> [f32; 2] {
     let rect = card.rect;
     let neck_share = if multi { 24.0 / MULTI_BOTTLE_SIZE[1] } else { 29.0 / SINGLE_BOTTLE_SIZE[1] };
@@ -77,6 +102,16 @@ pub fn potion_tint(state: &CanvasState, plan: &BrewPlan) -> Option<Color> {
 }
 
 pub fn bottle_tint(state: &CanvasState, plan: &BrewPlan, bottle: &NodeId) -> Option<Color> {
+    if state.has_run() {
+        let ran = || pouring_cards(state, plan).filter(|(_, card)| card.step_order.is_some());
+        if let Some((_, last)) = ran()
+            .filter(|(placed, _)| placed.feeds_only.as_ref() == Some(bottle))
+            .max_by_key(|(_, card)| card.step_order)
+            .or_else(|| ran().max_by_key(|(_, card)| card.step_order))
+        {
+            return Some(category_tone(&last.category, state.light).liquid);
+        }
+    }
     let own: Vec<Color> = pouring_cards(state, plan)
         .filter(|(placed, _)| placed.feeds_only.as_ref() == Some(bottle))
         .map(|(_, card)| category_tone(&card.category, state.light).liquid)
@@ -140,15 +175,20 @@ pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32
             let points = match plan.lanes {
                 Some([shelf_bottom, gap]) => {
                     let column = columns.iter().position(|x| (x - placed.rect[0]).abs() < 1.0).unwrap_or(0);
-                    let to = rim_point(plan, column as f32 / (columns.len().max(2) - 1) as f32);
-                    let lane_x = placed.rect[0] + placed.rect[2] + gap * 0.5;
+                    let mates = ingredients.iter().filter(|other| (other.rect[0] - placed.rect[0]).abs() < 1.0).count().max(1);
+                    let rank = ingredients.iter().filter(|other| (other.rect[0] - placed.rect[0]).abs() < 1.0 && other.rect[1] < placed.rect[1] - 0.5).count();
+                    let offset = (mates as f32 - 1.0) * 0.5 - rank as f32;
+                    let strand = (gap * 0.8 / mates as f32).min(4.0 * plan.scale);
+                    let lane_x = placed.rect[0] + placed.rect[2] + gap * 0.5 + offset * strand;
+                    let share = column as f32 / (columns.len().max(2) - 1) as f32;
+                    let to = rim_point(plan, (share + offset * 0.035).clamp(0.0, 1.0));
                     let turn = [lane_x, shelf_bottom + gap];
                     let mut points: Vec<[f32; 2]> = (0..=4).map(|step| [from[0] + (lane_x - from[0]) * step as f32 / 4.0, from[1]]).collect();
                     points.extend((1..=12).map(|step| [lane_x, from[1] + (turn[1] - from[1]) * step as f32 / 12.0]));
                     points.extend((1..=16).map(|step| {
                         let t = step as f32 / 16.0;
-                        let c1 = [lane_x, turn[1] + 4.0 * plan.scale];
-                        let c2 = [to[0] + (lane_x - to[0]) * 0.15, to[1] - 70.0 * plan.scale];
+                        let c1 = [to[0] + (lane_x - to[0]) * 0.35, turn[1]];
+                        let c2 = [to[0], turn[1] + (to[1] - turn[1]) * 0.4];
                         let u = 1.0 - t;
                         [
                             u * u * u * turn[0] + 3.0 * u * u * t * c1[0] + 3.0 * u * t * t * c2[0] + t * t * t * to[0],
@@ -210,8 +250,16 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
         let taken = matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Running);
         let untaken = state.has_run() && !taken;
         let ribbon_mood = if multi && taken { CauldronMood::Brewed } else { mood };
-        shape =
-            distillation_ribbon_shape(shape, spout, bottle_neck(placed, multi), ribbon_mood, state.light, taken, untaken, bottle_tint(state, plan, &placed.id));
+        shape = distillation_ribbon_shape(
+            shape,
+            spout,
+            bottle_neck(placed, multi),
+            ribbon_mood,
+            state.light,
+            taken,
+            untaken,
+            if multi { bottle_tint(state, plan, &placed.id) } else { potion_tint(state, plan) },
+        );
     }
     if let Some(ghost) = plan.ghost_bottle {
         shape = distillation_ribbon_shape(

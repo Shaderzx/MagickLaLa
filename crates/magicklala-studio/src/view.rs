@@ -184,51 +184,64 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<El> {
         .absolute(x, y)
         .child(header)
         .child(el().w_full().h(1.0).fill(t.rule));
-    card = match selected_title {
-        Some(title) => card
-            .child(menu_item(
-                MenuItemSpec {
-                    key: "context-duplicate-node",
-                    caption: &format!("Duplicate {title}"),
-                    shortcut: "",
-                    enabled: true,
-                    primary: true,
-                    danger: false,
-                },
-                t,
-                StudioApp::duplicate_selected_node,
-            ))
-            .child(menu_item(
-                MenuItemSpec { key: "context-open-grimoire", caption: "Inspect in Grimoire", shortcut: "", enabled: true, primary: false, danger: false },
-                t,
-                StudioApp::open_grimoire,
-            ))
-            .child(el().w_full().h(1.0).fill(t.rule))
-            .child(menu_item(
-                MenuItemSpec { key: "context-delete-node", caption: delete, shortcut: "", enabled: true, primary: false, danger: true },
-                t,
-                StudioApp::delete_selected_node,
-            )),
-        None => card
-            .child(menu_item(
-                MenuItemSpec {
-                    key: &palette_key(QUICK_ADD_KIND).replacen("palette-", "context-add-", 1),
-                    caption: &quick_add,
-                    shortcut: "",
-                    enabled: true,
-                    primary: true,
-                    danger: false,
-                },
-                t,
-                StudioApp::quick_add_from_menu,
-            ))
-            .child(el().w_full().h(1.0).fill(t.rule))
-            .child(menu_item(
-                MenuItemSpec { key: "context-fit-view", caption: "Fit canvas", shortcut: "", enabled: true, primary: false, danger: false },
-                t,
-                StudioApp::fit_view,
-            )),
-    };
+    let idle = !app.is_running();
+    let toss_item = selected_card.filter(|_| app.canvas.mode == WorkbenchMode::Cauldron).and_then(|card| {
+        let plan = magicklala_canvas::brew_plan(&app.canvas, app.canvas_size());
+        match plan.card(&card.id)?.role {
+            magicklala_canvas::BrewRole::Ingredient => Some(("context-set-aside", "Set aside", StudioApp::set_aside_selected as fn(&mut StudioApp))),
+            magicklala_canvas::BrewRole::Aside => Some(("context-pour-in", "Pour into cauldron", StudioApp::pour_selected_in as fn(&mut StudioApp))),
+            magicklala_canvas::BrewRole::Bottle => None,
+        }
+    });
+    card =
+        match selected_title {
+            Some(title) => card
+                .child(menu_item(
+                    MenuItemSpec {
+                        key: "context-duplicate-node",
+                        caption: &format!("Duplicate {title}"),
+                        shortcut: "",
+                        enabled: idle,
+                        primary: true,
+                        danger: false,
+                    },
+                    t,
+                    StudioApp::duplicate_selected_node,
+                ))
+                .children(toss_item.map(|(key, caption, action)| {
+                    menu_item(MenuItemSpec { key, caption, shortcut: "", enabled: idle, primary: false, danger: false }, t, action)
+                }))
+                .child(menu_item(
+                    MenuItemSpec { key: "context-open-grimoire", caption: "Inspect in Grimoire", shortcut: "", enabled: true, primary: false, danger: false },
+                    t,
+                    StudioApp::open_grimoire,
+                ))
+                .child(el().w_full().h(1.0).fill(t.rule))
+                .child(menu_item(
+                    MenuItemSpec { key: "context-delete-node", caption: delete, shortcut: "", enabled: idle, primary: false, danger: true },
+                    t,
+                    StudioApp::delete_selected_node,
+                )),
+            None => card
+                .child(menu_item(
+                    MenuItemSpec {
+                        key: &palette_key(QUICK_ADD_KIND).replacen("palette-", "context-add-", 1),
+                        caption: &quick_add,
+                        shortcut: "",
+                        enabled: true,
+                        primary: true,
+                        danger: false,
+                    },
+                    t,
+                    StudioApp::quick_add_from_menu,
+                ))
+                .child(el().w_full().h(1.0).fill(t.rule))
+                .child(menu_item(
+                    MenuItemSpec { key: "context-fit-view", caption: "Fit canvas", shortcut: "", enabled: true, primary: false, danger: false },
+                    t,
+                    StudioApp::fit_view,
+                )),
+        };
     Some(card)
 }
 
@@ -1819,8 +1832,9 @@ fn playground_panel(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                     .child(col().w(16.0).pt(5.0).items_center().child(el().size(9.0, 9.0).radius(4.5).fill(t.gold)))
                     .child(col().grow(1.0).min_w(0.0).child(heading(&message.text, 14.0, 750.0, t.ink).wrap()))
             } else {
-                let lines = (message.text.len() as f32 / 38.0).ceil().max(1.0);
-                let bar_h = (lines * 17.0 - 2.0).clamp(22.0, 114.0);
+                let per_line = if app.compact_toolbar() { 26.0 } else { 38.0 };
+                let lines: f32 = message.text.split('\n').map(|line| (line.chars().count() as f32 / per_line).ceil().max(1.0)).sum();
+                let bar_h = (lines * 17.0 - 2.0).clamp(22.0, 600.0);
                 row()
                     .w_full()
                     .py(4.0)

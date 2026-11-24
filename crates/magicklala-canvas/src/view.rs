@@ -387,7 +387,11 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     let title = state.display_title(&card.id);
     let route_key = route.as_ref().map(|_| format!("route-{}", card.id.0));
     let bottle_art = canvas(potion_bottle_shape(bottle_mood, state.light, width, bottle_h, false, tint)).size(width, bottle_h);
-    let pill = if taken {
+    let hex_pill = bottle_hex_pill(card, p);
+    let hexed = hex_pill.is_some();
+    let pill = if let Some(hex_pill) = hex_pill {
+        hex_pill
+    } else if taken {
         let ms_text = match card.duration_ms {
             Some(0) => "<1ms".to_owned(),
             Some(ms) => format!("{ms}ms"),
@@ -411,8 +415,16 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     } else {
         row().px(5.5).py(1.5).radius(7.0).fill(p.wash_2).border(1.0, p.rule_2).child(text("Branch").font(TextStyle::new(11.0, 650.0)).color(p.ink_2))
     };
-    let card_bg = if untaken { p.untaken_fill() } else { p.card };
-    let card_border = if card.selected || taken {
+    let card_bg = if hexed {
+        p.hex_tint
+    } else if untaken {
+        p.untaken_fill()
+    } else {
+        p.card
+    };
+    let card_border = if hexed {
+        p.hex
+    } else if card.selected || taken {
         p.broth_mid
     } else if untaken {
         p.untaken_border()
@@ -460,6 +472,25 @@ pub(crate) fn branch_bottle_view<S: 'static>(
         .on_press(move |s: &mut S| lens(s).select(Some(select_id.clone())))
 }
 
+fn bottle_hex_pill(card: &NodeCardModel, p: &HearthPalette) -> Option<El> {
+    let caption = match card.inputs.iter().find(|socket| socket.flagged) {
+        Some(socket) if socket.mistyped => format!("Wrong type \"{}\"", socket.name),
+        Some(socket) => format!("Missing \"{}\"", socket.name),
+        None if card.status == ExecutionStatus::Failed => "Hexed".to_owned(),
+        None => return None,
+    };
+    Some(
+        row()
+            .px(6.0)
+            .py(1.5)
+            .radius(7.0)
+            .fill(p.card)
+            .border(1.2, p.hex)
+            .shadow(2.0, 6.0, p.shadow_card)
+            .child(text(caption).font(TextStyle::new(11.0, 750.0)).color(p.hex)),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn potion_stand_view<S: 'static>(
     state: &CanvasState,
@@ -484,6 +515,8 @@ pub(crate) fn potion_stand_view<S: 'static>(
     let out_kind = primary_output.map_or("io/send_message", |c| c.kind.as_str());
     let selected = primary_output.is_some_and(|c| c.selected);
     let select_id = primary_output.map(|c| c.id.clone());
+    let hex_pill = bottle_hex_pill(output, p);
+    let hexed = hex_pill.is_some();
 
     let out_brewed = primary_output.is_some_and(|c| c.status == ExecutionStatus::Succeeded);
     let mut header_row =
@@ -515,8 +548,17 @@ pub(crate) fn potion_stand_view<S: 'static>(
         .gap(2.0)
         .radius(14.0)
         .continuous_corners()
-        .fill(p.card)
-        .border(if selected { 2.0 } else { 1.2 }, if selected { p.broth_mid } else { p.rule_2 })
+        .fill(if hexed { p.hex_tint } else { p.card })
+        .border(
+            if selected || hexed { 2.0 } else { 1.2 },
+            if hexed {
+                p.hex
+            } else if selected {
+                p.broth_mid
+            } else {
+                p.rule_2
+            },
+        )
         .shadow(3.0, 10.0, p.shadow_card)
         .child(header_row)
         .child(text(out_title).font(TextStyle::new(12.0, 600.0)).color(p.ink_2).truncate())
@@ -546,6 +588,8 @@ pub(crate) fn potion_stand_view<S: 'static>(
             wrapped = wrapped.child(el().absolute(-5.0, -7.0).child(step_badge));
         }
         tag_card = col().w_full().child(wrapped);
+    } else if let Some(pill) = hex_pill {
+        tag_card = col().w_full().child(el().w_full().child(tag_card).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(pill)));
     }
 
     let mut stand = col().key("potion-stand").w(width).gap(4.0).items_center().absolute(pos[0], pos[1]).child(bottle_art).child(tag_card);

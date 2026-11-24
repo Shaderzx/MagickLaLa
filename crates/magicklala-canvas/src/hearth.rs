@@ -1078,11 +1078,7 @@ pub fn potion_bottle_shape(mood: CauldronMood, light: bool, width: f32, height: 
     if filled {
         let level_y = if brewed { cy + 1.0 * u } else { cy + 9.0 * u };
         let half_w = if brewed { 21.8 * u } else { 19.6 * u };
-        let (liq_body, liq_top, liq_spark) = if sealed_vintage {
-            (if light { hex(0x1B876B) } else { hex(0x1E9A7A) }, if light { hex(0x52CCA8) } else { hex(0x5AE0B8) }, p.broth_spark)
-        } else {
-            (mid, foam, spark)
-        };
+        let (liq_body, liq_top, liq_spark) = (mid, foam, spark);
         let liquid = Path::new()
             .move_to([cx - half_w, level_y])
             .quad_to([cx, level_y - 4.0 * u], [cx + half_w, level_y])
@@ -1315,7 +1311,7 @@ pub fn distillation_ribbon_shape(
         } else if mood == CauldronMood::Empty {
             (if light { hex(0x5E5470) } else { hex(0xA499C4) }, 6.5, 5.2)
         } else {
-            (if light { hex(0x137B60) } else { hex(0x3AD6A6) }, 6.5, 5.2)
+            (tint.unwrap_or(if light { hex(0x137B60) } else { hex(0x3AD6A6) }), 6.5, 5.2)
         };
         return dashed_polyline(shape, &pts, dash, gap, 2.2, muted, None);
     }

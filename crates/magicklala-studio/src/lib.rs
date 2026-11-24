@@ -28,7 +28,7 @@ pub const IDLE_TRACE_HEIGHT: f32 = 46.0;
 pub const PALETTE_CATEGORY_ORDER: [&str; 13] =
     ["events", "flow", "ai", "memory", "knowledge", "io", "code", "variables", "text", "logic", "json", "network", "time"];
 pub const LEGACY_KIND_PREFIX: &str = "core/";
-pub const CONTEXT_MENU_SIZE: (f32, f32) = (248.0, 158.0);
+pub const CONTEXT_MENU_SIZE: (f32, f32) = (248.0, 197.0);
 pub const QUICK_ADD_KIND: &str = "ai/generate_text";
 pub const COMPACT_TOOLBAR_BELOW: f32 = 1120.0;
 pub const STUDIO_PROJECT: &str = "Studio";
@@ -950,6 +950,9 @@ impl StudioApp {
     }
 
     pub fn mend_selected_hex(&mut self) {
+        if self.is_running() {
+            return;
+        }
         let Some(card) = self.canvas.selected_card().cloned() else { return };
         let Some(socket) = self.missing_socket_of(&card.id) else { return };
         let Some((source, _)) = self.hex_mend_source(&card.id) else { return };
@@ -960,6 +963,9 @@ impl StudioApp {
     }
 
     pub fn fill_default_prompt_for_selected(&mut self) {
+        if self.is_running() {
+            return;
+        }
         let Some(card) = self.canvas.selected_card().cloned() else { return };
         let prompt = default_prompt(&card.kind);
         if !prompt.is_empty() {
@@ -1044,6 +1050,9 @@ impl StudioApp {
     }
 
     pub fn add_variable(&mut self) {
+        if self.is_running() {
+            return;
+        }
         let mut index = self.spell.variables.len() + 1;
         let name = loop {
             let candidate = format!("var_{index}");
@@ -1061,6 +1070,9 @@ impl StudioApp {
     }
 
     pub fn remove_variable(&mut self, name: &str) {
+        if self.is_running() {
+            return;
+        }
         let Some(index) = self.spell.variables.iter().position(|v| v.name == name) else { return };
         let variable = self.spell.variables.remove(index);
         let name_edit = if index < self.var_name_edits.len() { self.var_name_edits.remove(index) } else { TextEdit::new(&variable.name) };
@@ -1093,6 +1105,9 @@ impl StudioApp {
     }
 
     pub fn set_variable_type(&mut self, name: &str, ty: SocketType) {
+        if self.is_running() {
+            return;
+        }
         self.open_var_type = None;
         let Some(index) = self.spell.variables.iter().position(|v| v.name == name) else { return };
         if self.spell.variables[index].ty == ty {
@@ -1124,6 +1139,9 @@ impl StudioApp {
     }
 
     pub fn confirm_variable_type_reset(&mut self) {
+        if self.is_running() {
+            return;
+        }
         let Some((name, ty)) = self.pending_type_reset.take() else { return };
         let Some(index) = self.spell.variables.iter().position(|v| v.name == name) else { return };
         self.spell.variables[index].ty = ty;
@@ -1149,6 +1167,9 @@ impl StudioApp {
     }
 
     pub fn select_model(&mut self, provider: &str, model: &str) {
+        if self.is_running() {
+            return;
+        }
         self.model_menu_open = false;
         let Some(id) = self.canvas.selection.clone() else { return };
         let entry = self.configs.entry(id).or_insert_with(|| json!({}));
@@ -1365,6 +1386,9 @@ impl StudioApp {
     }
 
     pub fn adjust_temperature(&mut self, delta: f64) {
+        if self.is_running() {
+            return;
+        }
         let current = self.selected_temperature();
         let next = ((current + delta).clamp(0.0, 2.0) * 10.0).round() / 10.0;
         if let Some(id) = self.canvas.selection.clone() {
@@ -1401,6 +1425,9 @@ impl StudioApp {
     }
 
     pub fn unplug_wire(&mut self, wire: &magicklala_graph::WireId) {
+        if self.is_running() {
+            return;
+        }
         if self.is_running() {
             return;
         }
@@ -1614,6 +1641,20 @@ impl StudioApp {
     }
 
     fn auto_wire_cauldron_ingredient(&mut self, id: &NodeId, spec: &NodeSpec) {
+        let widened;
+        let spec = match spec.inputs.iter().position(|input| input.name == magicklala_graph::DYNAMIC_SOCKET) {
+            Some(open) => {
+                let mut wide = spec.clone();
+                wide.inputs[open].name = "content".to_owned();
+                wide.inputs[open].label = "content".to_owned();
+                if let Some(card) = self.canvas.nodes.iter_mut().find(|card| &card.id == id) {
+                    card.ensure_socket("content", wide.inputs[open].ty, false);
+                }
+                widened = wide;
+                &widened
+            }
+            None => spec,
+        };
         let my_flow_in_of = |spec: &NodeSpec| spec.inputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone());
         let my_flow_out_of = |spec: &NodeSpec| spec.outputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone());
         let mut without = self.canvas.clone();
@@ -1830,6 +1871,9 @@ impl StudioApp {
     }
 
     pub fn sync_edits(&mut self) -> bool {
+        if self.is_running() {
+            return false;
+        }
         let mut vars_changed = false;
         for (idx, var) in self.spell.variables.iter_mut().enumerate() {
             if let Some(edit) = self.var_name_edits.get(idx) {
@@ -1948,6 +1992,27 @@ impl StudioApp {
             .filter(|wire| &wire.from_node == id && wire.ty.is_flow())
             .map(|wire| SocketRef::new(wire.to_node.clone(), wire.to_socket.clone()))
             .collect();
+        let value_sources: Vec<(SocketRef, SocketType)> = self
+            .canvas
+            .wires
+            .iter()
+            .filter(|wire| &wire.to_node == id && !wire.ty.is_flow())
+            .map(|wire| (SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()), wire.ty))
+            .collect();
+        let value_targets: Vec<(SocketRef, SocketType)> = self
+            .canvas
+            .wires
+            .iter()
+            .filter(|wire| &wire.from_node == id && !wire.ty.is_flow())
+            .map(|wire| {
+                let want = self
+                    .canvas
+                    .card(&wire.to_node)
+                    .and_then(|card| card.inputs.iter().find(|socket| socket.name == wire.to_socket))
+                    .map_or(wire.ty, |socket| socket.ty);
+                (SocketRef::new(wire.to_node.clone(), wire.to_socket.clone()), want)
+            })
+            .collect();
         self.canvas.set_aside(id);
         let mut bridges = Vec::new();
         for target in &targets {
@@ -1957,6 +2022,19 @@ impl StudioApp {
             for source in &sources {
                 if self.canvas.connect_sockets(source, target).is_ok() {
                     bridges.push((source.clone(), target.clone()));
+                }
+            }
+        }
+        for (target, want) in &value_targets {
+            if self.is_fed(&target.node, &target.socket) {
+                continue;
+            }
+            let mut ranked: Vec<&(SocketRef, SocketType)> = value_sources.iter().filter(|(_, ty)| want.accepts(*ty)).collect();
+            ranked.sort_by_key(|(_, ty)| ty != want);
+            for (source, _) in ranked {
+                if self.canvas.connect_sockets(source, target).is_ok() {
+                    bridges.push((source.clone(), target.clone()));
+                    break;
                 }
             }
         }
@@ -2343,6 +2421,9 @@ impl StudioApp {
     }
 
     pub fn duplicate_selected_node(&mut self) {
+        if self.is_running() {
+            return;
+        }
         let anchor = self.canvas.context_menu.unwrap_or([self.canvas_size().0 * 0.5, self.canvas_size().1 * 0.5]);
         let Some(card) = self.canvas.selected_card().cloned() else { return self.close_context_menu() };
         let selected_clone = Some((
@@ -2367,7 +2448,24 @@ impl StudioApp {
         }
     }
 
+    pub fn set_aside_selected(&mut self) {
+        self.close_context_menu();
+        if let Some(id) = self.canvas.selection.clone() {
+            self.toss(magicklala_canvas::Toss::Aside(id));
+        }
+    }
+
+    pub fn pour_selected_in(&mut self) {
+        self.close_context_menu();
+        if let Some(id) = self.canvas.selection.clone() {
+            self.toss(magicklala_canvas::Toss::IntoPot(id));
+        }
+    }
+
     pub fn delete_selected_node(&mut self) {
+        if self.is_running() {
+            return;
+        }
         self.close_context_menu();
         let Some(selected_id) = self.canvas.selection.clone() else { return };
         let attached_wires: Vec<WireModel> = self.canvas.wires.iter().filter(|w| w.from_node == selected_id || w.to_node == selected_id).cloned().collect();
@@ -2389,6 +2487,9 @@ impl StudioApp {
     }
 
     pub fn undo(&mut self) {
+        if self.is_running() {
+            return;
+        }
         let Some(entry) = self.undo_stack.pop() else { return };
         self.undo_banner = None;
         match entry {
@@ -2715,6 +2816,7 @@ fn default_prompt(kind: &str) -> String {
         "memory/search" => "Recall the 5 most relevant memories for {{content}}".to_owned(),
         "knowledge/search" => "Search the knowledge base for {{content}}".to_owned(),
         "code/rhai_script" => "let reply = input.content;\nreply.to_upper()".to_owned(),
+        "text/template" => "{{content}}".to_owned(),
         _ => String::new(),
     }
 }
