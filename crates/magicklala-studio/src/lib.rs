@@ -948,6 +948,7 @@ impl StudioApp {
             Some(Value::Int(n)) => n.to_string(),
             Some(Value::Float(n)) => n.to_string(),
             Some(Value::Bool(b)) => b.to_string(),
+            Some(Value::Json(json)) => json.to_string(),
             Some(other) => serde_json::to_string(other).unwrap_or_default(),
             None => String::new(),
         }
@@ -957,6 +958,7 @@ impl StudioApp {
         let trimmed = raw.trim();
         match ty {
             SocketType::String | SocketType::Any => Some(Value::String(raw.to_owned())),
+            SocketType::Json => serde_json::from_str::<serde_json::Value>(trimmed).ok().map(Value::Json),
             SocketType::Int => trimmed.parse::<i64>().ok().map(Value::Int),
             SocketType::Float => trimmed.parse::<f64>().ok().filter(|n| n.is_finite()).map(Value::Float),
             SocketType::Bool => match trimmed.to_ascii_lowercase().as_str() {
@@ -1661,6 +1663,7 @@ impl StudioApp {
                 }
             }
             if let Some(edit) = self.var_default_edits.get(idx)
+                && edit.text != Self::format_value(var.default.as_ref())
                 && let Some(parsed) = Self::try_parse_value(&edit.text, var.ty)
                 && var.default.as_ref() != Some(&parsed)
             {
