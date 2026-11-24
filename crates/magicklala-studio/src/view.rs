@@ -153,7 +153,8 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<El> {
     });
     let [px, py] = beside.unwrap_or(anchor);
     let x = px.min(view.0 - CONTEXT_MENU_SIZE.0 - 12.0).max(12.0);
-    let y = py.min(view.1 - CONTEXT_MENU_SIZE.1 - 12.0).max(12.0);
+    let plaque_top = if app.canvas.mode == WorkbenchMode::Cauldron { magicklala_canvas::brew_plan(&app.canvas, view).plaque_top } else { view.1 };
+    let y = py.min(view.1 - CONTEXT_MENU_SIZE.1 - 12.0).min(plaque_top - CONTEXT_MENU_SIZE.1 - 8.0).max(12.0);
     let selected_card = app.canvas.selected_card();
     let selected_title = selected_card.map(|card| card.title.as_str());
     let quick_add_title = app.specs.iter().find(|spec| spec.kind == QUICK_ADD_KIND).map_or(QUICK_ADD_KIND, |spec| spec.title.as_str());
@@ -409,9 +410,9 @@ fn toolbar(app: &StudioApp, t: &HearthPalette) -> El {
     let published_unchanged = app.is_unchanged_from_live_release();
     let check_kind = if empty_graph { ButtonKind::Disabled } else { ButtonKind::Secondary };
     let brew_kind = if empty_graph || hexed { ButtonKind::Disabled } else { ButtonKind::Primary };
-    let bottle_kind = if empty_graph || hexed || published_unchanged { ButtonKind::Disabled } else { ButtonKind::Secondary };
+    let bottle_kind = if empty_graph || hexed || published_unchanged || app.is_running() { ButtonKind::Disabled } else { ButtonKind::Secondary };
     let save_kind = if empty_graph { ButtonKind::Disabled } else { ButtonKind::Secondary };
-    let theme_caption = if app.theme == Theme::Dark { "Sunlit" } else { "Midnight" };
+    let theme_caption = if app.theme == Theme::Dark { "Midnight" } else { "Sunlit" };
     let theme_a11y = if app.theme == Theme::Dark { "Switch to Sunlit" } else { "Switch to Midnight" };
     let theme_btn = if compact {
         row()
@@ -424,7 +425,7 @@ fn toolbar(app: &StudioApp, t: &HearthPalette) -> El {
             .justify_center()
             .fill(t.wash_2)
             .border(1.0, t.rule)
-            .child(canvas(theme_icon_shape(app.theme == Theme::Dark, light)).size(14.0, 14.0))
+            .child(canvas(theme_icon_shape(app.theme == Theme::Light, light)).size(14.0, 14.0))
             .on_press(StudioApp::toggle_theme)
     } else {
         row()
@@ -438,7 +439,7 @@ fn toolbar(app: &StudioApp, t: &HearthPalette) -> El {
             .items_center()
             .fill(t.wash_2)
             .border(1.0, t.rule)
-            .child(canvas(theme_icon_shape(app.theme == Theme::Dark, light)).size(14.0, 14.0))
+            .child(canvas(theme_icon_shape(app.theme == Theme::Light, light)).size(14.0, 14.0))
             .child(label(theme_caption, 12.0, 650.0, t.ink_2))
             .on_press(StudioApp::toggle_theme)
     };
@@ -801,14 +802,14 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     let spell_invalid = matches!(app.validation, ValidationState::Invalid(_));
     let ingr_count = app.canvas.nodes.iter().filter(|card| card.kind != "io/send_message").count();
     let ingr_word = if ingr_count == 1 { "ingredient" } else { "ingredients" };
-    let spells_header = row()
-        .w_full()
-        .pt(14.0)
-        .pb(6.0)
-        .items_center()
-        .justify_between()
-        .child(heading("Spells & potions", 14.5, 800.0, t.ink))
-        .child(button_el("new-spell", "+ New", ButtonKind::Secondary, 9.0, t, StudioApp::request_new_spell));
+    let spells_header = row().w_full().pt(14.0).pb(6.0).items_center().justify_between().child(heading("Potions", 14.5, 800.0, t.ink)).child(button_el(
+        "new-spell",
+        "+ New",
+        ButtonKind::Secondary,
+        9.0,
+        t,
+        StudioApp::request_new_spell,
+    ));
     let mut agent_names: Vec<String> = Vec::new();
     if app.spell.name != "Support Agent" && app.spell.name != "Research Agent" {
         agent_names.push(app.spell.name.clone());
@@ -984,7 +985,6 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         let is_pending = app.pending_restore_version == Some(release.version);
         let parts = release.nodes.saturating_sub(1).max(1);
         let p_word = if parts == 1 { "ingredient" } else { "ingredients" };
-        let sub_meta = app.release_notes.get(&release.version).cloned().unwrap_or_else(|| format!("{parts} {p_word}"));
         let stamp = el().size(28.0, 24.0).radius(8.0).continuous_corners().fill(if is_active { t.primary_bg } else { t.wash }).center().child(figure(
             format!("v{}", release.version),
             10.5,
@@ -1012,8 +1012,8 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                         .grow(1.0)
                         .min_w(0.0)
                         .gap(1.0)
-                        .child(label(if is_active { "Published brew" } else { "Archived brew" }, 11.2, 650.0, t.ink).truncate())
-                        .child(label(sub_meta, 9.8, 500.0, t.mute).truncate()),
+                        .child(label(format!("{parts} {p_word}"), 11.2, 650.0, t.ink).truncate())
+                        .children(app.release_notes.get(&release.version).map(|note| label(note, 9.8, 500.0, t.mute).truncate())),
                 ),
             )
             .child(right_action);
@@ -1945,7 +1945,7 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
     let event_word = if count == 1 { "event" } else { "events" };
     if idle {
         let run_hint = if app.canvas.nodes.is_empty() {
-            "Idle · no brews yet.".to_owned()
+            "Not brewed yet".to_owned()
         } else if let Some(v) = app.active_release_version {
             format!("Published v{v} · not brewed yet")
         } else {

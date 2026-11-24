@@ -1446,9 +1446,6 @@ impl StudioApp {
         if self.is_running() {
             return;
         }
-        if self.is_running() {
-            return;
-        }
         self.canvas.wires.retain(|candidate| &candidate.id != wire);
         self.validation = ValidationState::Unchecked;
         self.sync_spell();
@@ -2583,13 +2580,13 @@ impl StudioApp {
 
     fn require_disk(&mut self, action: &str) -> Result<(), StudioError> {
         if let Some(error) = &self.open_error {
-            let message = format!("the database passed with --db could not be opened: {error}");
+            let message = format!("The database passed with --db could not be opened: {error}");
             return Err(self.refuse(message));
         }
         if self.store.as_ref().is_some_and(StudioStore::is_persistent) {
             return Ok(());
         }
-        Err(self.refuse(format!("pass --db <file.sqlite> to {action} on disk")))
+        Err(self.refuse(format!("Pass --db <file.sqlite> to {action} on disk")))
     }
 
     pub fn next_release_version(&self) -> Result<u32, StudioError> {
@@ -2619,21 +2616,21 @@ impl StudioApp {
 
     pub fn explain_publish_blocked(&mut self) {
         if let ValidationState::Invalid(errors) = &self.validation {
-            let message = format!("cannot publish an invalid spell: {}", errors.join("; "));
+            let message = format!("Cannot publish an invalid potion: {}", errors.join("; "));
             self.store_error = Some(message);
         }
     }
 
     pub fn publish(&mut self) -> Result<u32, StudioError> {
         if self.is_running() {
-            return Err(self.refuse("cannot publish while brewing".to_owned()));
+            return Err(self.refuse("Publish waits until the brew ends".to_owned()));
         }
         self.sync_spell();
         if self.canvas.nodes.is_empty() {
-            return Err(self.refuse("cannot publish an empty potion".to_owned()));
+            return Err(self.refuse("Cannot publish an empty potion".to_owned()));
         }
         if self.is_unchanged_from_live_release() {
-            return Err(self.refuse("no changes since the live release".to_owned()));
+            return Err(self.refuse("No changes since the live release".to_owned()));
         }
         self.publish_status = None;
         self.require_disk("publish releases")?;
@@ -2643,7 +2640,7 @@ impl StudioApp {
         };
         let target = (self.root_spell(), Some(next));
         if let Err(errors) = self.check_spell_with_root(target) {
-            let message = format!("cannot publish an invalid spell: {}", errors.join("; "));
+            let message = format!("Cannot publish an invalid potion: {}", errors.join("; "));
             self.validation = ValidationState::Invalid(errors);
             return Err(self.refuse(message));
         }
@@ -2672,7 +2669,7 @@ impl StudioApp {
         self.require_disk("save drafts")?;
         let version_errors = self.release_version_errors();
         if !version_errors.is_empty() {
-            return Err(self.refuse(format!("cannot save the draft: {}", version_errors.join("; "))));
+            return Err(self.refuse(format!("Cannot save the draft: {}", version_errors.join("; "))));
         }
         let store = self.store.as_mut().ok_or_else(|| StudioError::Store("no studio store".to_owned()))?;
         let saved = store.save_draft(&self.spell);

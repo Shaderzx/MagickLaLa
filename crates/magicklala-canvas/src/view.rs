@@ -196,7 +196,8 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     let select_id = card.id.clone();
 
     let dense = dims[1] < 50.0;
-    let badge = if dense { 30.0 } else { 38.0 };
+    let narrow = dims[0] < 170.0;
+    let badge = if dense || narrow { 30.0 } else { 38.0 };
     let vial_badge = el()
         .key(format!("vial-{}", card.id.0))
         .size(badge, badge)
@@ -301,6 +302,20 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         p.mute
     };
 
+    let kind_line = text(&card.kind).font(TextStyle::new((11.2 / plan.scale).clamp(11.5, 13.0), 500.0).mono()).color(sub_color).truncate();
+    let card_body = if dense {
+        row().grow(1.0).min_w(0.0).gap(9.0).items_center().child(col().grow(1.0).min_w(0.0).child(top_row)).child(vial_badge)
+    } else if narrow {
+        col()
+            .grow(1.0)
+            .min_w(0.0)
+            .gap(2.0)
+            .child(row().w_full().gap(6.0).items_center().child(col().grow(1.0).min_w(0.0).child(top_row)).child(vial_badge))
+            .child(kind_line)
+    } else {
+        row().grow(1.0).min_w(0.0).gap(9.0).items_center().child(col().grow(1.0).min_w(0.0).gap(2.0).child(top_row).child(kind_line)).child(vial_badge)
+    };
+
     let content = row()
         .key(format!("node-{}-header", card.id.0))
         .size(dims[0], dims[1])
@@ -312,12 +327,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         .fill(fill_col)
         .border(border_w, border_col)
         .shadow(if card.selected { 5.0 } else { 3.0 }, if card.selected { 14.0 } else { 9.0 }, if dimmed { Color::TRANSPARENT } else { p.shadow_card })
-        .child(if dense {
-            col().grow(1.0).min_w(0.0).child(top_row)
-        } else {
-            col().grow(1.0).min_w(0.0).gap(2.0).child(top_row).child(text(&card.kind).font(TextStyle::new(11.5, 500.0).mono()).color(sub_color).truncate())
-        })
-        .child(vial_badge)
+        .child(card_body)
         .on_press(move |s: &mut S| lens(s).select(Some(select_id.clone())))
         .on_drag(move |s: &mut S, drag, tx| {
             tx.instant();
@@ -477,6 +487,17 @@ pub fn bottle_art_mood(state: &CanvasState, output: &NodeCardModel) -> CauldronM
         CauldronMood::Brewed | CauldronMood::Simmering if !crate::cauldron::bottle_filled(state, output) => CauldronMood::Ready,
         mood => mood,
     }
+}
+
+pub fn grimoire_lanes(state: &CanvasState) -> Vec<(magicklala_graph::WireId, i8)> {
+    let mut untaken: Vec<&crate::WireModel> = state.wires.iter().filter(|wire| state.has_run() && !wire.active && wire.ty.is_flow()).collect();
+    untaken.sort_by(|a, b| a.from_node.0.cmp(&b.from_node.0).then(b.from[1].total_cmp(&a.from[1])));
+    let mut lanes = Vec::with_capacity(untaken.len());
+    for (index, wire) in untaken.iter().enumerate() {
+        let rank = untaken[..index].iter().filter(|other| other.from_node == wire.from_node).count();
+        lanes.push((wire.id.clone(), if rank % 2 == 0 { 1 } else { -1 }));
+    }
+    lanes
 }
 
 fn bottle_hex_pill(card: &NodeCardModel, p: &HearthPalette) -> Option<El> {
@@ -781,18 +802,12 @@ fn wire_shape(state: &CanvasState) -> Shape {
             (false, true) => 3,
         }
     });
-    let mut untaken_flow_count = 0_i8;
+    let lanes = grimoire_lanes(state);
     let shape = ordered.into_iter().fold(Shape::new(), |shape, (_, wire)| {
         let from = state.camera.world_to_screen(wire.from);
         let to = state.camera.world_to_screen(wire.to);
         let untaken = has_run && !wire.active;
-        let lane = if untaken && wire.ty.is_flow() {
-            let idx = untaken_flow_count;
-            untaken_flow_count += 1;
-            if idx % 2 == 0 { 1 } else { -1 }
-        } else {
-            0
-        };
+        let lane = lanes.iter().find(|(id, _)| id == &wire.id).map_or(0, |(_, lane)| *lane);
         grimoire_wire_shape(shape, from, to, WireStyle { zoom, is_flow: wire.ty.is_flow(), active: wire.active, untaken, light: state.light, lane })
     });
     match &state.drag {

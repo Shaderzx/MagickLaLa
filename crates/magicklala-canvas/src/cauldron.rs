@@ -156,8 +156,11 @@ fn drips(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &HearthPal
 
 fn vial_mouth(placed: &BrewCard, plan: &BrewPlan) -> [f32; 2] {
     let scale = placed.rect[3] / plan.vial[1];
-    let badge = if plan.vial[1] < 50.0 { 30.0 } else { 38.0 };
-    let center = [placed.rect[0] + placed.rect[2] - (9.0 + badge * 0.5) * scale, placed.rect[1] + placed.rect[3] * 0.5];
+    let dense = plan.vial[1] < 50.0;
+    let narrow = plan.vial[0] < 170.0;
+    let badge = if dense || narrow { 30.0 } else { 38.0 };
+    let centre_y = if narrow && !dense { placed.rect[1] + ((plan.vial[1] - 46.0) * 0.5 + 15.0) * scale } else { placed.rect[1] + placed.rect[3] * 0.5 };
+    let center = [placed.rect[0] + placed.rect[2] - (9.0 + badge * 0.5) * scale, centre_y];
     [center[0] + badge * 0.22 * scale, center[1] - badge * 0.36 * scale]
 }
 
@@ -178,11 +181,15 @@ pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32
                     let mates = ingredients.iter().filter(|other| (other.rect[0] - placed.rect[0]).abs() < 1.0).count().max(1);
                     let rank = ingredients.iter().filter(|other| (other.rect[0] - placed.rect[0]).abs() < 1.0 && other.rect[1] < placed.rect[1] - 0.5).count();
                     let offset = (mates as f32 - 1.0) * 0.5 - rank as f32;
-                    let strand = (gap * 0.8 / mates as f32).min(4.0 * plan.scale);
+                    let strand = (gap * 0.4 / mates as f32).min(3.0 * plan.scale);
                     let lane_x = placed.rect[0] + placed.rect[2] + gap * 0.5 + offset * strand;
                     let share = column as f32 / (columns.len().max(2) - 1) as f32;
                     let to = rim_point(plan, (share + offset * 0.035).clamp(0.0, 1.0));
-                    let turn = [lane_x, shelf_bottom + gap];
+                    let ribbon_top = ribbon_paths(plan).iter().flatten().map(|point| point[1]).fold(f32::MAX, f32::min);
+                    let turn = [lane_x, (shelf_bottom + gap).min(ribbon_top - 8.0 * plan.scale).max(shelf_bottom + 2.0 * plan.scale)];
+                    let clear_x = lane_x.min(spout_point(plan)[0] - 10.0 * plan.scale).max(to[0]);
+                    let run = lane_x - clear_x;
+                    let elbow = if run > 1.0 { (8.0 * plan.scale).min(run * 0.5).min((turn[1] - from[1]).abs() * 0.3) } else { 0.0 };
                     let bend = (8.0 * plan.scale).min((lane_x - from[0]).abs() * 0.8).min((turn[1] - from[1]).abs() * 0.5);
                     let side = if lane_x >= from[0] { 1.0 } else { -1.0 };
                     let corner = [lane_x - side * bend, from[1]];
@@ -192,15 +199,27 @@ pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32
                         let u = 1.0 - t;
                         [u * u * corner[0] + 2.0 * u * t * lane_x + t * t * lane_x, u * u * from[1] + 2.0 * u * t * from[1] + t * t * (from[1] + bend)]
                     }));
-                    points.extend((1..=12).map(|step| [lane_x, from[1] + bend + (turn[1] - from[1] - bend) * step as f32 / 12.0]));
+                    let drop_end = turn[1] - elbow;
+                    points.extend((1..=12).map(|step| [lane_x, from[1] + bend + (drop_end - from[1] - bend) * step as f32 / 12.0]));
+                    let start = if run > 1.0 {
+                        points.extend((1..=6).map(|step| {
+                            let t = step as f32 / 6.0;
+                            let u = 1.0 - t;
+                            [u * u * lane_x + 2.0 * u * t * lane_x + t * t * (lane_x - elbow), u * u * drop_end + 2.0 * u * t * turn[1] + t * t * turn[1]]
+                        }));
+                        points.extend((1..=6).map(|step| [lane_x - elbow + (clear_x - lane_x + elbow) * step as f32 / 6.0, turn[1]]));
+                        [clear_x, turn[1]]
+                    } else {
+                        turn
+                    };
                     points.extend((1..=16).map(|step| {
                         let t = step as f32 / 16.0;
-                        let c1 = [to[0] + (lane_x - to[0]) * 0.35, turn[1]];
-                        let c2 = [to[0], turn[1] + (to[1] - turn[1]) * 0.4];
+                        let c1 = [to[0] + (start[0] - to[0]) * 0.35, start[1]];
+                        let c2 = [to[0], start[1] + (to[1] - start[1]) * 0.4];
                         let u = 1.0 - t;
                         [
-                            u * u * u * turn[0] + 3.0 * u * u * t * c1[0] + 3.0 * u * t * t * c2[0] + t * t * t * to[0],
-                            u * u * u * turn[1] + 3.0 * u * u * t * c1[1] + 3.0 * u * t * t * c2[1] + t * t * t * to[1],
+                            u * u * u * start[0] + 3.0 * u * u * t * c1[0] + 3.0 * u * t * t * c2[0] + t * t * t * to[0],
+                            u * u * u * start[1] + 3.0 * u * u * t * c1[1] + 3.0 * u * t * t * c2[1] + t * t * t * to[1],
                         ]
                     }));
                     points
@@ -226,13 +245,8 @@ fn lane_stream(shape: Shape, points: &[[f32; 2]], style: StreamStyle, p: &Hearth
     } else {
         style.color
     };
-    let core = if style.active { 3.2 } else { 2.4 };
-    let shape = shape.stroke_path(
-        &path,
-        core + 4.0,
-        rune::LineCap::Round,
-        with_alpha(if style.active { style.glow } else { ink }, if style.active { 0.32 } else { 0.16 }),
-    );
+    let core = if style.active { 2.6 } else { 2.0 };
+    let shape = if style.active { shape.stroke_path(&path, core + 3.0, rune::LineCap::Round, with_alpha(style.glow, 0.32)) } else { shape };
     shape.stroke_path(&path, core, rune::LineCap::Round, ink)
 }
 
