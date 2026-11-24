@@ -2343,8 +2343,7 @@ fn r3_look() -> Result<serde_json::Value, String> {
     let last = magicklala_canvas::recipe_order(&demo.state.canvas)
         .into_iter()
         .filter_map(|id| demo.state.canvas.card(&id).cloned())
-        .filter(|card| card.kind != "io/send_message")
-        .last()
+        .rfind(|card| card.kind != "io/send_message")
         .ok_or("no ingredient")?;
     let ready_broth = magicklala_canvas::hearth::broth_mid(
         magicklala_canvas::CauldronMood::Ready,

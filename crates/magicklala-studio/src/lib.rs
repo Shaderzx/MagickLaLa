@@ -675,7 +675,7 @@ pub enum UndoEntry {
         bridges: Vec<(SocketRef, SocketRef)>,
     },
     Node {
-        card: NodeCardModel,
+        card: Box<NodeCardModel>,
         prompt: Option<TextEdit>,
         version: Option<TextEdit>,
         config: Option<serde_json::Value>,
@@ -2283,7 +2283,7 @@ impl StudioApp {
             let version = self.versions.remove(&removed.id);
             let config = self.configs.remove(&removed.id);
             let title = removed.title.clone();
-            self.undo_stack.push(UndoEntry::Node { card: removed, prompt, version, config, wires: attached_wires, bridges });
+            self.undo_stack.push(UndoEntry::Node { card: Box::new(removed), prompt, version, config, wires: attached_wires, bridges });
             self.undo_banner = Some(format!("Removed {title}"));
             self.validation = ValidationState::Unchecked;
             self.dirty = true;
@@ -2319,7 +2319,7 @@ impl StudioApp {
                 if let Some(config) = config {
                     self.configs.insert(id.clone(), config);
                 }
-                self.canvas.restore_node(card, wires);
+                self.canvas.restore_node(*card, wires);
                 self.validation = ValidationState::Unchecked;
                 self.dirty = true;
                 self.sync_spell();
