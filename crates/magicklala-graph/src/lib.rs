@@ -13,7 +13,7 @@ pub use engine::{
     RunTrigger, START_TRIGGER_KIND, SUBGRAPH_KIND, SpellEngine, SubgraphResolver, TRIGGER_PAYLOAD_SOCKET, WAIT_FOR_ALL_KIND, WHILE_LOOP_KIND,
 };
 pub use error::{NodeError, SpellError, ValidationError};
-pub use ir::{NodeId, NodeInstance, SPELL_SCHEMA_VERSION, SpellGraph, SpellId, SubgraphRef, VariableDef, Wire, WireId};
+pub use ir::{NodeId, NodeInstance, SPELL_SCHEMA_VERSION, ShelfEntry, SpellGraph, SpellId, SubgraphRef, VariableDef, Wire, WireId};
 pub use services::{
     CredentialResolver, EmbeddingRequest, EventEmitter, KnowledgeHit, KnowledgeService, LlmGateway, LlmMessage, LlmRequest, LlmResponse, LlmRole, LlmStream,
     LlmStreamChunk, MemoryItem, MemoryService, NodeContext, NodeExecutor, NodeOutcome, TokenUsage,

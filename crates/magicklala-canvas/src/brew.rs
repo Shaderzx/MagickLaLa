@@ -125,8 +125,32 @@ pub fn recipe_order(state: &CanvasState) -> Vec<NodeId> {
     order
 }
 
+fn trigger_reach(state: &CanvasState) -> Vec<NodeId> {
+    let mut ran: Vec<NodeId> = state
+        .nodes
+        .iter()
+        .filter(|card| !state.is_shelved(&card.id))
+        .filter(|card| card.category.eq_ignore_ascii_case("events") && state.wires.iter().any(|wire| wire.from_node == card.id && wire.ty.is_flow()))
+        .map(|card| card.id.clone())
+        .collect();
+    let mut index = 0;
+    while index < ran.len() {
+        let node = ran[index].clone();
+        for wire in state.wires.iter().filter(|wire| wire.from_node == node && wire.ty.is_flow()) {
+            if !ran.contains(&wire.to_node) {
+                ran.push(wire.to_node.clone());
+            }
+        }
+        index += 1;
+    }
+    ran
+}
+
 pub fn potion_ends(state: &CanvasState) -> Vec<NodeId> {
-    let fed = |card: &NodeCardModel| state.wires.is_empty() || state.wires.iter().any(|wire| wire.to_node == card.id);
+    let reach = trigger_reach(state);
+    let fed = |card: &NodeCardModel| {
+        state.wires.is_empty() || (state.wires.iter().any(|wire| wire.to_node == card.id) && (reach.is_empty() || reach.contains(&card.id)))
+    };
     let outputs: Vec<NodeId> = state
         .nodes
         .iter()
@@ -161,22 +185,7 @@ pub fn brewing_nodes(state: &CanvasState) -> HashSet<NodeId> {
             .filter(open)
             .collect();
     }
-    let mut ran: Vec<NodeId> = state
-        .nodes
-        .iter()
-        .filter(|card| card.category.eq_ignore_ascii_case("events") && state.wires.iter().any(|wire| wire.from_node == card.id && wire.ty.is_flow()))
-        .map(|card| card.id.clone())
-        .collect();
-    let mut index = 0;
-    while index < ran.len() {
-        let node = ran[index].clone();
-        for wire in state.wires.iter().filter(|wire| wire.from_node == node && wire.ty.is_flow()) {
-            if !ran.contains(&wire.to_node) {
-                ran.push(wire.to_node.clone());
-            }
-        }
-        index += 1;
-    }
+    let mut ran = trigger_reach(state);
     ran.extend(bottles);
     upstream_of(state, &ran).into_iter().filter(open).collect()
 }

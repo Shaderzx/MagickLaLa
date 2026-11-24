@@ -119,9 +119,31 @@ pub struct StudioWorkspace {
     pub active_release: Option<u32>,
 }
 
+fn recipe_from(spell: &SpellGraph, canvas: &CanvasState, specs: &[NodeSpec]) -> SpellGraph {
+    let mut graph = spell.clone();
+    graph.shelf.clear();
+    let recipe = magicklala_canvas::recipe_nodes(canvas);
+    let known = |kind: &str| specs.iter().any(|spec| spec.kind == kind);
+    graph.nodes.retain(|node| recipe.contains(&node.id) || !known(&node.kind));
+    let kept: Vec<NodeId> = graph.nodes.iter().map(|node| node.id.clone()).collect();
+    graph.wires.retain(|wire| kept.contains(&wire.from_node) && kept.contains(&wire.to_node));
+    graph.subgraphs.retain(|reference| kept.contains(&reference.node_id));
+    graph
+}
+
+fn recipe_of(spell: &SpellGraph, specs: &[NodeSpec]) -> SpellGraph {
+    let mut canvas = CanvasState::from_graph(spell, specs);
+    for entry in &spell.shelf {
+        canvas.shelve(&entry.node);
+    }
+    recipe_from(spell, &canvas, specs)
+}
+
 impl StudioWorkspace {
     fn of(record: SpellRecord, releases: Vec<SpellRelease>) -> Self {
+        let recipe = recipe_of(&record.graph, &registry_specs());
         let (graph, active_release) = match releases.last() {
+            Some(release) if release.graph == recipe => (record.graph, Some(release.version)),
             Some(release) if release.created_at > record.updated_at => (release.graph.clone(), Some(release.version)),
             _ => (record.graph, None),
         };
@@ -1218,6 +1240,17 @@ impl StudioApp {
             self.track_config(id, &kind, config);
         }
         self.sync_var_edits_from_spell();
+        for entry in self.spell.shelf.clone() {
+            self.canvas.shelve(&entry.node);
+            let parked: Vec<(SocketRef, SocketRef)> = entry
+                .parked
+                .iter()
+                .map(|wire| (SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()), SocketRef::new(wire.to_node.clone(), wire.to_socket.clone())))
+                .collect();
+            if !parked.is_empty() {
+                self.aside_wires.insert(entry.node.clone(), parked);
+            }
+        }
         let viewport = self.canvas_size();
         self.canvas.fit(viewport);
         self.canvas.select(self.canvas.nodes.iter().find(|card| card.kind == "ai/generate_text").map(|card| card.id.clone()));
@@ -1312,10 +1345,7 @@ impl StudioApp {
     }
 
     pub fn open_sample_spell(&mut self, name: &str) {
-        if name != "Research Agent"
-            && name != "Support Agent"
-            && let Some(record) = self.store.as_ref().and_then(|store| store.saved_spells().into_iter().find(|record| record.name == name))
-        {
+        if let Some(record) = self.store.as_ref().and_then(|store| store.saved_spells().into_iter().find(|record| record.name == name)) {
             self.detach_spell_history();
             let releases = self.store.as_ref().map(|store| store.releases_of_record(record.id)).unwrap_or_default();
             let workspace = StudioWorkspace::of(record.clone(), releases);
@@ -1565,7 +1595,12 @@ impl StudioApp {
                 }
                 let mut restored = 0;
                 for (from, to) in &stash {
-                    let open = !self.is_fed(&to.node, &to.socket) && self.canvas.card(&from.node).is_some() && self.canvas.card(&to.node).is_some();
+                    let flow = self
+                        .canvas
+                        .card(&to.node)
+                        .and_then(|card| card.inputs.iter().find(|socket| socket.name == to.socket))
+                        .is_some_and(|socket| socket.ty.is_flow());
+                    let open = (flow || !self.is_fed(&to.node, &to.socket)) && self.canvas.card(&from.node).is_some() && self.canvas.card(&to.node).is_some();
                     if open && self.canvas.connect_sockets(from, to).is_ok() {
                         restored += 1;
                     }
@@ -1694,6 +1729,7 @@ impl StudioApp {
         let order: Vec<NodeId> = magicklala_canvas::recipe_order(&self.canvas)
             .into_iter()
             .filter(|node| node != id)
+            .filter(|node| !self.canvas.is_shelved(node))
             .filter(|node| {
                 in_pot.contains(node) || waiting.contains(node) || self.canvas.card(node).is_some_and(|card| card.category.eq_ignore_ascii_case("events"))
             })
@@ -1914,9 +1950,11 @@ impl StudioApp {
             }
         }
         let (nodes, wires, subgraphs) = self.rebuilt_parts();
-        if !vars_changed && nodes == self.spell.nodes && wires == self.spell.wires && subgraphs == self.spell.subgraphs {
+        let shelf = self.shelf_entries();
+        if !vars_changed && nodes == self.spell.nodes && wires == self.spell.wires && subgraphs == self.spell.subgraphs && shelf == self.spell.shelf {
             return false;
         }
+        self.spell.shelf = shelf;
         let unplaced = |list: &[NodeInstance]| list.iter().map(|node| (node.id.clone(), node.kind.clone(), node.config.clone())).collect::<Vec<_>>();
         if vars_changed || wires != self.spell.wires || subgraphs != self.spell.subgraphs || unplaced(&nodes) != unplaced(&self.spell.nodes) {
             self.canvas.clear_run_marks();
@@ -1974,11 +2012,11 @@ impl StudioApp {
     }
 
     pub fn subgraph_resolver(&self) -> Result<StudioSubgraphResolver, StudioError> {
-        StudioSubgraphResolver::load(self.store.as_ref(), &self.spell)
+        StudioSubgraphResolver::load(self.store.as_ref(), &self.brew_graph())
     }
 
     fn release_version_errors(&self) -> Vec<String> {
-        self.spell
+        self.brew_graph()
             .nodes
             .iter()
             .filter(|node| node.kind == SUBGRAPH_KIND)
@@ -1987,13 +2025,34 @@ impl StudioApp {
     }
 
     pub fn brew_graph(&self) -> SpellGraph {
-        let mut graph = self.spell.clone();
-        let recipe = magicklala_canvas::recipe_nodes(&self.canvas);
-        let known = |kind: &str| self.specs.iter().any(|spec| spec.kind == kind);
-        graph.nodes.retain(|node| recipe.contains(&node.id) || !known(&node.kind));
-        let kept: Vec<NodeId> = graph.nodes.iter().map(|node| node.id.clone()).collect();
-        graph.wires.retain(|wire| kept.contains(&wire.from_node) && kept.contains(&wire.to_node));
-        graph
+        recipe_from(&self.spell, &self.canvas, &self.specs)
+    }
+
+    fn shelf_entries(&self) -> Vec<magicklala_graph::ShelfEntry> {
+        self.canvas
+            .nodes
+            .iter()
+            .filter(|card| self.canvas.is_shelved(&card.id))
+            .map(|card| magicklala_graph::ShelfEntry {
+                node: card.id.clone(),
+                parked: self
+                    .aside_wires
+                    .get(&card.id)
+                    .map(|wires| {
+                        wires
+                            .iter()
+                            .map(|(from, to)| Wire {
+                                id: WireId::from(format!("parked-{}-{}-{}-{}", from.node.0, from.socket, to.node.0, to.socket).as_str()),
+                                from_node: from.node.clone(),
+                                from_socket: from.socket.clone(),
+                                to_node: to.node.clone(),
+                                to_socket: to.socket.clone(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            })
+            .collect()
     }
 
     fn bridge_around(&mut self, id: &NodeId) -> Vec<(SocketRef, SocketRef)> {
@@ -2175,7 +2234,9 @@ impl StudioApp {
     }
 
     pub fn run_spell(&mut self) -> bool {
-        if self.brew_graph().nodes.is_empty() || matches!(self.validation, ValidationState::Invalid(_)) {
+        let recipe = self.brew_graph();
+        let has_trigger = recipe.nodes.iter().any(|node| self.specs.iter().any(|spec| spec.kind == node.kind && spec.is_trigger));
+        if !has_trigger || matches!(self.validation, ValidationState::Invalid(_)) {
             return false;
         }
         let payload = self.run_payload.clone();
@@ -2646,7 +2707,12 @@ impl StudioApp {
         }
         self.validation = ValidationState::Valid;
         let recipe = self.brew_graph();
+        let draft = self.spell.clone();
         let store = self.store.as_mut().ok_or_else(|| StudioError::Store("no studio store".to_owned()))?;
+        if let Err(error) = store.save_draft(&draft) {
+            self.store_error = Some(error.to_string());
+            return Err(error);
+        }
         let published = store.publish(&recipe);
         let release = published.inspect_err(|error| self.store_error = Some(error.to_string()))?;
         self.refresh_releases(&release);
