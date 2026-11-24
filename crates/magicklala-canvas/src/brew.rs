@@ -13,6 +13,7 @@ const COL_GAP: f32 = 28.0;
 const SHELF_TO_POT: f32 = 52.0;
 const POT_TO_BOTTLES: f32 = 60.0;
 const PLAQUE_ROOM: f32 = 46.0;
+const EMPTY_POT_ROOM: f32 = 132.0;
 const BOTTLE_GAP: f32 = 30.0;
 const ASIDE_GAP: f32 = 40.0;
 const TOP_ROOM: f32 = 64.0;
@@ -325,7 +326,7 @@ fn plan_with(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, BrewPla
     let bottle_cols = bottles.len().max(1).div_ceil(bottle_rows_fit);
     let bottle_rows = bottles.len().max(1).div_ceil(bottle_cols);
     let bottles_h = stack_height(bottle_rows, bottle_size[1], m.bottle_gap);
-    let pot_block_h = m.pot[1] + PLAQUE_ROOM;
+    let pot_block_h = m.pot[1] + if state.nodes.is_empty() { EMPTY_POT_ROOM } else { PLAQUE_ROOM };
     let block_h = shelf_h.max(pot_block_h).max(bottles_h);
     let pot_x = if cols == 0 { 0.0 } else { shelf_w + m.shelf_to_pot };
     let bottles_x = pot_x + m.pot[0] + m.pot_to_bottles;

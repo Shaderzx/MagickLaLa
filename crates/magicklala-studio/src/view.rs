@@ -320,7 +320,7 @@ fn empty_canvas_overlay(app: &StudioApp, t: &HearthPalette) -> El {
     let pot = magicklala_canvas::brew_plan(&app.canvas, size).pot;
     let card_w = 400.0_f32.min(size.0 - 32.0).max(240.0);
     let x = (pot[0] + pot[2] * 0.5 - card_w * 0.5).min(size.0 - card_w - 16.0).max(16.0);
-    let y = (pot[1] + pot[3] + 24.0).min(size.1 - 112.0);
+    let y = (pot[1] + pot[3] + 24.0).min(size.1 - 106.0);
     col().key("empty-canvas").w(card_w).px(16.0).py(12.0).items_center().gap(8.0).absolute(x, y).child(heading("Start a new potion", 24.0, 800.0, t.ink)).child(
         row().pt(4.0).child(sized_button("empty-add-trigger", "Add On Message", true, false, 16.0, t, |app| {
             app.spawn("event/on_message");
@@ -367,14 +367,18 @@ fn toolbar(app: &StudioApp, t: &HearthPalette) -> El {
             app.canvas.zoom_active(1.2, [app.canvas_size().0 / 2.0, app.canvas_size().1 / 2.0]);
         }))
         .child(button_el("zoom-fit", "Fit", ButtonKind::Subtle, if compact { 6.0 } else { 9.0 }, t, StudioApp::fit_view));
-    let bottle_count = app.canvas.nodes.iter().filter(|card| card.kind == "io/send_message" || card.category.eq_ignore_ascii_case("io")).count();
-    let ingredient_count = app.canvas.nodes.len().saturating_sub(bottle_count);
+    let plan = magicklala_canvas::brew_plan(&app.canvas, app.canvas_size());
+    let ingredient_count = plan.with_role(magicklala_canvas::BrewRole::Ingredient).count();
+    let aside_count = plan.with_role(magicklala_canvas::BrewRole::Aside).count();
+    let bottle_count = plan.with_role(magicklala_canvas::BrewRole::Bottle).count();
     let i_word = if ingredient_count == 1 { "ingredient" } else { "ingredients" };
     let o_word = if bottle_count == 1 { "output" } else { "outputs" };
+    let aside_part = if aside_count > 0 { format!(" · {aside_count} aside") } else { String::new() };
     let stats = if app.canvas.mode == WorkbenchMode::Grimoire {
-        format!("{ingredient_count} {i_word} · {bottle_count} {o_word} · {} wires", app.canvas.wires.len())
+        let w_word = if app.canvas.wires.len() == 1 { "wire" } else { "wires" };
+        format!("{ingredient_count} {i_word}{aside_part} · {bottle_count} {o_word} · {} {w_word}", app.canvas.wires.len())
     } else {
-        format!("{ingredient_count} {i_word} · {bottle_count} {o_word}")
+        format!("{ingredient_count} {i_word}{aside_part} · {bottle_count} {o_word}")
     };
     let mut left = row()
         .key("toolbar-left")
@@ -547,16 +551,20 @@ fn left_rail(app: &StudioApp, t: &HearthPalette) -> El {
                 app.toggle_left_rail();
             }));
     }
-    let tabs = row()
+    let mut tabs = row()
         .w_full()
         .px(12.0)
         .gap(8.0)
+        .items_center()
         .fill(t.shelf)
         .border_sides([0.0, 0.0, 1.0, 0.0], t.rule)
         .child(tab("tab-palette", "Pantry", app.left_tab == LeftTab::Palette, light, t, |app| app.left_tab = LeftTab::Palette))
         .child(tab("tab-agents", "Potions", app.left_tab == LeftTab::Agents, light, t, |app| {
             app.left_tab = LeftTab::Agents;
         }));
+    if app.compact_toolbar() {
+        tabs = tabs.child(el().grow(1.0)).child(button_el("collapse-left-rail", "Hide", ButtonKind::Subtle, 7.0, t, StudioApp::toggle_left_rail));
+    }
     let query = app.palette_query.text.trim().to_ascii_lowercase();
     let mut rail = col().key("left-rail").w(rail_w).h_full().min_h(0.0).fill(t.shelf).border_sides([0.0, 1.0, 0.0, 0.0], t.rule).child(tabs);
     match app.left_tab {
@@ -1157,49 +1165,52 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
         } else {
             text(&variable.name).font(font(12.0, 700.0).mono()).color(t.ink).truncate()
         };
-        let name_col = col().grow(1.0).min_w(0.0).gap(1.5).child(name_widget).child(label(
+        let name_col = col().key(format!("var-label-{idx}")).grow(1.0).min_w(0.0).gap(1.5).child(name_widget).child(label(
             bound_hint,
             11.0,
             600.0,
             if bound_active { if t.light { t.broth_deep } else { t.broth_foam } } else { t.mute },
         ));
-        let row_top = row().w_full().gap(6.0).items_center().justify_between().child(name_col).child(
-            row()
-                .gap(6.0)
-                .items_center()
-                .child(
-                    row()
-                        .key(format!("var-type-{}", variable.name))
-                        .w(74.0)
-                        .h(28.0)
-                        .px(8.0)
-                        .radius(8.0)
-                        .continuous_corners()
-                        .items_center()
-                        .justify_between()
-                        .fill(t.wash_2)
-                        .border(1.0, if menu_open || pending_reset.is_some() { t.broth_mid } else { t.rule_2 })
-                        .child(label(format!("{:?}", variable.ty), 11.5, 650.0, t.ink))
-                        .child(canvas(chevron_down_shape(t.ink_2)).size(9.0, 7.0))
-                        .on_press(move |app: &mut StudioApp| {
-                            app.toggle_var_type_menu(&toggle_name);
-                        }),
-                )
-                .child(
-                    row()
-                        .px(7.0)
-                        .h(26.0)
-                        .radius(7.0)
-                        .items_center()
-                        .justify_center()
-                        .fill(Color::TRANSPARENT)
-                        .border(1.0, t.rule)
-                        .child(label("Remove", 10.5, 600.0, t.ink_2))
-                        .on_press(move |app: &mut StudioApp| {
-                            app.remove_variable(&remove_name);
-                        }),
-                ),
-        );
+        let controls = row()
+            .gap(6.0)
+            .items_center()
+            .child(
+                row()
+                    .key(format!("var-type-{}", variable.name))
+                    .w(74.0)
+                    .h(28.0)
+                    .px(8.0)
+                    .radius(8.0)
+                    .continuous_corners()
+                    .items_center()
+                    .justify_between()
+                    .fill(t.wash_2)
+                    .border(1.0, if menu_open || pending_reset.is_some() { t.broth_mid } else { t.rule_2 })
+                    .child(label(format!("{:?}", variable.ty), 11.5, 650.0, t.ink))
+                    .child(canvas(chevron_down_shape(t.ink_2)).size(9.0, 7.0))
+                    .on_press(move |app: &mut StudioApp| {
+                        app.toggle_var_type_menu(&toggle_name);
+                    }),
+            )
+            .child(
+                row()
+                    .px(7.0)
+                    .h(26.0)
+                    .radius(7.0)
+                    .items_center()
+                    .justify_center()
+                    .fill(Color::TRANSPARENT)
+                    .border(1.0, t.rule)
+                    .child(label("Remove", 10.5, 600.0, t.ink_2))
+                    .on_press(move |app: &mut StudioApp| {
+                        app.remove_variable(&remove_name);
+                    }),
+            );
+        let row_top = if app.compact_toolbar() {
+            col().w_full().gap(6.0).child(name_col).child(controls)
+        } else {
+            row().w_full().gap(6.0).items_center().justify_between().child(name_col).child(controls)
+        };
         let default_input = if let Some(def_edit) = app.var_default_edits.get(idx) {
             let mut field = row().grow(1.0).min_w(0.0).h(18.0).items_center().child(
                 text_input(def_edit, font(11.5, 550.0).mono())
@@ -1340,7 +1351,10 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
     let total_ms = app.trace.last().map_or(0, |line| line.at_ms);
     let total_label = if total_ms == 0 { "<1ms total".to_owned() } else { format!("{total_ms}ms total") };
     let succeeded = !app.trace.iter().any(|line| line.status == ExecutionStatus::Failed);
-    let status_label = if app.is_running() {
+    let checked_only = !app.is_running() && finished.is_empty() && app.trace.iter().all(|line| line.kind == "RunRejected");
+    let status_label = if checked_only {
+        "Hexed"
+    } else if app.is_running() {
         "Brewing"
     } else if app.canvas.last_brew.is_none() && app.last_run.is_some() {
         "Last brew"
@@ -1366,11 +1380,20 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
                     row()
                         .gap(6.0)
                         .items_center()
-                        .child(heading(format!("Brew #{}", app.runs), 15.5, 800.0, t.ink))
+                        .child(heading(if checked_only { "Check".to_owned() } else { format!("Brew #{}", app.runs) }, 15.5, 800.0, t.ink))
                         .child(label("·", 14.0, 600.0, t.mute))
                         .child(heading(status_label, 15.5, 800.0, if succeeded { if t.light { t.broth_deep } else { t.broth_foam } } else { t.hex })),
                 )
-                .child(label(format!("{} steps · {} events · {total_label}", finished.len(), app.trace.len()), 11.0, 500.0, t.mute)),
+                .child(label(
+                    if checked_only {
+                        plural(app.trace.len(), "issue", "issues")
+                    } else {
+                        format!("{} · {} · {total_label}", plural(finished.len(), "step", "steps"), plural(app.trace.len(), "event", "events"))
+                    },
+                    11.0,
+                    500.0,
+                    t.mute,
+                )),
         );
     let steps = finished.iter().enumerate().fold(col().gap(5.0), |list, (index, line)| {
         let target = line.node.clone();
@@ -1548,7 +1571,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                 .grow(1.0)
                 .min_w(0.0)
                 .gap(1.5)
-                .child(heading(&card.title, if compact { 14.5 } else { 15.5 }, 800.0, t.ink).truncate())
+                .child(heading(app.canvas.display_title(&card.id), if compact { 14.5 } else { 15.5 }, 800.0, t.ink).truncate())
                 .child(text(&card.kind).font(font(10.5, 500.0).mono()).color(t.mute).truncate()),
         );
     let mut column = col().key("inspector-card").gap(if compact { 6.0 } else { 9.0 }).pt(if compact { 8.0 } else { 10.0 }).child(card_header);
@@ -1566,7 +1589,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             }
             _ => None,
         };
-        let mut actions = row().pt(2.0).gap(8.0).items_center();
+        let mut actions = if app.compact_toolbar() { col().pt(2.0).gap(6.0).items_start() } else { row().pt(2.0).gap(8.0).items_center() };
         if let Some(button) = fix_button {
             actions = actions.child(button);
         }
@@ -1882,6 +1905,10 @@ fn status_badge(app: &StudioApp, t: &HearthPalette) -> Option<El> {
     )
 }
 
+fn plural(count: usize, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
 fn trace_display_kind(kind: &str) -> &str {
     match kind {
         "RunStarted" => "Lit",
@@ -1987,7 +2014,8 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
         .child(heading("Cauldron Log", 13.0, 800.0, t.ink))
         .child(label(summary, 12.0, 500.0, t.mute));
     if show_expand_chip {
-        let toggle_label = if app.trace_expanded { "Key steps ▴".to_owned() } else { format!("{finished_steps} {step_word} · {count} {event_word} ▾") };
+        let toggle_label = if app.trace_expanded { "Key steps".to_owned() } else { format!("{finished_steps} {step_word} · {count} {event_word}") };
+        let chevron = canvas(chevron_down_shape(t.ink_2)).size(9.0, 7.0).rotate(if app.trace_expanded { std::f32::consts::PI } else { 0.0 });
         header = header.child(
             row()
                 .key("trace-expand")
@@ -1996,7 +2024,10 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
                 .radius(8.0)
                 .fill(t.card)
                 .border(1.0, t.rule_2)
+                .items_center()
+                .gap(5.0)
                 .child(label(toggle_label, 11.0, 650.0, t.ink))
+                .child(chevron)
                 .on_press(|app: &mut StudioApp| app.trace_expanded = !app.trace_expanded),
         );
     }

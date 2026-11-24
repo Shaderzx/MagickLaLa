@@ -760,15 +760,16 @@ fn status_box(status: ExecutionStatus, duration_ms: Option<u64>, p: &HearthPalet
     }
     let (border, ink) = match status {
         ExecutionStatus::Failed => (p.hex, p.hex),
-        ExecutionStatus::Running => (p.gold, p.gold),
+        ExecutionStatus::Running => (p.gold, p.simmer_ink()),
         ExecutionStatus::Succeeded => (p.broth_mid, if p.light { p.broth_deep } else { p.broth_foam }),
         ExecutionStatus::Idle => return None,
     };
     let text_label = match (status, duration_ms) {
-        (ExecutionStatus::Succeeded, Some(0)) => "✓ <1ms".to_owned(),
-        (ExecutionStatus::Succeeded, Some(ms)) => format!("✓ {ms}ms"),
+        (ExecutionStatus::Succeeded, Some(0)) => "<1ms".to_owned(),
+        (ExecutionStatus::Succeeded, Some(ms)) => format!("{ms}ms"),
         _ => status.display_label().to_owned(),
     };
+    let tick = (status == ExecutionStatus::Succeeded).then(|| crate::hearth::check_mark(ink, (10.0 * zoom).clamp(9.0, 11.0)));
     Some(
         row()
             .gap(4.0 * zoom)
@@ -779,6 +780,7 @@ fn status_box(status: ExecutionStatus, duration_ms: Option<u64>, p: &HearthPalet
             .fill(p.card)
             .border((1.0 * zoom).max(1.0), border)
             .shadow(2.0, 5.0, p.shadow_card)
+            .children(tick)
             .child(text(text_label).font(TextStyle::new((11.2 * zoom).clamp(11.0, 12.2), 750.0).features("'tnum' 1")).color(ink)),
     )
 }
