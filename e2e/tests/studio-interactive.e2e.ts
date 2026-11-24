@@ -1201,7 +1201,7 @@ test('Studio reads as one finished product: twelve strands keep clear of every c
     expect(report.shelf).toMatch(/Potions/);
     expect(report.shelf).not.toMatch(/Spells/);
     expect(report.shelf).not.toMatch(/Published brew/);
-    expect(report.shelf).toMatch(/v1 · 2 ingredients/);
+    expect(report.shelf).toMatch(/v1 2 ingredients/);
     expect(report.theme).toBe('Sunlit');
     expect(report.menuCoversPlaque).toBe(false);
   } finally {
