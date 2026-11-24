@@ -6,7 +6,7 @@ use magicklala_canvas::{ExecutionStatus, SocketRef, category_accent};
 use magicklala_graph::{NodeCatalog, NodeId, NodeInstance, SocketType, SpellGraph, SpellId, SpellValidator, Wire, WireId};
 use magicklala_store::{NewProject, NewSpell, Repository, SqliteStore, StoreError};
 use magicklala_studio::{
-    ChatMessage, LeftTab, PALETTE_CATEGORY_ORDER, PROMPT_EDITOR_PADDING, Release, RightTab, StudioApp, StudioConfig, StudioStore, Theme, ValidationState,
+    LeftTab, PALETTE_CATEGORY_ORDER, PROMPT_EDITOR_PADDING, Release, RightTab, StudioApp, StudioConfig, StudioStore, Theme, ValidationState,
     palette_categories, prompt_font, registry_specs, render_headless_snapshot_state, render_headless_snapshot_themed, studio_text_system, studio_view,
 };
 use rune::{Env, Runtime};
@@ -253,6 +253,15 @@ fn echo_spell() -> SpellGraph {
         wire("w2", ("trigger", "content"), ("echo", "content")),
         wire("w3", ("echo", "text"), ("reply", "content")),
     ];
+    spell
+}
+
+fn tasting_spell() -> SpellGraph {
+    let mut spell = echo_spell();
+    spell.name = "Tasting Agent".to_owned();
+    if let Some(node) = spell.nodes.iter_mut().find(|node| node.id.0 == "echo") {
+        node.config = json!({ "template": "You asked: {{content}}" });
+    }
     spell
 }
 
@@ -1357,91 +1366,19 @@ fn capture_surfaces(out_dir: &Path) -> Result<serde_json::Value, String> {
     vars.right_tab = RightTab::Variables;
     save("06-variables-1280x800.png", vars)?;
 
-    let mut play = base_desktop();
-    play.right_tab = RightTab::Playground;
-    play.validation = ValidationState::Valid;
-    play.runs = 2;
-    play.chat = vec![
-        ChatMessage { from_user: true, text: "What did Finance ask for Q3?".to_owned() },
-        ChatMessage {
-            from_user: false,
-            text: "Finance requested confirmation on the marketing spend line before Friday. Memory and knowledge both point to a 12% Q3 lift.".to_owned(),
-        },
-        ChatMessage { from_user: true, text: "Draft a concise confirmation reply.".to_owned() },
-        ChatMessage {
-            from_user: false,
-            text: "Confirmed: Q3 marketing spend holds at +12% lift per the latest forecast. Ready to lock before Friday's close.".to_owned(),
-        },
-    ];
-    let support_trace = |steps: [(&str, &str, u64, u64); 5]| -> Vec<magicklala_studio::TraceLine> {
-        let mut lines = vec![magicklala_studio::TraceLine {
-            at_ms: 0,
-            kind: "RunStarted",
-            detail: "Brew started".to_owned(),
-            status: ExecutionStatus::Running,
-            node: None,
-        }];
-        let mut prev_ms = 0;
-        for (id, title, dur, end_ms) in steps {
-            lines.push(magicklala_studio::TraceLine {
-                at_ms: prev_ms,
-                kind: "NodeStarted",
-                detail: title.to_owned(),
-                status: ExecutionStatus::Running,
-                node: Some(NodeId::from(id)),
-            });
-            let dur_text = if dur == 0 { "<1ms".to_owned() } else { format!("{dur}ms") };
-            lines.push(magicklala_studio::TraceLine {
-                at_ms: end_ms,
-                kind: "NodeFinished",
-                detail: format!("{title} · {dur_text}"),
-                status: ExecutionStatus::Succeeded,
-                node: Some(NodeId::from(id)),
-            });
-            prev_ms = end_ms;
+    let tasted = |dark: bool, messages: &[&str]| -> Result<StudioApp, String> {
+        let mut rt = runtime_for(tasting_spell());
+        if dark {
+            rt.update(|app, _| app.toggle_theme());
         }
-        for _ in 0..7 {
-            lines.push(magicklala_studio::TraceLine {
-                at_ms: prev_ms,
-                kind: "WireActivated",
-                detail: "wire".to_owned(),
-                status: ExecutionStatus::Succeeded,
-                node: None,
-            });
+        for message in messages {
+            type_chat(&mut rt, message)?;
         }
-        lines.push(magicklala_studio::TraceLine {
-            at_ms: prev_ms,
-            kind: "RunFinished",
-            detail: "Succeeded".to_owned(),
-            status: ExecutionStatus::Succeeded,
-            node: None,
-        });
-        lines
+        rt.update(|app, _| app.fit_view());
+        rt.frame(0.0);
+        Ok(std::mem::replace(&mut rt.state, StudioApp::from_registry()))
     };
-    play.trace = support_trace([
-        ("trigger", "On Message", 0, 0),
-        ("recall", "Search Memory", 18, 18),
-        ("search", "Search Knowledge", 24, 42),
-        ("llm", "Generate Text", 96, 138),
-        ("reply", "Send Message", 3, 141),
-    ]);
-    let play_times: [(&str, u64, usize); 5] = [("trigger", 0, 1), ("recall", 18, 2), ("search", 24, 3), ("llm", 96, 4), ("reply", 3, 5)];
-    for card in &mut play.canvas.nodes {
-        card.status = ExecutionStatus::Succeeded;
-        if let Some((_, ms, step)) = play_times.iter().find(|(id, _, _)| *id == card.id.0) {
-            card.duration_ms = Some(*ms);
-            card.step_order = Some(*step);
-        }
-    }
-    for wire in &mut play.canvas.wires {
-        wire.active = true;
-    }
-    play.canvas.validated = true;
-    play.canvas.brew_summary = Some("Brewed · 141ms".to_owned());
-    play.chat_input = rune::TextEdit::new("");
-    let viewport = play.canvas_size();
-    play.canvas.fit(viewport);
-    save("07-playground-1280x800.png", play)?;
+    save("07-playground-1280x800.png", tasted(false, &["What did Finance ask for Q3?", "Draft a concise confirmation reply."])?)?;
 
     let mut executed = StudioApp::with_spell(example("webhook_router.json")?, registry_specs());
     executed.size = (1280.0, 800.0);
@@ -1489,46 +1426,7 @@ fn capture_surfaces(out_dir: &Path) -> Result<serde_json::Value, String> {
     };
     save("11-error-state-1280x800.png", build_invalid(false))?;
 
-    let mut dark_play = base_desktop();
-    dark_play.toggle_theme();
-    dark_play.left_tab = LeftTab::Agents;
-    dark_play.right_tab = RightTab::Playground;
-    dark_play.sync_spell();
-    dark_play.validation = ValidationState::Valid;
-    dark_play.runs = 1;
-    dark_play.releases = vec![Release { version: 1, nodes: 5 }, Release { version: 2, nodes: 5 }];
-    dark_play.release_graphs.insert(1, dark_play.spell.clone());
-    dark_play.release_graphs.insert(2, dark_play.spell.clone());
-    dark_play.active_release_version = Some(2);
-    dark_play.canvas.release_badge = Some("v2".to_owned());
-    dark_play.chat = vec![
-        ChatMessage { from_user: true, text: "Summarize Q3 blockers from memory.".to_owned() },
-        ChatMessage { from_user: false, text: "Two blockers found: vendor security questionnaire and staging cluster quota approval.".to_owned() },
-    ];
-    dark_play.trace = support_trace([
-        ("trigger", "On Message", 0, 0),
-        ("recall", "Search Memory", 14, 14),
-        ("search", "Search Knowledge", 16, 30),
-        ("llm", "Generate Text", 74, 104),
-        ("reply", "Send Message", 3, 107),
-    ]);
-    let dark_times: [(&str, u64, usize); 5] = [("trigger", 0, 1), ("recall", 14, 2), ("search", 16, 3), ("llm", 74, 4), ("reply", 3, 5)];
-    for card in &mut dark_play.canvas.nodes {
-        card.status = ExecutionStatus::Succeeded;
-        if let Some((_, ms, step)) = dark_times.iter().find(|(id, _, _)| *id == card.id.0) {
-            card.duration_ms = Some(*ms);
-            card.step_order = Some(*step);
-        }
-    }
-    for wire in &mut dark_play.canvas.wires {
-        wire.active = true;
-    }
-    dark_play.canvas.validated = true;
-    dark_play.canvas.brew_summary = Some("Draft brewed · 107ms".to_owned());
-    dark_play.chat_input = rune::TextEdit::new("");
-    let viewport = dark_play.canvas_size();
-    dark_play.canvas.fit(viewport);
-    save("12-dark-secondary-1280x800.png", dark_play)?;
+    save("12-dark-secondary-1280x800.png", tasted(true, &["Summarize Q3 blockers from memory."])?)?;
 
     let mut filtered = base_desktop();
     filtered.palette_query = rune::TextEdit::new("search");
@@ -1571,14 +1469,6 @@ fn capture_surfaces(out_dir: &Path) -> Result<serde_json::Value, String> {
     branch_cauldron.canvas.mode = magicklala_canvas::WorkbenchMode::Cauldron;
     branch_cauldron.right_tab = RightTab::Trace;
     apply_webhook_run(&mut branch_cauldron);
-    let total_ms = branch_cauldron.trace.last().map_or(0, |line| line.at_ms);
-    let total_label = if total_ms == 0 { "<1ms".to_owned() } else { format!("{total_ms}ms") };
-    let total_ingr = branch_cauldron.canvas.nodes.iter().filter(|c| c.kind != "io/send_message").count();
-    let taken_ingr = branch_cauldron.canvas.nodes.iter().filter(|c| c.kind != "io/send_message" && c.status == ExecutionStatus::Succeeded).count();
-    let total_out = branch_cauldron.canvas.nodes.iter().filter(|c| c.kind == "io/send_message").count();
-    let taken_out = branch_cauldron.canvas.nodes.iter().filter(|c| c.kind == "io/send_message" && c.status == ExecutionStatus::Succeeded).count();
-    branch_cauldron.canvas.brew_summary =
-        Some(format!("Brewed · {total_label} · {taken_ingr} of {total_ingr} ingredients · {taken_out} of {total_out} outputs"));
     let viewport = branch_cauldron.canvas_size();
     branch_cauldron.canvas.fit(viewport);
     save("16-branching-cauldron-1280x800.png", branch_cauldron)?;
@@ -1889,12 +1779,41 @@ fn pantry_toss(rt: &mut Runtime<StudioApp>, kind: &str, query: &str) -> Result<s
     }))
 }
 
+fn visible_texts(rt: &Runtime<StudioApp>) -> Vec<String> {
+    rt.elements().into_iter().filter(|element| !element.exiting).filter_map(|element| element.text).filter(|text| !text.trim().is_empty()).collect()
+}
+
+fn plain_words() -> Result<serde_json::Value, String> {
+    let mut rt = headless(StudioApp::from_registry());
+    let mut texts: Vec<String> = Vec::new();
+    for tab in ["tab-inspector", "tab-trace", "tab-variables", "tab-playground"] {
+        click(&mut rt, tab)?;
+        rt.frame(0.0);
+        texts.extend(visible_texts(&rt));
+    }
+    let headings: Vec<String> = PALETTE_CATEGORY_ORDER
+        .iter()
+        .filter_map(|category| {
+            rt.elements().into_iter().find(|element| element.key.as_deref() == Some(&format!("palette-heading-{category}"))).and_then(|element| element.label.or(element.text))
+        })
+        .collect();
+    let mut tabs: Vec<String> = Vec::new();
+    for key in ["tab-inspector", "tab-trace", "tab-variables", "tab-playground"] {
+        let label = rt.elements().into_iter().find(|element| element.key.as_deref() == Some(key)).and_then(|element| element.label.or(element.text));
+        tabs.push(label.unwrap_or_default());
+    }
+    texts.sort();
+    texts.dedup();
+    Ok(json!({ "texts": texts, "headings": headings, "tabs": tabs }))
+}
+
 fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
         Some("surfaces") => capture_surfaces(Path::new(args.get(1).ok_or("missing output directory")?)),
         Some("hex-pinpoint") => hex_pinpoint(),
         Some("pot-layout") => pot_layout(),
         Some("toss") => toss(),
+        Some("plain-words") => plain_words(),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-ref-edit") => subgraph_ref_edit(Path::new(args.get(1).ok_or("missing database path")?)),

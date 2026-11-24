@@ -904,3 +904,14 @@ test('Dragging a vial off the cauldron sets it aside with every wire removed, dr
   expect(setAside.roleBack).toBe('Ingredient');
   expect(setAside.positionsAfter).toEqual(setAside.positionsBefore);
 });
+
+test('Every Studio panel names things in plain words: pantry shelves are Events, Flow, AI, Memory, Knowledge, Outputs and so on, the right tabs read Recipe, Trace, Variables, Tasting, counts say variables, and no hint line tells the user which button to press', { timeout: 900_000 }, async () => {
+  const { texts } = await studioProbe(['plain-words']);
+  const shown = new Set(texts as string[]);
+
+  for (const heading of ['Events', 'Flow', 'AI', 'Memory', 'Knowledge', 'Outputs', 'Code', 'Recipe', 'Trace', 'Variables', 'Tasting']) expect(shown.has(heading)).toBe(true);
+  for (const flourish of ['Sparks & Events', 'Whisk & Flow', 'Arcane AI', 'Memory Jars', 'Herb Lore', 'Potion Bottles', 'Rhai Runes', 'Essences', 'Pours in', 'Distills out', 'Prompt · Incantation', 'Potion spices', 'Spices']) {
+    expect(shown.has(flourish)).toBe(false);
+  }
+  expect((texts as string[]).filter((line) => /^(Press|Click|Send a prompt) /.test(line) || /Press Brew|\bspices?\b|Taste this potion/.test(line))).toEqual([]);
+});
