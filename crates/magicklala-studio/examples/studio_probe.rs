@@ -1625,7 +1625,29 @@ fn pot_measure(rt: &Runtime<StudioApp>, ids: &[String]) -> serde_json::Value {
         })
         .map(|(id, _)| id)
         .collect();
-    json!({ "zoom": rt.state.canvas.camera.zoom, "missing": missing, "overlaps": overlaps, "outside": outside })
+    let elements = rt.elements();
+    let roots: Vec<usize> = elements
+        .iter()
+        .enumerate()
+        .filter(|(_, element)| element.key.as_deref().is_some_and(|key| ids.iter().any(|id| key == format!("node-{id}"))))
+        .map(|(index, _)| index)
+        .collect();
+    let under = |mut index: usize| loop {
+        if roots.contains(&index) {
+            return true;
+        }
+        match elements[index].parent {
+            Some(parent) => index = parent,
+            None => return false,
+        }
+    };
+    let smallest_line = elements
+        .iter()
+        .enumerate()
+        .filter(|(index, element)| !element.exiting && element.text.as_deref().is_some_and(|text| !text.trim().is_empty()) && under(*index))
+        .map(|(_, element)| element.rect[3])
+        .fold(f32::INFINITY, f32::min);
+    json!({ "zoom": rt.state.canvas.active_camera().zoom, "missing": missing, "overlaps": overlaps, "outside": outside, "smallestLine": smallest_line })
 }
 
 fn pot_layout() -> Result<serde_json::Value, String> {
