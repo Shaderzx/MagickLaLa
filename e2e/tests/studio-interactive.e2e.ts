@@ -1048,3 +1048,32 @@ test('The cauldron is the biggest thing on the support canvas and every ingredie
     expect(vialCentre, entry.id).toBeGreaterThan(entry.card[0] + entry.card[2] * 0.7);
   }
 });
+
+test('The cauldron reads cleanly at any size: no ingredient name is cut off, no pour line runs over another card, the idle broth already shows the last ingredient colour, steps number in feeding order, a Send that carries on is not the bottle, set-aside cards sit on a visible shelf, the pot is big, branch bottles have distinct names, and Grimoire text stays 11px or taller', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['r3-look']);
+
+  expect(report.cut).toEqual([]);
+  expect(report.crossings).toEqual([]);
+  expect(report.readyBroth).toBe(report.lastLiquid);
+  expect(report.chainSteps).toEqual([1, 2, 3, 4, 5]);
+  expect(report.relayRoles).toEqual({ trigger: 'Ingredient', send: 'Ingredient', keep: 'Bottle' });
+  expect(report.asideShelf).toEqual({ shelf: true, holdsCard: true });
+  expect(report.potWidth).toBeGreaterThanOrEqual(340);
+  expect(new Set(report.bottleTitles).size).toBe(report.bottleTitles.length);
+  expect(report.bottleTitles).toHaveLength(3);
+  expect(report.grimoireSmallest).toBeGreaterThanOrEqual(11);
+});
+
+test('Setting aside or deleting the middle step of a recipe joins the steps around it, so the spell still checks valid and the reply still brews, and a brew whose bottle never fills says so on the plaque', { timeout: 900_000 }, async () => {
+  const { setAside, deleted, emptyBottle } = await studioProbe(['pull-middle']);
+
+  for (const pulled of [setAside, deleted]) {
+    expect(pulled.flowIntoReply).toBe(true);
+    expect(pulled.check).toBe('valid');
+    expect(pulled.outcome).toBe('Succeeded');
+    expect(pulled.reply).toBe('done');
+    expect(pulled.plaque).toMatch(/^Brewed · /);
+  }
+  expect(emptyBottle.reply).not.toBe('done');
+  expect(emptyBottle.plaque).toMatch(/bottle empty/);
+});

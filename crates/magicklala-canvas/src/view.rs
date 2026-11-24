@@ -396,7 +396,15 @@ pub(crate) fn branch_bottle_view<S: 'static>(
                 text(label).font(TextStyle::new(11.0, if taken { 700.0 } else { 600.0 }).mono()).color(if taken { p.broth_ink() } else { p.ink_2 }).truncate(),
             )
     });
-    let bottle_art = canvas(potion_bottle_shape(bottle_mood, state.light, width, bottle_h, false, crate::cauldron::potion_tint(state))).size(width, bottle_h);
+    let bottle_art = canvas(potion_bottle_shape(
+        bottle_mood,
+        state.light,
+        width,
+        bottle_h,
+        false,
+        crate::cauldron::potion_tint(state, &crate::brew::brew_plan(state, (1280.0, 800.0))),
+    ))
+    .size(width, bottle_h);
     let pill = if taken {
         let ms_text = match card.duration_ms {
             Some(0) => "✓ <1ms".to_owned(),
@@ -486,9 +494,16 @@ pub(crate) fn potion_stand_view<S: 'static>(
     let bottled = state.release_badge.is_some();
     let sealed_vintage = bottled && !matches!(mood, CauldronMood::Brewed | CauldronMood::Simmering | CauldronMood::Hexed | CauldronMood::Empty);
     let bottle_h = 104.0;
-    let bottle_art = canvas(potion_bottle_shape(mood, state.light, width, bottle_h, bottled, crate::cauldron::potion_tint(state)))
-        .key("hero-potion-bottle")
-        .size(width, bottle_h);
+    let bottle_art = canvas(potion_bottle_shape(
+        mood,
+        state.light,
+        width,
+        bottle_h,
+        bottled,
+        crate::cauldron::potion_tint(state, &crate::brew::brew_plan(state, (1280.0, 800.0))),
+    ))
+    .key("hero-potion-bottle")
+    .size(width, bottle_h);
     let spell_label = if state.spell_name.is_empty() { "Potion" } else { state.spell_name.as_str() };
     let out_title = primary_output.map_or("Bottled Potion", |c| c.title.as_str());
     let out_kind = primary_output.map_or("io/send_message", |c| c.kind.as_str());

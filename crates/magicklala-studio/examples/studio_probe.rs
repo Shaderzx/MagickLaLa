@@ -2206,7 +2206,7 @@ fn potion_colours() -> Result<serde_json::Value, String> {
             .filter(|card| card.status == ExecutionStatus::Succeeded)
             .last()
             .map(|card| (card.title.clone(), hexed(magicklala_canvas::hearth::category_tone(&card.category, canvas.light).liquid)));
-        out.insert(name.to_owned(), json!({ "potion": magicklala_canvas::cauldron::potion_tint(canvas).map(hexed), "lastPoured": last }));
+        out.insert(name.to_owned(), json!({ "potion": magicklala_canvas::cauldron::potion_tint(canvas, &plan).map(hexed), "lastPoured": last }));
     }
     Ok(serde_json::Value::Object(out))
 }
@@ -2278,6 +2278,217 @@ fn pour_shape() -> Result<serde_json::Value, String> {
     Ok(json!({ "pot": pot, "cards": cards }))
 }
 
+fn text_lines_under(rt: &Runtime<StudioApp>, root_key: &str) -> Vec<(String, [f32; 4])> {
+    let elements = rt.elements();
+    let Some(root) = elements.iter().position(|element| element.key.as_deref() == Some(root_key) && !element.exiting) else { return Vec::new() };
+    let within = |mut index: usize| loop {
+        if index == root {
+            return true;
+        }
+        match elements[index].parent {
+            Some(parent) => index = parent,
+            None => return false,
+        }
+    };
+    elements
+        .iter()
+        .enumerate()
+        .filter(|(index, element)| !element.exiting && within(*index))
+        .filter_map(|(_, element)| element.text.clone().map(|text| (text, element.rect)))
+        .collect()
+}
+
+fn cut_titles(rt: &Runtime<StudioApp>, text: &mut rune::text::TextSystem) -> Vec<String> {
+    let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+    rt.state
+        .canvas
+        .nodes
+        .iter()
+        .filter(|card| plan.card(&card.id).is_some_and(|placed| placed.role != magicklala_canvas::BrewRole::Bottle))
+        .filter_map(|card| {
+            let (_, rect) = text_lines_under(rt, &format!("node-{}", card.id.0)).into_iter().find(|(line, _)| line == &card.title)?;
+            let (natural, line_h) = text.measure(&card.title, rune::TextStyle::new(13.0, 750.0), 1.0);
+            let lines = (rect[3] / (line_h * plan.scale)).round().max(1.0);
+            (natural * plan.scale > rect[2] * lines + 1.0).then(|| card.title.clone())
+        })
+        .collect()
+}
+
+fn r3_look() -> Result<serde_json::Value, String> {
+    let mut text = magicklala_studio::studio_text_system();
+    let mut cut = Vec::new();
+    let mut crossings = Vec::new();
+    for (name, spell, size) in [
+        ("support", StudioApp::from_registry().spell.clone(), (1280.0_f32, 800.0_f32)),
+        ("support", StudioApp::from_registry().spell.clone(), (960.0, 640.0)),
+        ("dozen", dozen_ingredient_spell(), (960.0, 640.0)),
+        ("dozen", dozen_ingredient_spell(), (1280.0, 800.0)),
+    ] {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        cut.extend(cut_titles(&rt, &mut text).into_iter().map(|title| format!("{name}@{}: {title}", size.0)));
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        for (id, points) in magicklala_canvas::cauldron::pour_paths(&rt.state.canvas, &plan) {
+            for other in plan.cards.iter().filter(|card| card.id != id) {
+                let r = other.rect;
+                if points.iter().any(|pt| pt[0] > r[0] + 2.0 && pt[0] < r[0] + r[2] - 2.0 && pt[1] > r[1] + 2.0 && pt[1] < r[1] + r[3] - 2.0) {
+                    crossings.push(format!("{name}@{}: {} crosses {}", size.0, id.0, other.id.0));
+                }
+            }
+        }
+    }
+    let demo = headless(StudioApp::from_registry());
+    let last = magicklala_canvas::recipe_order(&demo.state.canvas)
+        .into_iter()
+        .filter_map(|id| demo.state.canvas.card(&id).cloned())
+        .filter(|card| card.kind != "io/send_message")
+        .last()
+        .ok_or("no ingredient")?;
+    let ready_broth = magicklala_canvas::hearth::broth_mid(
+        magicklala_canvas::CauldronMood::Ready,
+        true,
+        magicklala_canvas::cauldron::potion_tint(&demo.state.canvas, &magicklala_canvas::brew_plan(&demo.state.canvas, demo.state.canvas_size())),
+    );
+    let last_liquid = magicklala_canvas::hearth::category_tone(&last.category, true).liquid;
+    let pot_width = demo.presented("cauldron-center").map(|(rect, _)| rect[2]).unwrap_or_default();
+
+    let place =
+        |id: &str, kind: &str, x: f32| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position: [x, 0.0], config: serde_json::Value::Null };
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let mut chain = SpellGraph::new("Chain");
+    chain.nodes = vec![
+        place("trigger", "event/on_message", 0.0),
+        place("a", "ai/generate_text", 1.0),
+        place("b", "ai/generate_text", 2.0),
+        place("c", "ai/generate_text", 3.0),
+        place("reply", "io/send_message", 4.0),
+    ];
+    chain.wires = vec![
+        wire("w1", ("trigger", "out"), ("a", "in")),
+        wire("w2", ("a", "out"), ("b", "in")),
+        wire("w3", ("b", "out"), ("c", "in")),
+        wire("w4", ("c", "out"), ("reply", "in")),
+        wire("w5", ("trigger", "content"), ("a", "prompt")),
+        wire("w6", ("a", "text"), ("b", "prompt")),
+        wire("w7", ("trigger", "content"), ("c", "prompt")),
+        wire("w8", ("c", "text"), ("reply", "content")),
+    ];
+    let chain_app = StudioApp::with_spell(chain, registry_specs());
+    let chain_plan = magicklala_canvas::brew_plan(&chain_app.canvas, chain_app.canvas_size());
+    let steps: Vec<Option<usize>> =
+        ["trigger", "a", "b", "c", "reply"].iter().map(|id| chain_plan.card(&NodeId::from(*id)).and_then(|card| card.recipe_step)).collect();
+
+    let mut relay = SpellGraph::new("Relay");
+    relay.nodes = vec![place("trigger", "event/on_message", 0.0), place("send", "io/send_message", 1.0), place("keep", "memory/add", 2.0)];
+    relay.wires = vec![
+        wire("w1", ("trigger", "out"), ("send", "in")),
+        wire("w2", ("trigger", "content"), ("send", "content")),
+        wire("w3", ("send", "out"), ("keep", "in")),
+        wire("w4", ("trigger", "content"), ("keep", "content")),
+    ];
+    let relay_app = StudioApp::with_spell(relay, registry_specs());
+    let relay_roles: serde_json::Map<String, serde_json::Value> =
+        ["trigger", "send", "keep"].iter().map(|id| ((*id).to_owned(), json!(role_of(&relay_app, id)))).collect();
+
+    let mut aside_rt = headless(StudioApp::from_registry());
+    aside_rt.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("recall"))));
+    aside_rt.frame(0.0);
+    let shelf = aside_rt.presented("aside-shelf").map(|(rect, _)| rect);
+    let recall = aside_rt.presented("node-recall").map(|(rect, _)| rect);
+    let aside_shelf = json!({ "shelf": shelf.is_some(), "holdsCard": matches!((shelf, recall), (Some(s), Some(c)) if inside(s, c)) });
+
+    let mut hook = runtime_for(example("webhook_router.json")?);
+    hook.frame(0.0);
+    let bottle_titles: Vec<String> = magicklala_canvas::brew_plan(&hook.state.canvas, hook.state.canvas_size())
+        .with_role(magicklala_canvas::BrewRole::Bottle)
+        .filter_map(|card| text_lines_under(&hook, &format!("node-{}", card.id.0)).into_iter().next().map(|(line, _)| line))
+        .collect();
+
+    let mut grim = headless(StudioApp::from_registry());
+    click(&mut grim, "mode-grimoire")?;
+    grim.frame(1.0);
+    let ids: Vec<String> = grim.state.canvas.nodes.iter().map(|card| card.id.0.clone()).collect();
+    let grimoire_smallest = pot_measure(&grim, &ids)["smallestLine"].clone();
+
+    Ok(json!({
+        "cut": cut,
+        "crossings": crossings,
+        "readyBroth": format!("{:.3},{:.3},{:.3}", ready_broth.r, ready_broth.g, ready_broth.b),
+        "lastLiquid": format!("{:.3},{:.3},{:.3}", last_liquid.r, last_liquid.g, last_liquid.b),
+        "potWidth": pot_width,
+        "chainSteps": steps,
+        "relayRoles": relay_roles,
+        "asideShelf": aside_shelf,
+        "bottleTitles": bottle_titles,
+        "grimoireSmallest": grimoire_smallest,
+    }))
+}
+
+fn pull_middle() -> Result<serde_json::Value, String> {
+    let place = |id: &str, kind: &str, x: f32| NodeInstance {
+        id: NodeId::from(id),
+        kind: kind.to_owned(),
+        position: [x * 260.0, 0.0],
+        config: serde_json::Value::Null,
+    };
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let spell = || {
+        let mut spell = SpellGraph::new("Recall Agent");
+        spell.nodes = vec![place("trigger", "event/on_message", 0.0), place("recall", "memory/search", 1.0), place("reply", "io/send_message", 2.0)];
+        spell.wires = vec![
+            wire("w1", ("trigger", "out"), ("recall", "in")),
+            wire("w2", ("trigger", "content"), ("recall", "query")),
+            wire("w3", ("recall", "out"), ("reply", "in")),
+            wire("w4", ("trigger", "content"), ("reply", "content")),
+        ];
+        spell
+    };
+    let brew = |rt: &mut Runtime<StudioApp>| -> Result<serde_json::Value, String> {
+        click(rt, "validate")?;
+        let check = rt.state.validation.label();
+        click(rt, "run-spell")?;
+        live_finish(rt)?;
+        Ok(json!({
+            "check": check,
+            "outcome": rt.state.last_run.as_ref().map(|report| report.outcome.label()),
+            "reply": rt.state.canvas.card(&NodeId::from("reply")).map(|card| card.status.label()),
+            "plaque": texts_under(rt, "cauldron-plaque"),
+            "flowIntoReply": rt.state.spell.wires.iter().any(|wire| wire.to_node.0 == "reply" && wire.to_socket == "in"),
+        }))
+    };
+    let mut aside = runtime_for(spell());
+    aside.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("recall"))));
+    let set_aside = brew(&mut aside)?;
+    let mut deleted = runtime_for(spell());
+    deleted.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("recall")));
+        app.delete_selected_node();
+    });
+    let removed = brew(&mut deleted)?;
+    let mut hollow = runtime_for(spell());
+    hollow.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("recall"))));
+    hollow.update(|app, _| {
+        app.canvas.wires.retain(|wire| wire.to_node.0 != "reply" || wire.to_socket != "in");
+        app.sync_spell();
+    });
+    let empty = brew(&mut hollow)?;
+    Ok(json!({ "setAside": set_aside, "deleted": removed, "emptyBottle": empty }))
+}
+
 fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
         Some("surfaces") => capture_surfaces(Path::new(args.get(1).ok_or("missing output directory")?)),
@@ -2294,6 +2505,8 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("potion-colours") => potion_colours(),
         Some("grimoire-place") => grimoire_place(),
         Some("pour-shape") => pour_shape(),
+        Some("r3-look") => r3_look(),
+        Some("pull-middle") => pull_middle(),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-ref-edit") => subgraph_ref_edit(Path::new(args.get(1).ok_or("missing database path")?)),

@@ -62,9 +62,8 @@ fn pouring_cards<'a>(state: &'a CanvasState, plan: &'a BrewPlan) -> impl Iterato
         .filter(|(_, card)| !state.has_run() || matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Running))
 }
 
-pub fn potion_tint(state: &CanvasState) -> Option<Color> {
-    let plan = brew_plan(state, (1280.0, 800.0));
-    let liquids: Vec<Color> = pouring_cards(state, &plan).map(|(_, card)| category_tone(&card.category, state.light).liquid).collect();
+pub fn potion_tint(state: &CanvasState, plan: &BrewPlan) -> Option<Color> {
+    let liquids: Vec<Color> = pouring_cards(state, plan).map(|(_, card)| category_tone(&card.category, state.light).liquid).collect();
     brew_tint(&liquids)
 }
 
@@ -117,6 +116,22 @@ fn vial_mouth(placed: &BrewCard, plan: &BrewPlan) -> [f32; 2] {
     let badge = if plan.vial[1] < 50.0 { 30.0 } else { 38.0 };
     let center = [placed.rect[0] + placed.rect[2] - (9.0 + badge * 0.5) * scale, placed.rect[1] + placed.rect[3] * 0.5];
     [center[0] + badge * 0.22 * scale, center[1] - badge * 0.36 * scale]
+}
+
+pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32; 2]>)> {
+    let ingredients: Vec<&BrewCard> = plan.with_role(BrewRole::Ingredient).collect();
+    let spread = ingredients.len().max(2) as f32 - 1.0;
+    ingredients
+        .iter()
+        .enumerate()
+        .filter(|(_, placed)| state.card(&placed.id).is_some())
+        .map(|(index, placed)| {
+            let from = vial_mouth(placed, plan);
+            let to = rim_point(plan, index as f32 / spread.max(1.0));
+            let lift = (36.0 - index as f32 * 10.0).max(0.0) * plan.scale;
+            (placed.id.clone(), (0..=40).map(|step| pour_point(from, to, lift, step as f32 / 40.0)).collect())
+        })
+        .collect()
 }
 
 fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &HearthPalette) -> Shape {
@@ -343,7 +358,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         .size(pot[2], pot[3])
         .absolute(pot[0], pot[1])
         .child(
-            canvas(hero_cauldron_shape(mood, state.light, pot[2], pot[3], potion_tint(state), STIRS[state.toss_count as usize % STIRS.len()]))
+            canvas(hero_cauldron_shape(mood, state.light, pot[2], pot[3], potion_tint(state, &plan), STIRS[state.toss_count as usize % STIRS.len()]))
                 .key("hero-cauldron")
                 .size(pot[2], pot[3]),
         )
@@ -387,7 +402,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
     for drip in drips(state, &plan, mood, &p) {
         board = board.child(drip);
     }
-    for bubble in bubbles(mood, &plan, &p, potion_tint(state)) {
+    for bubble in bubbles(mood, &plan, &p, potion_tint(state, &plan)) {
         board = board.child(bubble);
     }
     let lifted = match &state.drag {

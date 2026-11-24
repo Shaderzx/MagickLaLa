@@ -749,6 +749,10 @@ pub fn brew_tint(colors: &[Color]) -> Option<Color> {
     colors.last().copied()
 }
 
+pub fn broth_mid(mood: CauldronMood, light: bool, tint: Option<Color>) -> Color {
+    tinted_broth(mood, &HearthPalette::for_theme(light), tint).1
+}
+
 fn tinted_broth(mood: CauldronMood, p: &HearthPalette, tint: Option<Color>) -> (Color, Color, Color, Color) {
     let base = broth_colors(mood, p);
     match tint {
