@@ -1136,6 +1136,9 @@ fn memory_db(forms: &[String]) -> Result<serde_json::Value, String> {
         let config = StudioConfig { db_path: Some(PathBuf::from(form)), ..StudioConfig::default() };
         let mut rt = headless(StudioApp::open(&config).map_err(|error| format!("{form}: {error}"))?);
         let persistent = rt.state.store.as_ref().map(StudioStore::is_persistent);
+        let edition = format!("edition {} for {{{{content}}}}", rt.state.releases.len() + 1);
+        type_prompt(&mut rt, &NodeId::from("llm"), &edition)?;
+        rt.update(|app, _| app.sync_spell());
         click(&mut rt, "save")?;
         let (status, save_error) = (rt.state.draft_status.clone(), rt.state.store_error.clone());
         click(&mut rt, "publish")?;
@@ -3559,6 +3562,18 @@ fn geometry_and_polish(db_path: &Path) -> Result<serde_json::Value, String> {
     let dark = magicklala_canvas::HearthPalette::for_theme(false);
     let running_contrast = [contrast(light.running_mark(), light.card), contrast(dark.running_mark(), dark.card)];
     let sun_contrast = [contrast(light.sun_ink(), light.wash_2), contrast(dark.sun_ink(), dark.wash_2)];
+    let blend = |top: rune::Color, alpha: f32, under: rune::Color| rune::Color {
+        r: top.r * alpha + under.r * (1.0 - alpha),
+        g: top.g * alpha + under.g * (1.0 - alpha),
+        b: top.b * alpha + under.b * (1.0 - alpha),
+        a: 1.0,
+    };
+    let marker_contrast = [
+        contrast(light.socket_flow_mark(), light.card),
+        contrast(magicklala_canvas::hearth::stream_ink("flow", true), light.card),
+        contrast(magicklala_canvas::hearth::category_tone("flow", true).liquid, light.card),
+    ];
+    let summary_contrast = contrast(dark.summary_ink(), blend(dark.broth_mid, 0.22, dark.shelf));
 
     let mut rail = sized(StudioApp::from_registry().spell.clone(), (960.0, 640.0));
     click(&mut rail, "expand-nodes")?;
@@ -3687,6 +3702,8 @@ fn geometry_and_polish(db_path: &Path) -> Result<serde_json::Value, String> {
         "ribbonThroughPot": ribbon_through_pot,
         "runningContrast": running_contrast,
         "sunContrast": sun_contrast,
+        "markerContrast": marker_contrast,
+        "summaryContrast": summary_contrast,
         "tabs": { "gap": tab_gap, "wordsFit": tab_words_fit },
         "badges": { "found": badges_found, "overlaps": badge_overlaps },
         "names": { "vials": vial_titles, "triggers": trigger_names, "menu": menu_title },

@@ -242,7 +242,15 @@ impl HearthPalette {
     }
 
     pub fn sun_ink(&self) -> Color {
-        self.gold_hi
+        if self.light { self.simmer_ink() } else { self.gold_hi }
+    }
+
+    pub fn socket_flow_mark(&self) -> Color {
+        if self.light { hex(0x137B60) } else { self.broth_mid }
+    }
+
+    pub fn summary_ink(&self) -> Color {
+        if self.light { self.mute } else { self.ink_2 }
     }
 
     pub fn running_mark(&self) -> Color {
@@ -285,7 +293,7 @@ pub fn category_tone(category: &str, light: bool) -> CategoryTone {
             kind: VialKind::HerbBottle,
         },
         "flow" => CategoryTone {
-            liquid: hex(if light { 0xC67B14 } else { 0xEDA33B }),
+            liquid: hex(if light { 0xAD680C } else { 0xEDA33B }),
             glow: hex(0xFAD289),
             tint: hex(if light { 0xFDF3DF } else { 0x3B2B1A }),
             border: hex(if light { 0xE8C284 } else { 0x8C6226 }),
@@ -1367,10 +1375,10 @@ pub fn chevron_down_shape(color: Color) -> Shape {
     Shape::new().stroke_path(&path, 1.5, LineCap::Round, color)
 }
 
-pub fn theme_icon_shape(is_dark_currently: bool, light: bool) -> Shape {
+pub fn theme_icon_shape(show_sun: bool, light: bool) -> Shape {
     let p = HearthPalette::for_theme(light);
     let mut s = Shape::new();
-    if is_dark_currently {
+    if show_sun {
         s = fill_circle(s, 7.0, 7.0, 3.0, p.sun_ink());
         for k in 0..8 {
             let a = (k as f32 / 8.0) * TAU;

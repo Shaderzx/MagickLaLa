@@ -119,6 +119,26 @@ pub struct StudioWorkspace {
     pub active_release: Option<u32>,
 }
 
+fn stored_wires(prefix: &str, wires: &[(SocketRef, SocketRef)]) -> Vec<Wire> {
+    wires
+        .iter()
+        .map(|(from, to)| Wire {
+            id: WireId::from(format!("{prefix}-{}-{}-{}-{}", from.node.0, from.socket, to.node.0, to.socket).as_str()),
+            from_node: from.node.clone(),
+            from_socket: from.socket.clone(),
+            to_node: to.node.clone(),
+            to_socket: to.socket.clone(),
+        })
+        .collect()
+}
+
+fn socket_pairs(wires: &[Wire]) -> Vec<(SocketRef, SocketRef)> {
+    wires
+        .iter()
+        .map(|wire| (SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()), SocketRef::new(wire.to_node.clone(), wire.to_socket.clone())))
+        .collect()
+}
+
 fn recipe_from(spell: &SpellGraph, canvas: &CanvasState, specs: &[NodeSpec]) -> SpellGraph {
     let mut graph = spell.clone();
     graph.shelf.clear();
@@ -831,7 +851,8 @@ impl StudioApp {
         let workspace = store.adopt_latest_workspace()?;
         let mut app = match &workspace {
             Some(workspace) => {
-                let mut app = Self::with_spell(workspace.graph.clone(), registry_specs());
+                let mut app = Self::from_registry();
+                app.load_graph(workspace.graph.clone());
                 app.releases = workspace.releases.iter().map(|release| Release { version: release.version, nodes: release.graph.nodes.len() }).collect();
                 app.release_graphs = workspace.releases.iter().map(|release| (release.version, release.graph.clone())).collect();
                 app.release_notes =
@@ -1242,13 +1263,16 @@ impl StudioApp {
         self.sync_var_edits_from_spell();
         for entry in self.spell.shelf.clone() {
             self.canvas.shelve(&entry.node);
-            let parked: Vec<(SocketRef, SocketRef)> = entry
-                .parked
-                .iter()
-                .map(|wire| (SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()), SocketRef::new(wire.to_node.clone(), wire.to_socket.clone())))
-                .collect();
+            let parked = socket_pairs(&entry.parked);
+            for (from, to) in &parked {
+                self.canvas.adopt_sockets(from, to, &self.specs);
+            }
             if !parked.is_empty() {
                 self.aside_wires.insert(entry.node.clone(), parked);
+            }
+            let bridges = socket_pairs(&entry.bridges);
+            if !bridges.is_empty() {
+                self.aside_bridges.insert(entry.node.clone(), bridges);
             }
         }
         let viewport = self.canvas_size();
@@ -1595,6 +1619,17 @@ impl StudioApp {
                 let stash = self.aside_wires.remove(&id).unwrap_or_default();
                 if let Some(bridges) = self.aside_bridges.remove(&id) {
                     self.drop_bridges(&bridges);
+                }
+                let (waiting, stash): (Vec<_>, Vec<_>) = stash.into_iter().partition(|(from, to)| {
+                    let other = if from.node == id { &to.node } else { &from.node };
+                    self.canvas.is_shelved(other)
+                });
+                for (from, to) in waiting {
+                    let other = if from.node == id { to.node.clone() } else { from.node.clone() };
+                    let parked = self.aside_wires.entry(other).or_default();
+                    if !parked.contains(&(from.clone(), to.clone())) {
+                        parked.push((from, to));
+                    }
                 }
                 let mut restored = 0;
                 for (from, to) in &stash {
@@ -2038,22 +2073,8 @@ impl StudioApp {
             .filter(|card| self.canvas.is_shelved(&card.id))
             .map(|card| magicklala_graph::ShelfEntry {
                 node: card.id.clone(),
-                parked: self
-                    .aside_wires
-                    .get(&card.id)
-                    .map(|wires| {
-                        wires
-                            .iter()
-                            .map(|(from, to)| Wire {
-                                id: WireId::from(format!("parked-{}-{}-{}-{}", from.node.0, from.socket, to.node.0, to.socket).as_str()),
-                                from_node: from.node.clone(),
-                                from_socket: from.socket.clone(),
-                                to_node: to.node.clone(),
-                                to_socket: to.socket.clone(),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+                parked: self.aside_wires.get(&card.id).map(|wires| stored_wires("parked", wires)).unwrap_or_default(),
+                bridges: self.aside_bridges.get(&card.id).map(|wires| stored_wires("bridge", wires)).unwrap_or_default(),
             })
             .collect()
     }
@@ -2133,7 +2154,7 @@ impl StudioApp {
 
     fn hex_findings_for_spell(&self) -> Vec<HexFinding> {
         let version_findings: Vec<HexFinding> = self
-            .spell
+            .brew_graph()
             .nodes
             .iter()
             .filter(|node| node.kind == SUBGRAPH_KIND)
@@ -2228,6 +2249,11 @@ impl StudioApp {
         self.canvas.validated = matches!(self.validation, ValidationState::Valid);
         self.canvas.invalid_brew = matches!(self.validation, ValidationState::Invalid(_));
         &self.validation
+    }
+
+    fn live_release_matching_recipe(&self) -> Option<u32> {
+        let release = self.last_published.as_ref()?;
+        (self.spell.nodes.iter().all(|node| node.kind != SUBGRAPH_KIND) && release.graph == self.brew_graph()).then_some(release.version)
     }
 
     pub fn is_unchanged_from_live_release(&self) -> bool {
@@ -2748,8 +2774,8 @@ impl StudioApp {
         let record = saved.inspect_err(|error| self.store_error = Some(error.to_string()))?;
         self.store_error = None;
         self.dirty = false;
-        self.active_release_version = None;
-        self.canvas.release_badge = None;
+        self.active_release_version = self.live_release_matching_recipe();
+        self.canvas.release_badge = self.active_release_version.map(|version| format!("v{version}"));
         self.draft_status = Some(DRAFT_SAVED.to_owned());
         self.refresh_saved_potions();
         Ok(record.id)

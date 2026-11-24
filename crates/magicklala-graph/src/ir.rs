@@ -65,7 +65,10 @@ pub struct ShelfEntry {
     pub node: NodeId,
     #[serde(default)]
     pub parked: Vec<Wire>,
+    #[serde(default)]
+    pub bridges: Vec<Wire>,
 }
+
 impl SpellGraph {
     pub fn new(name: impl Into<String>) -> Self {
         Self {

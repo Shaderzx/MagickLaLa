@@ -1,6 +1,6 @@
 use magicklala_canvas::hearth::{
     HearthPalette, brand_cauldron_mark, category_tone, chevron_down_shape, empty_bottle_mark, hex, mini_vial_icon, search_icon_shape, sparkle_bar_v,
-    sparkle_connector_h, stitched_sparkles_h, theme_icon_shape, with_alpha,
+    sparkle_connector_h, stitched_sparkles_h, stream_ink, theme_icon_shape, with_alpha,
 };
 use magicklala_canvas::{ExecutionStatus, WorkbenchMode, interactive_canvas_view};
 use magicklala_graph::{NodeSpec, RunStatus, SUBGRAPH_KIND, SocketType};
@@ -1417,14 +1417,17 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
                     },
                     11.0,
                     500.0,
-                    t.mute,
+                    t.summary_ink(),
                 )),
         );
-    let steps = finished.iter().enumerate().fold(col().gap(5.0), |list, (index, line)| {
+    let listed: Vec<&TraceLine> = if checked_only { app.trace.iter().filter(|line| line.kind == "RunRejected").collect() } else { finished.clone() };
+    let steps = listed.iter().enumerate().fold(col().gap(5.0), |list, (index, line)| {
         let target = line.node.clone();
         let mut item = row()
+            .key(if checked_only { format!("trace-issue-{index}") } else { format!("trace-step-{index}") })
             .w_full()
-            .h(34.0)
+            .min_h(34.0)
+            .py(6.0)
             .px(9.0)
             .radius(10.0)
             .continuous_corners()
@@ -1434,15 +1437,19 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
             .border(1.0, t.rule)
             .child(
                 row()
+                    .grow(1.0)
+                    .min_w(0.0)
                     .gap(8.0)
                     .items_center()
-                    .child(row().size(18.0, 18.0).radius(6.0).fill(t.primary_bg).items_center().justify_center().child(figure(
-                        (index + 1).to_string(),
-                        10.0,
-                        750.0,
-                        t.primary_ink,
-                    )))
-                    .child(label(&line.detail, 12.0, 550.0, t.ink).truncate()),
+                    .child(
+                        row().size(18.0, 18.0).radius(6.0).fill(if checked_only { t.hex } else { t.primary_bg }).items_center().justify_center().child(figure(
+                            (index + 1).to_string(),
+                            10.0,
+                            750.0,
+                            if checked_only { t.card } else { t.primary_ink },
+                        )),
+                    )
+                    .child(if checked_only { label(&line.detail, 12.0, 550.0, t.ink).wrap() } else { label(&line.detail, 12.0, 550.0, t.ink).truncate() }),
             )
             .child(row().px(7.0).py(2.5).radius(7.0).fill(t.wash_2).border(1.0, t.rule).child(label("Inspect ›", 10.5, 650.0, t.ink_2)));
         if let Some(node_id) = target {
@@ -1453,7 +1460,13 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
         }
         list.child(item)
     });
-    col().key("inspector-trace").gap(10.0).pt(12.0).child(header).child(inspector_section_heading("Brewing sequence", t)).child(steps)
+    col()
+        .key("inspector-trace")
+        .gap(10.0)
+        .pt(12.0)
+        .child(header)
+        .child(inspector_section_heading(if checked_only { "Issues" } else { "Brewing sequence" }, t))
+        .child(steps)
 }
 
 fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
@@ -1486,13 +1499,13 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         let supplied =
             is_input && editable_field(&card.kind) == Some(socket.name.as_str()) && app.prompts.get(&card.id).is_some_and(|e| !e.text.trim().is_empty());
         let marker = if socket.ty.is_flow() {
-            el().size(8.5, 8.5).radius(4.25).fill(if flagged { t.hex } else { t.broth_mid })
+            el().size(8.5, 8.5).radius(4.25).fill(if flagged { t.hex } else { t.socket_flow_mark() })
         } else if flagged {
             el().size(7.0, 7.0).radius(2.0).fill(t.card).border(1.5, t.hex)
         } else if wired || supplied {
-            el().size(7.0, 7.0).radius(2.0).fill(tone.liquid)
+            el().size(7.0, 7.0).radius(2.0).fill(stream_ink(&card.category, light))
         } else {
-            el().size(7.0, 7.0).radius(2.0).fill(t.card).border(1.5, tone.liquid)
+            el().size(7.0, 7.0).radius(2.0).fill(t.card).border(1.5, stream_ink(&card.category, light))
         };
         let mut right_meta = row().gap(8.0).items_center();
         if flagged {
@@ -1936,10 +1949,11 @@ fn status_badge(app: &StudioApp, t: &HearthPalette) -> Option<El> {
 enum ChipShape {
     Full,
     Dot,
+    Span(usize),
     More(usize),
 }
 
-fn log_chips<'a>(lines: &[&'a TraceLine], compact: bool) -> Vec<(&'a TraceLine, ChipShape)> {
+fn log_chips<'a>(lines: &[&'a TraceLine], compact: bool, room_for_dots: usize) -> Vec<(&'a TraceLine, ChipShape)> {
     let steps = lines.iter().filter(|line| line.kind == "NodeFinished").count();
     let last_step = lines.iter().rposition(|line| line.kind == "NodeFinished");
     let issues: Vec<usize> = lines.iter().enumerate().filter(|(_, line)| matches!(line.kind, "NodeFailed" | "RunRejected")).map(|(index, _)| index).collect();
@@ -1952,6 +1966,24 @@ fn log_chips<'a>(lines: &[&'a TraceLine], compact: bool) -> Vec<(&'a TraceLine, 
             _ if compact && steps > 5 && line.kind == "NodeFinished" && Some(index) != last_step => chips.push((*line, ChipShape::Dot)),
             _ => chips.push((*line, ChipShape::Full)),
         }
+    }
+    let dots = chips.iter().filter(|(_, shape)| matches!(shape, ChipShape::Dot)).count();
+    if dots > room_for_dots.max(2) {
+        let folded = dots + 1 - room_for_dots.max(2);
+        let mut seen = 0;
+        chips.retain_mut(|(_, shape)| {
+            if !matches!(shape, ChipShape::Dot) {
+                return true;
+            }
+            seen += 1;
+            match seen {
+                1 => {
+                    *shape = ChipShape::Span(folded);
+                    true
+                }
+                n => n > folded,
+            }
+        });
     }
     chips
 }
@@ -2086,7 +2118,7 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
         header = header.child(el().grow(1.0).min_w(0.0)).child(badge);
     }
     let run_done = !app.is_running();
-    let chips = log_chips(&milestones, !app.trace_expanded);
+    let chips = log_chips(&milestones, !app.trace_expanded, ((app.size.0 - 420.0) / 32.0).max(0.0) as usize);
     let total = chips.len();
     let mut step_num = 0usize;
     let body = chips.iter().enumerate().fold(row().gap(0.0).items_center(), |list, (index, (line, shape))| {
@@ -2115,6 +2147,23 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
                     dot = dot.on_press(move |app: &mut StudioApp| app.canvas.select(Some(target_node.clone())));
                 }
                 return list.child(link(dot));
+            }
+            ChipShape::Span(count) => {
+                let first = step_num + 1;
+                step_num += count;
+                let span = row()
+                    .key("log-step-span")
+                    .label(format!("Steps {first} to {step_num}"))
+                    .h(22.0)
+                    .px(7.0)
+                    .radius(7.5)
+                    .continuous_corners()
+                    .items_center()
+                    .justify_center()
+                    .fill(t.primary_bg)
+                    .child(figure(format!("{first}–{step_num}"), 9.5, 750.0, t.primary_ink))
+                    .on_press(|app: &mut StudioApp| app.right_tab = RightTab::Trace);
+                return list.child(link(span));
             }
             ChipShape::More(more) => {
                 let chip = row()

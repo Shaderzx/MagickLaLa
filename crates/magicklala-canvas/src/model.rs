@@ -261,17 +261,12 @@ impl CanvasState {
             .map(|node| NodeCardModel::new(node.id.clone(), &node.kind, node.position, specs.iter().find(|spec| spec.kind == node.kind)))
             .collect();
         let mut state = Self { nodes, light: true, mode: WorkbenchMode::Cauldron, spell_name: graph.name.clone(), ..Self::default() };
-        let spec_of = |id: &NodeId| graph.nodes.iter().find(|node| &node.id == id).and_then(|node| specs.iter().find(|spec| spec.kind == node.kind));
         for wire in &graph.wires {
-            let from_ty = resolved_type(spec_of(&wire.from_node), &wire.from_socket, true);
-            let to_ty = resolved_type(spec_of(&wire.to_node), &wire.to_socket, false);
-            let fallback = from_ty.or(to_ty).unwrap_or(SocketType::Any);
-            if let Some(card) = state.card_mut(&wire.from_node) {
-                card.ensure_socket(&wire.from_socket, from_ty.unwrap_or(fallback), true);
-            }
-            if let Some(card) = state.card_mut(&wire.to_node) {
-                card.ensure_socket(&wire.to_socket, to_ty.unwrap_or(fallback), false);
-            }
+            state.adopt_sockets(
+                &SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()),
+                &SocketRef::new(wire.to_node.clone(), wire.to_socket.clone()),
+                specs,
+            );
         }
         state.wires = graph
             .wires
@@ -499,6 +494,19 @@ impl CanvasState {
     fn set_status(&mut self, id: &NodeId, status: ExecutionStatus) {
         if let Some(card) = self.card_mut(id) {
             card.status = status;
+        }
+    }
+
+    pub fn adopt_sockets(&mut self, from: &SocketRef, to: &SocketRef, specs: &[NodeSpec]) {
+        let spec_of = |state: &Self, id: &NodeId| state.card(id).and_then(|card| specs.iter().find(|spec| spec.kind == card.kind));
+        let from_ty = resolved_type(spec_of(self, &from.node), &from.socket, true);
+        let to_ty = resolved_type(spec_of(self, &to.node), &to.socket, false);
+        let fallback = from_ty.or(to_ty).unwrap_or(SocketType::Any);
+        if let Some(card) = self.card_mut(&from.node) {
+            card.ensure_socket(&from.socket, from_ty.unwrap_or(fallback), true);
+        }
+        if let Some(card) = self.card_mut(&to.node) {
+            card.ensure_socket(&to.socket, to_ty.unwrap_or(fallback), false);
         }
     }
 

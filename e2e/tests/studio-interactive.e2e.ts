@@ -1285,6 +1285,8 @@ test('Every pour, name and count reads true: twelve ingredients land on twelve r
     expect(report.ribbonThroughPot).toBe(0);
     for (const ratio of report.runningContrast) expect(ratio).toBeGreaterThanOrEqual(3);
     for (const ratio of report.sunContrast) expect(ratio).toBeGreaterThanOrEqual(3);
+    for (const ratio of report.markerContrast) expect(ratio).toBeGreaterThanOrEqual(3);
+    expect(report.summaryContrast).toBeGreaterThanOrEqual(4.5);
     expect(report.tabs.gap).toBeGreaterThanOrEqual(6);
     expect(report.tabs.wordsFit).toBe(true);
     expect(report.badges.found).toBeGreaterThan(0);
