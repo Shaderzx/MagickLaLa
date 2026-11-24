@@ -803,3 +803,18 @@ test('Studio saves, publishes and reopens SQLite files whose names end in a spac
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('Check pins a hex on the exact ingredient and input that are broken: a missing query wire flags only that socket and names it on the cauldron, and reply_support missing content never flags its look-alike reply', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['hex-pinpoint']);
+
+  const missing = report.missingQuery;
+  expect(missing.report.validation).toBe('invalid');
+  expect(missing.report.flagged).toEqual([{ node: missing.removed.node, sockets: [missing.removed.socket] }]);
+  expect(missing.report.plaque).toBe(`Hexed · missing "${missing.removed.socket}"`);
+
+  const twins = report.twinIds;
+  expect(twins.report.validation).toBe('invalid');
+  expect(twins.report.flagged).toEqual([{ node: twins.twin, sockets: ['content'] }]);
+  expect(twins.report.flagged.map((entry: { node: string }) => entry.node)).not.toContain(twins.lookalike);
+  expect(twins.report.plaque).toBe('Hexed · missing "content"');
+});

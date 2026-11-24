@@ -1601,9 +1601,41 @@ fn number(raw: Option<&String>, name: &str) -> Result<u64, String> {
     raw.ok_or_else(|| format!("missing {name}"))?.parse().map_err(|error| format!("{name}: {error}"))
 }
 
+fn hex_report(spell: SpellGraph) -> Result<serde_json::Value, String> {
+    let mut rt = headless(StudioApp::with_spell(spell, registry_specs()));
+    click(&mut rt, "validate")?;
+    let flagged: Vec<serde_json::Value> = rt
+        .state
+        .canvas
+        .nodes
+        .iter()
+        .filter(|card| card.status == ExecutionStatus::Failed)
+        .map(|card| json!({ "node": card.id.0, "sockets": card.inputs.iter().filter(|socket| socket.flagged).map(|socket| socket.name.clone()).collect::<Vec<_>>() }))
+        .collect();
+    Ok(json!({ "validation": rt.state.validation.label(), "flagged": flagged, "plaque": rt.state.canvas.brew_summary }))
+}
+
+fn hex_pinpoint() -> Result<serde_json::Value, String> {
+    let demo = StudioApp::from_registry().spell.clone();
+    let mut missing_query = demo.clone();
+    let cut = missing_query.wires.iter().position(|wire| wire.to_socket == "query").ok_or("demo spell has no query wire")?;
+    let removed = missing_query.wires.remove(cut);
+    let mut twin_ids = demo.clone();
+    let reply = twin_ids.nodes.iter().find(|node| node.kind == "io/send_message").ok_or("demo spell has no reply")?.clone();
+    let flow_into_reply = twin_ids.wires.iter().find(|wire| wire.to_node == reply.id && wire.to_socket == "in").ok_or("reply has no flow wire")?.clone();
+    let twin = NodeId::from(format!("{}_support", reply.id.0).as_str());
+    twin_ids.nodes.push(NodeInstance { id: twin.clone(), kind: reply.kind.clone(), position: [reply.position[0], reply.position[1] + 180.0], config: reply.config.clone() });
+    twin_ids.wires.push(Wire { id: WireId::from("twin_flow"), to_node: twin.clone(), ..flow_into_reply });
+    Ok(json!({
+        "missingQuery": { "removed": { "node": removed.to_node.0, "socket": removed.to_socket }, "report": hex_report(missing_query)? },
+        "twinIds": { "twin": twin.0, "lookalike": reply.id.0, "report": hex_report(twin_ids)? },
+    }))
+}
+
 fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
         Some("surfaces") => capture_surfaces(Path::new(args.get(1).ok_or("missing output directory")?)),
+        Some("hex-pinpoint") => hex_pinpoint(),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-ref-edit") => subgraph_ref_edit(Path::new(args.get(1).ok_or("missing database path")?)),
