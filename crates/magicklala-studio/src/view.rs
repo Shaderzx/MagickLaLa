@@ -2038,7 +2038,7 @@ fn playground_panel(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             list.child(turn_row)
         })
     };
-    let can_send = !app.is_running() && app.has_recipe_trigger();
+    let can_send = !app.is_running() && app.chat_door().is_some();
     let send_btn = row()
         .key("chat-send")
         .h(34.0)
@@ -2270,6 +2270,8 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
         format!("Brew #{} · simmering · {} {} · Quench stops it", app.runs, count, event_word)
     } else if blocked_pre_run {
         format!("Check · {count} {issue_word}")
+    } else if app.trace_stale {
+        format!("Last brew #{}", app.runs)
     } else if show_expand_chip {
         format!("Brew #{}", app.runs)
     } else if finished_steps > 0 {
@@ -2481,6 +2483,22 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
 }
 
 fn log_result(app: &StudioApp, t: &HearthPalette) -> Option<(El, f32)> {
+    if app.trace_stale {
+        let ink = if t.light { t.broth_deep } else { t.broth_foam };
+        let chip = row()
+            .key("log-result")
+            .h(29.0)
+            .px(9.0)
+            .gap(6.0)
+            .radius(10.0)
+            .continuous_corners()
+            .items_center()
+            .fill(t.card)
+            .border(1.0, t.rule_2)
+            .child(el().size(7.0, 7.0).radius(3.5).fill(t.broth_mid))
+            .child(label("Checked", 11.5, 750.0, ink));
+        return Some((chip, 90.0));
+    }
     let last = app.trace.iter().rev().find(|line| matches!(line.kind, "RunFinished" | "RunCancelled" | "RunTimedOut"))?;
     let failed: Vec<&TraceLine> = app.trace.iter().filter(|line| line.kind == "NodeFailed").collect();
     let light = t.light;

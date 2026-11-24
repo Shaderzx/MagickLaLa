@@ -148,7 +148,7 @@ fn trigger_reach(state: &CanvasState) -> Vec<NodeId> {
 
 pub fn potion_ends(state: &CanvasState) -> Vec<NodeId> {
     let reach = trigger_reach(state);
-    let fed = |card: &NodeCardModel| reach.contains(&card.id) || (reach.is_empty() && state.wires.is_empty());
+    let fed = |card: &NodeCardModel| reach.contains(&card.id);
     let outputs: Vec<NodeId> = state
         .nodes
         .iter()
@@ -173,11 +173,7 @@ pub fn brewing_nodes(state: &CanvasState) -> HashSet<NodeId> {
     let bottles = potion_ends(state);
     let open = |id: &NodeId| !state.is_shelved(id);
     if bottles.is_empty() && state.wires.is_empty() {
-        let reach = trigger_reach(state);
-        if !reach.is_empty() {
-            return reach.into_iter().collect();
-        }
-        return state.nodes.iter().map(|card| card.id.clone()).filter(open).collect();
+        return trigger_reach(state).into_iter().collect();
     }
     if bottles.is_empty() {
         let reach = trigger_reach(state);

@@ -400,13 +400,16 @@ impl CanvasState {
         Some(self.nodes.remove(index))
     }
 
-    pub fn restore_node(&mut self, card: NodeCardModel, wires: Vec<WireModel>) {
+    pub fn restore_node(&mut self, card: NodeCardModel, wires: Vec<WireModel>, at: usize) {
         let id = card.id.clone();
         if !self.nodes.iter().any(|existing| existing.id == id) {
-            self.nodes.push(card);
+            self.nodes.insert(at.min(self.nodes.len()), card);
         }
         for wire in wires {
             if self.card(&wire.from_node).is_some() && self.card(&wire.to_node).is_some() && !self.wires.iter().any(|existing| existing.id == wire.id) {
+                if !wire.ty.is_flow() {
+                    self.wires.retain(|existing| existing.ty.is_flow() || existing.to_node != wire.to_node || existing.to_socket != wire.to_socket);
+                }
                 self.wires.push(wire);
             }
         }

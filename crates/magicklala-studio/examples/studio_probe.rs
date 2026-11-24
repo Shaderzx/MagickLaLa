@@ -1376,6 +1376,16 @@ fn capture_surfaces(out_dir: &Path) -> Result<serde_json::Value, String> {
     agents.release_graphs.insert(1, agents.spell.clone());
     agents.release_graphs.insert(2, agents.spell.clone());
     agents.active_release_version = Some(2);
+    agents.last_published = serde_json::from_value(json!({
+        "id": "00000000-0000-0000-0000-000000000002",
+        "spell_id": "00000000-0000-0000-0000-000000000001",
+        "version": 2,
+        "notes": "",
+        "graph": agents.brew_graph(),
+        "content_hash": "",
+        "created_at": "2026-01-01T00:00:00Z",
+    }))
+    .ok();
     agents.canvas.release_badge = Some("v2".to_owned());
     agents.canvas.brew_summary = Some("Published v2 · 4 ingredients".to_owned());
     save("04-agents-releases-1280x800.png", agents)?;

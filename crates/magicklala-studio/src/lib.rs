@@ -156,6 +156,9 @@ fn same_recipe(a: &SpellGraph, b: &SpellGraph) -> bool {
         steps.sort();
         steps
     };
+    let doors = |graph: &SpellGraph| -> Vec<String> {
+        graph.nodes.iter().filter(|node| node.kind.starts_with("event/") || node.kind.starts_with("core/on_")).map(|node| node.id.0.clone()).collect()
+    };
     let links = |graph: &SpellGraph| {
         let mut links: Vec<(String, String, String, String)> =
             graph.wires.iter().map(|wire| (wire.from_node.0.clone(), wire.from_socket.clone(), wire.to_node.0.clone(), wire.to_socket.clone())).collect();
@@ -167,6 +170,7 @@ fn same_recipe(a: &SpellGraph, b: &SpellGraph) -> bool {
         && a.variables == b.variables
         && a.subgraphs == b.subgraphs
         && steps(a) == steps(b)
+        && doors(a) == doors(b)
         && links(a) == links(b)
 }
 
@@ -433,7 +437,7 @@ fn subgraph_keys(graph: &SpellGraph) -> impl Iterator<Item = SubgraphKey> + '_ {
 
 async fn released_graph(repository: &SqliteStore, record: &SpellRecord, version: Option<u32>) -> Result<Option<SpellGraph>, magicklala_store::StoreError> {
     Ok(match version {
-        None => Some(record.graph.clone()),
+        None => Some(recipe_of(&record.graph, &registry_specs())),
         Some(version) => repository.list_releases(record.id).await?.into_iter().find(|release| release.version == version).map(|release| release.graph),
     })
 }
@@ -772,6 +776,7 @@ pub struct Release {
 pub struct ParkedShelf {
     pub parked: Vec<(SocketRef, SocketRef)>,
     pub bridges: Vec<(SocketRef, SocketRef)>,
+    pub refused: Vec<(SocketRef, SocketRef)>,
 }
 
 #[derive(Debug, Clone)]
@@ -782,6 +787,7 @@ pub enum UndoEntry {
         bridges: Vec<(SocketRef, SocketRef)>,
     },
     Node {
+        at: usize,
         card: Box<NodeCardModel>,
         prompt: Option<TextEdit>,
         version: Option<TextEdit>,
@@ -816,6 +822,7 @@ pub struct StudioApp {
     pub left_rail_pinned: bool,
     pub frozen_edit: TextEdit,
     pub trace_expanded: bool,
+    pub trace_stale: bool,
     pub model_menu_open: bool,
     pub open_var_type: Option<usize>,
     pub pending_type_reset: Option<(usize, SocketType)>,
@@ -938,6 +945,7 @@ impl StudioApp {
             left_rail_pinned: false,
             frozen_edit: TextEdit::new(""),
             trace_expanded: false,
+            trace_stale: false,
             model_menu_open: false,
             open_var_type: None,
             pending_type_reset: None,
@@ -1322,6 +1330,7 @@ impl StudioApp {
         self.versions.clear();
         self.configs.clear();
         self.trace.clear();
+        self.trace_stale = false;
         self.trace_events.clear();
         self.pending_trace.clear();
         self.model_menu_open = false;
@@ -1782,6 +1791,27 @@ impl StudioApp {
         self.specs.iter().find(|spec| &spec.kind == kind).cloned()
     }
 
+    fn flow_ancestors(&self, id: &NodeId) -> std::collections::HashSet<NodeId> {
+        let mut seen = std::collections::HashSet::new();
+        let mut queue = VecDeque::from([id.clone()]);
+        while let Some(node) = queue.pop_front() {
+            for wire in self.canvas.wires.iter().filter(|wire| wire.to_node == node && wire.ty.is_flow()) {
+                if seen.insert(wire.from_node.clone()) {
+                    queue.push_back(wire.from_node.clone());
+                }
+            }
+        }
+        seen
+    }
+
+    fn runs_on(&self, node: &NodeId, route: &std::collections::HashSet<NodeId>) -> bool {
+        if route.contains(node) {
+            return true;
+        }
+        let flowless = self.canvas.card(node).is_some_and(|card| card.inputs.iter().chain(card.outputs.iter()).all(|socket| !socket.ty.is_flow()));
+        flowless && self.canvas.wires.iter().filter(|wire| &wire.to_node == node).all(|wire| self.runs_on(&wire.from_node, route))
+    }
+
     fn downstream_of(&self, id: &NodeId) -> std::collections::HashSet<NodeId> {
         let mut seen = std::collections::HashSet::from([id.clone()]);
         let mut queue = VecDeque::from([id.clone()]);
@@ -2000,10 +2030,17 @@ impl StudioApp {
         fed_first.extend(sources);
         sources = fed_first;
         sources.extend(rest);
+        let route = self.flow_ancestors(id);
+        if !route.is_empty() {
+            sources.retain(|node| self.runs_on(node, &route));
+        }
         for socket in spec.inputs.iter().filter(|s| s.required && !s.ty.is_flow()) {
             if !self.is_fed(id, &socket.name) {
                 self.feed_from(&sources, id, &socket.name, socket.ty);
             }
+        }
+        if bottle(self, id) && spec.inputs.iter().any(|s| s.required && !s.ty.is_flow() && !self.is_fed(id, &s.name)) {
+            self.toss(magicklala_canvas::Toss::Aside(id.clone()));
         }
 
         if my_flow_in.is_none() && my_flow_out.is_none() {
@@ -2477,6 +2514,14 @@ impl StudioApp {
             return &self.validation;
         }
         self.sync_spell();
+        let old_run = self.canvas.last_brew.is_some() || self.trace.iter().any(|line| line.kind != "RunRejected");
+        if old_run {
+            self.canvas.clear_run_marks();
+            self.canvas.last_brew = None;
+            self.canvas.brew_total_ms = None;
+            self.canvas.brew_summary = None;
+            self.trace_stale = true;
+        }
         for card in &mut self.canvas.nodes {
             if card.status == ExecutionStatus::Failed {
                 card.status = ExecutionStatus::Idle;
@@ -2515,8 +2560,9 @@ impl StudioApp {
                 }
                 self.canvas.brew_summary = Some(hex_plaque(&findings, &self.canvas));
                 let errors: Vec<String> = findings.into_iter().map(|finding| finding.message).collect();
-                if self.trace.is_empty() || self.trace.iter().all(|line| line.kind == "RunRejected") {
+                if old_run || self.trace.is_empty() || self.trace.iter().all(|line| line.kind == "RunRejected") {
                     self.trace = rejected;
+                    self.trace_stale = false;
                 }
                 ValidationState::Invalid(errors)
             }
@@ -2528,12 +2574,11 @@ impl StudioApp {
 
     fn live_release_matching_recipe(&self) -> Option<u32> {
         let release = self.last_published.as_ref()?;
-        let recipe = self.brew_graph();
-        (calls_only_pinned_spells(&recipe) && same_recipe(&release.graph, &recipe)).then_some(release.version)
+        same_recipe(&release.graph, &self.brew_graph()).then_some(release.version)
     }
 
     pub fn is_unchanged_from_live_release(&self) -> bool {
-        self.active_release_version.is_some() && self.live_release_matching_recipe().is_some()
+        self.active_release_version.is_some() && self.live_release_matching_recipe().is_some() && calls_only_pinned_spells(&self.brew_graph())
     }
 
     fn variable_errors(&self) -> Vec<String> {
@@ -2552,6 +2597,11 @@ impl StudioApp {
         naming.chain(defaults).collect()
     }
 
+    pub fn chat_door(&self) -> Option<&'static str> {
+        let graph = self.brew_graph();
+        [CHAT_TRIGGER_KIND, "core/on_message"].into_iter().find(|kind| graph.nodes.iter().any(|node| node.kind == *kind))
+    }
+
     pub fn has_recipe_trigger(&self) -> bool {
         self.brew_graph().nodes.iter().any(|node| self.specs.iter().any(|spec| spec.kind == node.kind && spec.is_trigger))
     }
@@ -2566,15 +2616,24 @@ impl StudioApp {
 
     fn brew_payload(&self) -> serde_json::Value {
         let chat_shaped = self.run_payload.get("channel").is_some() && self.run_payload.get("content").is_some();
-        let webhook = self
-            .trigger(None, &self.run_payload)
-            .and_then(|trigger| self.spell.node(&trigger.node).map(|node| node.kind == "event/on_webhook"))
-            .unwrap_or(false);
-        if !(chat_shaped && webhook) {
+        let door = self.trigger(None, &self.run_payload).and_then(|trigger| self.spell.node(&trigger.node).map(|node| node.kind.clone())).unwrap_or_default();
+        if !chat_shaped {
             return self.run_payload.clone();
         }
         let content = self.run_payload.get("content").cloned().unwrap_or_default();
-        serde_json::json!({ "method": "POST", "path": "/hooks/studio", "headers": {}, "query": {}, "body": { "content": content } })
+        match door.as_str() {
+            "event/on_webhook" => serde_json::json!({ "method": "POST", "path": "/hooks/studio", "headers": {}, "query": {}, "body": { "content": content } }),
+            "event/on_tick" => {
+                let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|since| since.as_secs()).unwrap_or_default();
+                serde_json::json!({ "tick": self.runs.max(1), "at": format!("unix {at}") })
+            }
+            "event/on_variable_changed" => {
+                let name = self.spell.variables.first().map_or_else(|| "variable".to_owned(), |variable| variable.name.clone());
+                serde_json::json!({ "name": name, "value": content })
+            }
+            "event/on_memory" => serde_json::json!({ "content": content, "payload": {} }),
+            _ => self.run_payload.clone(),
+        }
     }
 
     fn trigger(&self, prefer: Option<&str>, payload: &serde_json::Value) -> Option<RunTrigger> {
@@ -2601,6 +2660,7 @@ impl StudioApp {
         self.runs += 1;
         self.canvas.brew_summary = None;
         self.trace.clear();
+        self.trace_stale = false;
         self.trace_events.clear();
         self.pending_trace.clear();
         self.last_run = None;
@@ -2613,6 +2673,7 @@ impl StudioApp {
         };
         match trigger.and_then(|trigger| self.spawn_engine(trigger, reply_to_chat)) {
             Ok(active) => {
+                self.trace_stale = false;
                 self.active = Some(active);
                 self.canvas.running_brew = true;
                 self.canvas.last_brew = None;
@@ -2896,17 +2957,20 @@ impl StudioApp {
         let shelf = self.canvas.is_shelved(&selected_id).then(|| ParkedShelf {
             parked: self.aside_wires.get(&selected_id).cloned().unwrap_or_default(),
             bridges: self.aside_bridges.get(&selected_id).cloned().unwrap_or_default(),
+            refused: self.aside_refused.get(&selected_id).cloned().unwrap_or_default(),
         });
+        let at = self.canvas.nodes.iter().position(|card| card.id == selected_id).unwrap_or(self.canvas.nodes.len());
         let title = self.canvas.display_title(&selected_id);
         let bridges = self.bridge_around(&selected_id);
         self.canvas.select(Some(selected_id.clone()));
         if let Some(removed) = self.canvas.remove_selected_node() {
             self.aside_wires.remove(&removed.id);
             self.aside_bridges.remove(&removed.id);
+            self.aside_refused.remove(&removed.id);
             let prompt = self.prompts.remove(&removed.id);
             let version = self.versions.remove(&removed.id);
             let config = self.configs.remove(&removed.id);
-            self.undo_stack.push(UndoEntry::Node { card: Box::new(removed), prompt, version, config, wires: attached_wires, bridges, shelf });
+            self.undo_stack.push(UndoEntry::Node { at, card: Box::new(removed), prompt, version, config, wires: attached_wires, bridges, shelf });
             self.undo_banner = Some(format!("Removed {title}"));
             self.validation = ValidationState::Unchecked;
             self.dirty = true;
@@ -2934,7 +2998,7 @@ impl StudioApp {
                 self.validation = ValidationState::Unchecked;
                 self.sync_spell();
             }
-            UndoEntry::Node { card, prompt, version, config, wires, bridges, shelf } => {
+            UndoEntry::Node { at, card, prompt, version, config, wires, bridges, shelf } => {
                 self.drop_bridges(&bridges);
                 let id = card.id.clone();
                 if let Some(prompt) = prompt {
@@ -2946,11 +3010,14 @@ impl StudioApp {
                 if let Some(config) = config {
                     self.configs.insert(id.clone(), config);
                 }
-                self.canvas.restore_node(*card, wires);
-                if let Some(ParkedShelf { parked, bridges }) = shelf {
+                self.canvas.restore_node(*card, wires, at);
+                if let Some(ParkedShelf { parked, bridges, refused }) = shelf {
                     self.canvas.shelve(&id);
                     if !parked.is_empty() {
                         self.aside_wires.insert(id.clone(), parked);
+                    }
+                    if !refused.is_empty() {
+                        self.aside_refused.insert(id.clone(), refused);
                     }
                     if !bridges.is_empty() {
                         self.aside_bridges.insert(id.clone(), bridges);
@@ -3114,12 +3181,13 @@ impl StudioApp {
 
     pub fn send_chat(&mut self) {
         let message = self.chat_input.text.trim().to_owned();
-        if message.is_empty() || self.is_running() || !self.has_recipe_trigger() {
+        let Some(door) = self.chat_door() else { return };
+        if message.is_empty() || self.is_running() {
             return;
         }
         self.chat.push(ChatMessage { from_user: true, text: message.clone() });
         self.chat_input = TextEdit::new("");
-        self.start_run(Some(CHAT_TRIGGER_KIND), json!({ "channel": STUDIO_CHANNEL, "sender": STUDIO_SENDER, "content": message }), true);
+        self.start_run(Some(door), json!({ "channel": STUDIO_CHANNEL, "sender": STUDIO_SENDER, "content": message }), true);
     }
 }
 
