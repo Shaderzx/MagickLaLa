@@ -2264,6 +2264,20 @@ fn grimoire_place() -> Result<serde_json::Value, String> {
     )
 }
 
+fn pour_shape() -> Result<serde_json::Value, String> {
+    let rt = headless(StudioApp::from_registry());
+    let pot = rt.presented("cauldron-center").map(|(rect, _)| rect).ok_or("no pot")?;
+    let cards: Vec<serde_json::Value> = ["trigger", "recall", "search", "llm"]
+        .iter()
+        .filter_map(|id| {
+            let card = rt.presented(&format!("node-{id}")).map(|(rect, _)| rect)?;
+            let vial = rt.presented(&format!("vial-{id}")).map(|(rect, _)| rect);
+            Some(json!({ "id": id, "card": card, "vial": vial }))
+        })
+        .collect();
+    Ok(json!({ "pot": pot, "cards": cards }))
+}
+
 fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
         Some("surfaces") => capture_surfaces(Path::new(args.get(1).ok_or("missing output directory")?)),
@@ -2279,6 +2293,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("recipe-honesty") => recipe_honesty(),
         Some("potion-colours") => potion_colours(),
         Some("grimoire-place") => grimoire_place(),
+        Some("pour-shape") => pour_shape(),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-ref-edit") => subgraph_ref_edit(Path::new(args.get(1).ok_or("missing database path")?)),

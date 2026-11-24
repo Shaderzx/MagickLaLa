@@ -1036,3 +1036,15 @@ test('Opening the Grimoire for the first time on a 960 by 640 window with the pa
   expect(report.routes).toHaveLength(report.bottles);
   for (const route of report.routes) expect(route.insideCard, route.bottle).toBe(true);
 });
+
+test('The cauldron is the biggest thing on the support canvas and every ingredient vial sits on the pot side of its card, ready to pour', { timeout: 900_000 }, async () => {
+  const { pot, cards } = await studioProbe(['pour-shape']);
+
+  expect(cards).toHaveLength(4);
+  for (const entry of cards) {
+    expect(pot[2]).toBeGreaterThan(entry.card[2] * 1.4);
+    expect(entry.vial, entry.id).not.toBeNull();
+    const vialCentre = entry.vial[0] + entry.vial[2] / 2;
+    expect(vialCentre, entry.id).toBeGreaterThan(entry.card[0] + entry.card[2] * 0.7);
+  }
+});
