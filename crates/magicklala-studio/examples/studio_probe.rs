@@ -4413,12 +4413,11 @@ fn close_quarters(db_path: &Path) -> Result<serde_json::Value, String> {
     let mut menu = open(StudioApp::from_registry().spell.clone(), (1280.0, 800.0));
     let last = magicklala_canvas::recipe_order(&menu.state.canvas)
         .into_iter()
-        .filter(|id| {
+        .rfind(|id| {
             magicklala_canvas::brew_plan(&menu.state.canvas, menu.state.canvas_size())
                 .card(id)
                 .is_some_and(|card| card.role == magicklala_canvas::BrewRole::Ingredient)
         })
-        .last()
         .ok_or("no ingredient")?;
     let card_rect = layout_rect(&menu, &format!("node-{}", last.0)).ok_or("no card")?;
     right_click(&mut menu, (card_rect[0] + card_rect[2] * 0.5, card_rect[1] + card_rect[3] * 0.5));

@@ -96,8 +96,10 @@ fn over_route(from: [f32; 2], to: [f32; 2], ceiling: f32, climb_x: f32, s: f32) 
 fn ribbon_route(plan: &BrewPlan, to: [f32; 2], own: Option<&NodeId>) -> Vec<[f32; 2]> {
     let tap = spout_point(plan);
     let s = plan.scale.max(0.4);
-    let lip: Vec<[f32; 2]> = (0..4).map(|step| [tap[0] + step as f32 * 4.0 * s, tap[1]]).collect();
-    let mut route = ribbon_course(plan, [tap[0] + 16.0 * s, tap[1]], to, own, s);
+    let nest = own.and_then(|id| plan.card(id)).map_or(0, |mine| plan.with_role(BrewRole::Bottle).filter(|other| other.rect[0] > mine.rect[0]).count());
+    let lip_steps = 4 + nest * 4;
+    let lip: Vec<[f32; 2]> = (0..lip_steps).map(|step| [tap[0] + step as f32 * 4.0 * s, tap[1]]).collect();
+    let mut route = ribbon_course(plan, [tap[0] + lip_steps as f32 * 4.0 * s, tap[1]], to, own, s);
     route.splice(0..0, lip);
     route
 }
@@ -105,7 +107,7 @@ fn ribbon_route(plan: &BrewPlan, to: [f32; 2], own: Option<&NodeId>) -> Vec<[f32
 fn ribbon_course(plan: &BrewPlan, from: [f32; 2], to: [f32; 2], own: Option<&NodeId>, s: f32) -> Vec<[f32; 2]> {
     let own_tag = own.and_then(|id| plan.card(id)).map(|card| {
         let r = card.rect;
-        [r[0] - 8.0 * s, r[1] + r[3] * 0.46, r[2] + 16.0 * s, r[3] * 0.54]
+        [r[0] - 20.0 * s, r[1] + r[3] * 0.46 - 8.0 * s, r[2] + 28.0 * s, r[3] * 0.54 + 8.0 * s]
     });
     let inside = |r: [f32; 4], points: &[[f32; 2]]| {
         points.iter().filter(|point| point[0] >= r[0] && point[0] <= r[0] + r[2] && point[1] >= r[1] && point[1] <= r[1] + r[3]).count()
@@ -123,10 +125,10 @@ fn ribbon_course(plan: &BrewPlan, from: [f32; 2], to: [f32; 2], own: Option<&Nod
     let blocking: Vec<[f32; 4]> = plan.cards.iter().filter(|card| Some(&card.id) != own).map(|card| card.rect).filter(|r| inside(*r, &direct) > 0).collect();
     let lanes_floor = plan.lanes.map_or(f32::MIN, |[shelf_bottom, band]| shelf_bottom + band + 6.0 * s);
     let nest = own.and_then(|id| plan.card(id)).map_or(0, |mine| plan.with_role(BrewRole::Bottle).filter(|other| other.rect[0] > mine.rect[0]).count()) as f32;
-    let outer = blocking.len().saturating_sub(1) as f32 - nest.min(blocking.len().saturating_sub(1) as f32);
     let lowest_top = blocking.iter().map(|rect| rect[1]).fold(to[1] - 16.0 * s, f32::min);
-    let ceiling = (lowest_top - 6.0 * s - outer.max(0.0) * 12.0 * s).max(lanes_floor);
-    let climb_x = blocking.iter().map(|rect| rect[0]).fold(to[0], f32::min) - 18.0 * s + nest * 20.0 * s;
+    let ceiling = (lowest_top - 6.0 * s).max(lanes_floor);
+    let shelf_left = plan.with_role(BrewRole::Bottle).map(|card| card.rect[0]).fold(to[0], f32::min);
+    let climb_x = blocking.iter().map(|rect| rect[0]).fold(shelf_left, f32::min) - 18.0 * s + nest * 18.0 * s;
     let mut candidates = vec![direct];
     for (lead, tuck, lift) in [(0.3, 1.0, 10.0), (0.5, 1.0, 10.0), (0.2, 1.6, 14.0), (0.45, 0.0, 12.0), (0.15, 2.4, 6.0)] {
         candidates.push(cubic_samples(from, [from[0] + dx * lead, from[1]], [to[0] - 22.0 * s * tuck, to[1] - lift * s], to, 44));
@@ -134,7 +136,8 @@ fn ribbon_course(plan: &BrewPlan, from: [f32; 2], to: [f32; 2], own: Option<&Nod
     candidates.push(over_route(from, to, ceiling, climb_x, s));
     let own_left = own.and_then(|id| plan.card(id)).map(|card| card.rect[0]);
     let column_left = plan.with_role(BrewRole::Bottle).map(|card| card.rect[0]).reduce(f32::min);
-    for lane in [own_left, column_left].into_iter().flatten().map(|x| x - 14.0 * s).filter(|x| *x > from[0] + 8.0 * s) {
+    let outer_rank = plan.with_role(BrewRole::Bottle).count().saturating_sub(1) as f32 - nest;
+    for lane in [own_left, column_left].into_iter().flatten().map(|x| x - 14.0 * s - outer_rank.max(0.0) * 12.0 * s).filter(|x| *x > from[0] + 8.0 * s) {
         candidates.push(lane_route(from, to, lane, s));
     }
     let sharp = |points: &[[f32; 2]]| -> bool {

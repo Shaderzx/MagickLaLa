@@ -140,9 +140,19 @@ fn socket_pairs(wires: &[Wire]) -> Vec<(SocketRef, SocketRef)> {
         .collect()
 }
 
+fn by_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Number(number) => number.as_f64().and_then(serde_json::Number::from_f64).map_or_else(|| value.clone(), serde_json::Value::Number),
+        serde_json::Value::Array(items) => serde_json::Value::Array(items.iter().map(by_value).collect()),
+        serde_json::Value::Object(map) => serde_json::Value::Object(map.iter().map(|(key, item)| (key.clone(), by_value(item))).collect()),
+        other => other.clone(),
+    }
+}
+
 fn same_recipe(a: &SpellGraph, b: &SpellGraph) -> bool {
     let steps = |graph: &SpellGraph| {
-        let mut steps: Vec<(String, String, String)> = graph.nodes.iter().map(|node| (node.id.0.clone(), node.kind.clone(), node.config.to_string())).collect();
+        let mut steps: Vec<(String, String, String)> =
+            graph.nodes.iter().map(|node| (node.id.0.clone(), node.kind.clone(), by_value(&node.config).to_string())).collect();
         steps.sort();
         steps
     };

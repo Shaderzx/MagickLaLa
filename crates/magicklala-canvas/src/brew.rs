@@ -248,33 +248,66 @@ const CROWDED: Metrics =
     Metrics { vial: [160.0, 58.0], pot: [250.0, 242.0], row_gap: 12.0, col_gap: 14.0, shelf_to_pot: 40.0, pot_to_bottles: 44.0, bottle_gap: 10.0 };
 const TIGHT: Metrics = Metrics { vial: [160.0, 42.0], ..CROWDED };
 const READABLE: f32 = 0.92;
+const BOTTLE_STAIR: f32 = 30.0;
 const LEGIBLE: f32 = 0.8;
 const SHELVED: f32 = 0.7;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Arrangement {
+    CrowdedRing,
+    CrowdedFlank,
+    TightFlank,
+    Stacked,
+    TightRing,
+    TightStacked,
+}
+
+impl Arrangement {
+    fn build(self, state: &CanvasState, size: (f32, f32)) -> (f32, BrewPlan) {
+        let small_pot = [204.0, 198.0];
+        match self {
+            Arrangement::CrowdedRing => plan_with(state, size, CROWDED),
+            Arrangement::CrowdedFlank => plan_flanked(state, size, CROWDED),
+            Arrangement::TightFlank => plan_flanked(state, size, TIGHT),
+            Arrangement::Stacked => plan_stacked(state, size, Metrics { pot: small_pot, col_gap: 24.0, ..CROWDED }),
+            Arrangement::TightRing => plan_with(state, size, TIGHT),
+            Arrangement::TightStacked => plan_stacked(state, size, Metrics { pot: small_pot, ..TIGHT }),
+        }
+    }
+}
+
+const FALLBACKS: [(Arrangement, f32); 8] = [
+    (Arrangement::CrowdedRing, READABLE),
+    (Arrangement::CrowdedFlank, LEGIBLE),
+    (Arrangement::TightFlank, LEGIBLE),
+    (Arrangement::Stacked, READABLE),
+    (Arrangement::TightRing, READABLE),
+    (Arrangement::Stacked, LEGIBLE),
+    (Arrangement::TightRing, LEGIBLE),
+    (Arrangement::TightStacked, LEGIBLE),
+];
 
 pub fn brew_plan(state: &CanvasState, size: (f32, f32)) -> BrewPlan {
     let roomy = plan_with(state, size, ROOMY);
     if roomy.0.min(1.0) >= READABLE {
         return roomy.1;
     }
-    let stacked_metrics = Metrics { pot: [204.0, 198.0], col_gap: 24.0, ..CROWDED };
-    let layouts: [&dyn Fn() -> (f32, BrewPlan); 6] = [
-        &|| plan_with(state, size, CROWDED),
-        &|| plan_flanked(state, size, CROWDED),
-        &|| plan_flanked(state, size, TIGHT),
-        &|| plan_stacked(state, size, stacked_metrics),
-        &|| plan_with(state, size, TIGHT),
-        &|| plan_stacked(state, size, Metrics { pot: [204.0, 198.0], ..TIGHT }),
-    ];
-    let order = [(0, READABLE), (1, LEGIBLE), (2, LEGIBLE), (3, READABLE), (4, READABLE), (3, LEGIBLE), (4, LEGIBLE), (5, LEGIBLE)];
-    let mut built: [Option<(f32, BrewPlan)>; 6] = Default::default();
-    for (index, floor) in order {
-        let (fit, plan) = built[index].get_or_insert_with(|| layouts[index]());
-        if *fit >= floor {
-            return plan.clone();
+    let mut built: Vec<(Arrangement, f32, BrewPlan)> = Vec::new();
+    for (arrangement, floor) in FALLBACKS {
+        let fit = match built.iter().find(|(made, _, _)| *made == arrangement) {
+            Some((_, fit, _)) => *fit,
+            None => {
+                let (fit, plan) = arrangement.build(state, size);
+                built.push((arrangement, fit, plan));
+                fit
+            }
+        };
+        if fit >= floor {
+            return built.iter().find(|(made, _, _)| *made == arrangement).map(|(_, _, plan)| plan.clone()).unwrap_or_else(|| roomy.1.clone());
         }
     }
-    let best_fit = built.iter().flatten().map(|(fit, _)| *fit).fold(0.0, f32::max);
-    if let Some((fit, plan)) = &built[2]
+    let best_fit = built.iter().map(|(_, fit, _)| *fit).fold(0.0, f32::max);
+    if let Some((_, fit, plan)) = built.iter().find(|(made, _, _)| *made == Arrangement::TightFlank)
         && *fit >= SHELVED
         && *fit >= best_fit * 0.9
     {
@@ -282,8 +315,7 @@ pub fn brew_plan(state: &CanvasState, size: (f32, f32)) -> BrewPlan {
     }
     built
         .into_iter()
-        .flatten()
-        .fold(None, |best: Option<(f32, BrewPlan)>, (fit, plan)| match best {
+        .fold(None, |best: Option<(f32, BrewPlan)>, (_, fit, plan)| match best {
             Some((top, _)) if top >= fit => best,
             _ => Some((fit, plan)),
         })
@@ -401,7 +433,7 @@ fn plan_stacked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
         let cols = bottle_count.div_ceil(rows);
         let rows = bottle_count.div_ceil(cols);
         let w = cols as f32 * bottle_size[0] + (cols - 1) as f32 * m.col_gap;
-        let h = stack_height(rows, bottle_size[1], m.bottle_gap);
+        let h = stack_height(rows, bottle_size[1], m.bottle_gap) + (cols - 1) as f32 * BOTTLE_STAIR;
         let lower_w = m.pot[0] + m.pot_to_bottles + w;
         let lower_h = pot_block_h.max(h);
         let fit = (usable_w / shelf_w.max(lower_w)).min(usable_h / (shelf_h + shelf_gap + lower_h));
@@ -439,9 +471,11 @@ fn plan_stacked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
     let pot_x = ((block_w - m.pot[0]) * 0.5).min(block_w - lower_w).max(0.0);
     let bottles_x = pot_x + m.pot[0] + m.pot_to_bottles;
     let bottles_top = lower_top + (lower_h - bottles_h) * 0.5;
+    let bottle_cols = bottles.len().div_ceil(bottle_rows.max(1)).max(1);
     for (index, id) in bottles.iter().enumerate() {
-        let x = bottles_x + (index / bottle_rows) as f32 * (bottle_size[0] + m.col_gap);
-        let y = bottles_top + (index % bottle_rows) as f32 * (bottle_size[1] + m.bottle_gap);
+        let col = index / bottle_rows;
+        let x = bottles_x + col as f32 * (bottle_size[0] + m.col_gap);
+        let y = bottles_top + (bottle_cols - 1 - col) as f32 * BOTTLE_STAIR + (index % bottle_rows) as f32 * (bottle_size[1] + m.bottle_gap);
         cards.push(BrewCard {
             id: id.clone(),
             role: BrewRole::Bottle,

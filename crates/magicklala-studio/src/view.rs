@@ -138,7 +138,38 @@ fn menu_item(spec: MenuItemSpec<'_>, t: &HearthPalette, action: fn(&mut StudioAp
     if spec.enabled { item.on_press(action) } else { item }
 }
 
-fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<El> {
+fn context_tether(card: [f32; 4], menu: [f32; 2], t: &HearthPalette) -> Option<El> {
+    let on_right = menu[0] >= card[0] + card[2];
+    let card_edge = if on_right { card[0] + card[2] } else { card[0] };
+    let menu_edge = if on_right { menu[0] } else { menu[0] + CONTEXT_MENU_SIZE.0 };
+    let menu_y = (card[1] + card[3] * 0.5).clamp(menu[1] + 20.0, menu[1] + 64.0);
+    let card_y = menu_y.clamp(card[1] + card[3] * 0.3, card[1] + card[3] * 0.7);
+    let left = card_edge.min(menu_edge) - 4.0;
+    let top = menu_y.min(card_y) - 4.0;
+    let width = (card_edge - menu_edge).abs() + 8.0;
+    let height = (menu_y - card_y).abs() + 8.0;
+    let from = [card_edge - left, card_y - top];
+    let to = [menu_edge - left, menu_y - top];
+    let bend = (to[0] - from[0]) * 0.55;
+    let points: Vec<[f32; 2]> = (0..=16)
+        .map(|step| {
+            let k = step as f32 / 16.0;
+            let c1 = [from[0] + bend, from[1]];
+            let c2 = [to[0] - bend, to[1]];
+            let mt = 1.0 - k;
+            [
+                mt * mt * mt * from[0] + 3.0 * mt * mt * k * c1[0] + 3.0 * mt * k * k * c2[0] + k * k * k * to[0],
+                mt * mt * mt * from[1] + 3.0 * mt * mt * k * c1[1] + 3.0 * mt * k * k * c2[1] + k * k * k * to[1],
+            ]
+        })
+        .collect();
+    let thread = points.windows(2).fold(rune::Shape::new(), |shape, pair| shape.line(pair[0], pair[1], 1.6, rune::LineCap::Round, t.gold));
+    let thread = magicklala_canvas::hearth::fill_ellipse(thread, from[0], from[1], 3.0, 3.0, t.gold);
+    let thread = magicklala_canvas::hearth::fill_ellipse(thread, to[0], to[1], 2.2, 2.2, t.gold);
+    Some(canvas(thread).key("context-tether").size(width, height).absolute(left, top))
+}
+
+fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<(El, Option<El>)> {
     let anchor = app.canvas.context_menu?;
     let view = app.canvas_size();
     let beside = app.canvas.context_card.filter(|_| app.canvas.selection.is_some()).map(|card| {
@@ -157,6 +188,7 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<El> {
     let x = px.min(view.0 - CONTEXT_MENU_SIZE.0 - 12.0).max(12.0);
     let plaque_top = if app.canvas.mode == WorkbenchMode::Cauldron { magicklala_canvas::brew_plan(&app.canvas, view).plaque_top } else { view.1 };
     let y = py.min(view.1 - CONTEXT_MENU_SIZE.1 - 12.0).min(plaque_top - CONTEXT_MENU_SIZE.1 - 8.0).max(12.0);
+    let tether = app.canvas.context_card.filter(|_| beside.is_some()).and_then(|card| context_tether(card, [x, y], t));
     let selected_card = app.canvas.selected_card();
     let selected_title = selected_card.map(|card| app.canvas.display_title(&card.id));
     let quick_add_title = app.specs.iter().find(|spec| spec.kind == QUICK_ADD_KIND).map_or(QUICK_ADD_KIND, |spec| spec.title.as_str());
@@ -262,7 +294,7 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<El> {
                 StudioApp::fit_view,
             )),
     };
-    Some(card)
+    Some((card, tether))
 }
 
 fn status_chip(app: &StudioApp, empty: bool, t: &HearthPalette) -> El {
@@ -363,7 +395,7 @@ fn canvas_with_menu(app: &StudioApp, t: &HearthPalette) -> El {
         board = board.child(empty_canvas_overlay(app, t));
     }
     match context_menu(app, t) {
-        Some(menu) => board.child(menu),
+        Some((menu, tether)) => board.children(tether).child(menu),
         None => board,
     }
 }
@@ -1679,11 +1711,8 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     let wired_editor = wired_source.map(|(source, wire)| {
         let unplug =
             sized_button("prompt-unplug", "Type it instead", false, false, 10.0, t, |_| {}).on_press(move |app: &mut StudioApp| app.unplug_wire(&wire));
-        let shell = if compact {
-            row().gap(8.0).items_center().child(label(source, 12.0, 650.0, t.ink).truncate().grow(1.0).min_w(0.0)).child(unplug)
-        } else {
-            col().gap(8.0).child(label(source, 12.5, 650.0, t.ink).wrap()).child(row().child(unplug))
-        };
+        let shell =
+            col().gap(if compact { 6.0 } else { 8.0 }).child(label(source, if compact { 12.0 } else { 12.5 }, 650.0, t.ink).wrap()).child(row().child(unplug));
         shell.key("prompt-field").w_full().padding(PROMPT_EDITOR_PADDING).radius(12.0).continuous_corners().fill(t.card).border(1.2, t.rule_2)
     });
     let editor = field.filter(|_| wired_editor.is_none()).and_then(|field| app.prompts.get(&card.id).map(|edit| (field, edit))).map(|(field, edit)| {
