@@ -185,10 +185,25 @@ fn bottle_neck(card: &BrewCard, multi: bool) -> [f32; 2] {
     [rect[0] + rect[2] * 0.474, rect[1] + rect[3] * neck_share]
 }
 
+pub fn pour_blocked(state: &CanvasState, id: &NodeId) -> bool {
+    state.card(id).is_some_and(|card| blocked_in(card, crate::view::cauldron_mood(state)))
+}
+
+fn blocked_in(card: &NodeCardModel, mood: CauldronMood) -> bool {
+    let hexed = card.status == ExecutionStatus::Failed || card.inputs.iter().any(|socket| socket.flagged);
+    mood == CauldronMood::Hexed && !hexed
+}
+
+pub fn ladle_line(state: &CanvasState, plan: &BrewPlan) -> Option<([f32; 2], [f32; 2])> {
+    let pot = plan.pot;
+    let (base, tip) = crate::hearth::ladle_ends(pot[2], pot[3], STIRS[state.toss_count as usize % STIRS.len()]);
+    Some(([pot[0] + base[0], pot[1] + base[1]], [pot[0] + tip[0], pot[1] + tip[1]]))
+}
+
 fn stream_for(state: &CanvasState, card: &NodeCardModel, mood: CauldronMood, p: &HearthPalette, arch_lift: f32) -> StreamStyle {
     let tone = category_tone(&card.category, state.light);
     let hexed = card.status == ExecutionStatus::Failed || card.inputs.iter().any(|socket| socket.flagged);
-    let blocked = mood == CauldronMood::Hexed && !hexed;
+    let blocked = blocked_in(card, mood);
     let untaken = state.has_run() && card.status == ExecutionStatus::Idle && !hexed && !blocked;
     let active = matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Running);
     let idle = !active && !untaken && !blocked && !hexed;

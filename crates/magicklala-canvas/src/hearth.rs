@@ -809,6 +809,13 @@ fn tinted_broth(mood: CauldronMood, p: &HearthPalette, tint: Option<Color>) -> (
     }
 }
 
+pub fn ladle_ends(width: f32, height: f32, stir: f32) -> ([f32; 2], [f32; 2]) {
+    let u = (width.min(height) / 240.0).clamp(0.55, 1.35);
+    let base = [width * 0.5 + 26.0 * u, height * 0.56 - 28.0 * u];
+    let tip = [base[0] + (22.0 * stir.cos() + 46.0 * stir.sin()) * u, base[1] + (22.0 * stir.sin() - 46.0 * stir.cos()) * u];
+    (base, tip)
+}
+
 pub fn hero_cauldron_shape(mood: CauldronMood, light: bool, width: f32, height: f32, tint: Option<Color>, stir: f32) -> Shape {
     let p = HearthPalette::for_theme(light);
     let (deep, mid, foam, spark) = tinted_broth(mood, &p, tint);
@@ -922,9 +929,8 @@ pub fn hero_cauldron_shape(mood: CauldronMood, light: bool, width: f32, height: 
     s = fill_star4(s, cx + 7.5 * u, cy + 13.0 * u, 5.2 * u, 1.6 * u, p.gold_hi);
 
     let rim_y = cy - 30.0 * u;
-    let base = [cx + 26.0 * u, rim_y + 2.0 * u];
+    let (base, tip) = ladle_ends(width, height, stir);
     let turn = |dx: f32, dy: f32| [base[0] + (dx * stir.cos() - dy * stir.sin()) * u, base[1] + (dx * stir.sin() + dy * stir.cos()) * u];
-    let tip = turn(22.0, -46.0);
     let knob = turn(18.5, -40.5);
     let ladle_stem = Path::new().move_to(base).line_to(tip);
     s = s.stroke_path(&ladle_stem, 9.0 * u, LineCap::Round, p.wood);

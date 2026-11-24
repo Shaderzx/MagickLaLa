@@ -4655,6 +4655,286 @@ fn true_runs(db_path: &Path) -> Result<serde_json::Value, String> {
         "samples": samples,
     }))
 }
+fn segments_cross(a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]) -> bool {
+    let turn = |p: [f32; 2], q: [f32; 2], r: [f32; 2]| (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+    let (d1, d2, d3, d4) = (turn(c, d, a), turn(c, d, b), turn(a, b, c), turn(a, b, d));
+    ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0)) && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
+}
+
+fn clear_signals() -> Result<serde_json::Value, String> {
+    let mut text = magicklala_studio::studio_text_system();
+    let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
+        id: NodeId::from(id),
+        kind: kind.to_owned(),
+        position: [x * 260.0, 0.0],
+        config,
+    };
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let open = |spell: SpellGraph, size: (f32, f32)| {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt
+    };
+    let words = |rt: &Runtime<StudioApp>, key: &str| text_lines_under(rt, key).into_iter().map(|(line, _)| line).collect::<Vec<_>>().join(" ");
+
+    let mut research = open(example("parallel_research.json")?, (1280.0, 800.0));
+    run_once(&mut research)?;
+    let failed = research.state.canvas.nodes.iter().find(|card| card.status == ExecutionStatus::Failed).map(|card| card.id.clone()).ok_or("nothing failed")?;
+    let lit: Vec<String> = research
+        .state
+        .canvas
+        .nodes
+        .iter()
+        .filter(|card| card.status == ExecutionStatus::Succeeded)
+        .filter(|card| magicklala_canvas::cauldron::pour_blocked(&research.state.canvas, &card.id))
+        .map(|card| card.id.0.clone())
+        .collect();
+    let picked = failed.clone();
+    research.update(move |app, _| {
+        app.canvas.select(Some(picked.clone()));
+        app.right_tab = RightTab::Inspector;
+    });
+    research.frame(1.0);
+    let headline = words(&research, "inspector-error");
+    research.update(|app, _| {
+        app.canvas.select(None);
+        app.right_tab = RightTab::Trace;
+    });
+    research.frame(2.0);
+    let trace_words = words(&research, "inspector-scroll");
+    let failure = json!({ "headlineHasCause": headline.contains("gateway"), "traceHasCause": trace_words.contains("gateway"), "dimmedFinishedPours": lit });
+
+    let mut tight = open(example("parallel_research.json")?, (960.0, 640.0));
+    run_once(&mut tight)?;
+    let tight_failed =
+        tight.state.canvas.nodes.iter().find(|card| card.status == ExecutionStatus::Failed).map(|card| card.id.clone()).ok_or("nothing failed")?;
+    tight.update(move |app, _| {
+        app.canvas.select(Some(tight_failed.clone()));
+        app.right_tab = RightTab::Inspector;
+    });
+    tight.frame(2.0);
+    let scroll = layout_rect(&tight, "inspector-scroll").ok_or("no inspector")?;
+    let tile = layout_rect(&tight, "model-picker").ok_or("no model tile")?;
+    let tile_whole = inside(scroll, tile) || tile[1] >= scroll[1] + scroll[3] - 0.5;
+
+    let mut grim = open(StudioApp::from_registry().spell.clone(), (960.0, 640.0));
+    click(&mut grim, "mode-grimoire")?;
+    grim.frame(1.0);
+    let name = grim.state.spell.name.clone();
+    let title_whole = text_lines_under(&grim, "toolbar-left").into_iter().find(|(line, _)| line == &name).is_some_and(|(line, rect)| {
+        let (natural, _) = text.measure(&line, rune::TextStyle::new(14.5, 750.0), 1.0);
+        natural <= rect[2] + 2.0
+    });
+
+    let mut mismatch = SpellGraph::new("Mismatched Agent");
+    mismatch.nodes = vec![place("tick", "event/on_tick", 0.0, serde_json::Value::Null), place("say", "io/send_message", 1.0, serde_json::Value::Null)];
+    mismatch.wires = vec![wire("m1", ("tick", "out"), ("say", "in")), wire("m2", ("tick", "tick"), ("say", "content"))];
+    let mut wrong = open(mismatch, (1280.0, 800.0));
+    click(&mut wrong, "validate")?;
+    wrong.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("say")));
+        app.right_tab = RightTab::Inspector;
+    });
+    wrong.frame(1.0);
+    let wrong_headline = words(&wrong, "inspector-error");
+
+    let mut named = open(tasting_spell(), (1280.0, 800.0));
+    named.update(|app, _| {
+        app.add_variable();
+        app.add_variable();
+        app.add_variable();
+    });
+    named.update(|app, _| {
+        let last = app.var_name_edits.len() - 1;
+        app.var_name_edits[last - 2] = rune::TextEdit::new("twin");
+        app.var_name_edits[last - 1] = rune::TextEdit::new("twin");
+        app.var_name_edits[last] = rune::TextEdit::new("");
+        app.sync_spell();
+        app.canvas.select(None);
+        app.right_tab = RightTab::Variables;
+    });
+    click(&mut named, "validate")?;
+    named.frame(1.0);
+    let rows = named.state.var_name_edits.len();
+    let name_errors: Vec<String> = (0..rows).filter_map(|idx| Some(words(&named, &format!("var-name-error-{idx}"))).filter(|line| !line.is_empty())).collect();
+    let name_plaque = named.state.canvas.brew_summary.clone().unwrap_or_default();
+
+    let mut stacked = SpellGraph::new("Many Doors");
+    stacked.nodes = vec![place("trigger", "event/on_message", 0.0, serde_json::Value::Null)];
+    let mut previous = "trigger".to_owned();
+    for index in 0..7 {
+        let id = format!("wait_{index}");
+        stacked.nodes.push(place(&id, "time/delay", 1.0 + index as f32, json!({ "ms": 0 })));
+        stacked.wires.push(wire(&format!("c{index}"), (&previous, "out"), (&id, "in")));
+        previous = id;
+    }
+    stacked.nodes.push(place("route", "flow/switch", 8.0, json!({ "cases": ["alpha", "beta", "gamma"] })));
+    stacked.wires.push(wire("cr", (&previous, "out"), ("route", "in")));
+    stacked.wires.push(wire("cv", ("trigger", "content"), ("route", "value")));
+    for (index, case) in ["alpha", "beta", "gamma", "default"].iter().enumerate() {
+        let id = format!("send_{case}");
+        stacked.nodes.push(place(&id, "io/send_message", 9.0, serde_json::Value::Null));
+        stacked.wires.push(wire(&format!("s{index}"), ("route", case), (&id, "in")));
+        stacked.wires.push(wire(&format!("t{index}"), ("trigger", "content"), (&id, "content")));
+    }
+    let mut stacked_crossings = Vec::new();
+    let mut stacked_lanes = Vec::new();
+    for size in [(960.0_f32, 640.0_f32), (1280.0, 800.0)] {
+        let rt = open(stacked.clone(), size);
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let s = plan.scale;
+        let ribbons = magicklala_canvas::cauldron::ribbon_paths(&plan);
+        for (index, ribbon) in ribbons.iter().enumerate() {
+            let tap = ribbon.first().copied().unwrap_or_default();
+            let far = |point: &&[f32; 2]| (point[0] - tap[0]).hypot(point[1] - tap[1]) > 40.0 * s;
+            let mine: Vec<[f32; 2]> = ribbon.iter().filter(far).copied().collect();
+            for other in ribbons.iter().skip(index + 1) {
+                let theirs: Vec<[f32; 2]> = other.iter().filter(far).copied().collect();
+                let crossed = mine.windows(2).any(|a| theirs.windows(2).any(|b| segments_cross(a[0], a[1], b[0], b[1])));
+                if crossed {
+                    stacked_crossings.push(format!("{}: ribbon {index} crosses another", size.0));
+                }
+            }
+        }
+        if plan.lanes.is_some() {
+            let pours = magicklala_canvas::cauldron::pour_paths(&rt.state.canvas, &plan);
+            for (index, (id, points)) in pours.iter().enumerate() {
+                let body = &points[..points.len() * 3 / 4];
+                for (other_id, other) in pours.iter().skip(index + 1) {
+                    let other_body = &other[..other.len() * 3 / 4];
+                    let touching = body.iter().filter(|point| other_body.iter().any(|near| (near[0] - point[0]).hypot(near[1] - point[1]) < 2.0)).count();
+                    if touching > 2 {
+                        stacked_lanes.push(format!("{}: {} shares {touching} points with {}", size.0, id.0, other_id.0));
+                    }
+                }
+            }
+        }
+    }
+    let mut hexed_branches = stacked.clone();
+    hexed_branches.wires.retain(|wire| wire.id.0 != "t0");
+    let mut hexed_rt = open(hexed_branches, (960.0, 640.0));
+    click(&mut hexed_rt, "validate")?;
+    let branch_moods: Vec<String> = ["send_beta", "send_gamma"]
+        .iter()
+        .filter_map(|id| {
+            hexed_rt
+                .state
+                .canvas
+                .card(&NodeId::from(*id))
+                .map(|card| format!("{:?}", magicklala_canvas::view::branch_bottle_mood(&hexed_rt.state.canvas, card)))
+        })
+        .collect();
+
+    let long_case = "priority_enterprise_escalations_overnight";
+    let mut long_routes = SpellGraph::new("Long Routes");
+    long_routes.nodes = vec![
+        place("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        place("route", "flow/switch", 1.0, json!({ "cases": [long_case] })),
+        place("send_long", "io/send_message", 2.0, serde_json::Value::Null),
+        place("send_rest", "io/send_message", 2.0, serde_json::Value::Null),
+    ];
+    long_routes.wires = vec![
+        wire("l1", ("trigger", "out"), ("route", "in")),
+        wire("l2", ("trigger", "content"), ("route", "value")),
+        wire("l3", ("route", long_case), ("send_long", "in")),
+        wire("l4", ("route", "default"), ("send_rest", "in")),
+        wire("l5", ("trigger", "content"), ("send_long", "content")),
+        wire("l6", ("trigger", "content"), ("send_rest", "content")),
+    ];
+    let mut long_rt = open(long_routes, (960.0, 640.0));
+    long_rt.update(move |app, _| app.run_payload = json!({ "channel": "studio", "sender": "studio", "content": long_case }));
+    run_once(&mut long_rt)?;
+    long_rt.frame(3.0);
+    let card = layout_rect(&long_rt, "node-send_long").ok_or("no long bottle")?;
+    let spilled: Vec<String> = text_lines_under(&long_rt, "node-send_long")
+        .into_iter()
+        .filter(|(line, rect)| !line.chars().all(|c| c.is_ascii_digit()) && !inside(card, *rect))
+        .map(|(line, _)| line)
+        .collect();
+    let strip = layout_rect(&long_rt, "trace-strip").ok_or("no log")?;
+    let result = layout_rect(&long_rt, "log-result");
+    let result_inside = result.is_some_and(|rect| inside(strip, rect));
+
+    let mut structured = open(dozen_ingredient_spell(), (1280.0, 800.0));
+    let json_card = NodeId::from(node_of_kind(&structured.state, "ai/structured_json").ok_or("no structured json")?.as_str());
+    structured.update(move |app, _| {
+        app.canvas.select(Some(json_card.clone()));
+        app.right_tab = RightTab::Inspector;
+    });
+    structured.frame(1.0);
+    let structured_model = layout_rect(&structured, "model-picker").is_some();
+
+    let mut warm = SpellGraph::new("Two Minds");
+    warm.nodes = vec![
+        place("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        place("first", "ai/generate_text", 1.0, json!({ "prompt": "{{content}}", "temperature": 0.4 })),
+        place("second", "ai/generate_text", 2.0, json!({ "prompt": "{{content}}", "temperature": 0.4 })),
+        place("reply", "io/send_message", 3.0, serde_json::Value::Null),
+    ];
+    warm.wires = vec![
+        wire("w1", ("trigger", "out"), ("first", "in")),
+        wire("w2", ("first", "out"), ("second", "in")),
+        wire("w3", ("second", "out"), ("reply", "in")),
+        wire("w4", ("second", "text"), ("reply", "content")),
+    ];
+    warm.variables = vec![magicklala_graph::VariableDef {
+        name: "temperature".to_owned(),
+        ty: SocketType::Float,
+        default: Some(magicklala_graph::Value::Float(0.4)),
+        exposed: false,
+    }];
+    let mut warm_rt = open(warm, (1280.0, 800.0));
+    warm_rt.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("first")));
+        app.adjust_temperature(0.1);
+    });
+    let second_temp = warm_rt.state.configs.get(&NodeId::from("second")).and_then(|config| config.get("temperature")).and_then(serde_json::Value::as_f64);
+    let variable_temp = warm_rt.state.spell.variables.first().and_then(|variable| variable.default.clone()).map(|value| format!("{value:?}"));
+    let temperature = json!({ "second": second_temp, "variable": variable_temp });
+
+    let dozen = open(dozen_ingredient_spell(), (960.0, 640.0));
+    let dozen_plan = magicklala_canvas::brew_plan(&dozen.state.canvas, dozen.state.canvas_size());
+    let ladle_crossed = magicklala_canvas::cauldron::ladle_line(&dozen.state.canvas, &dozen_plan).is_some_and(|(a, b)| {
+        magicklala_canvas::cauldron::pour_paths(&dozen.state.canvas, &dozen_plan)
+            .iter()
+            .any(|(_, points)| points.windows(2).any(|pair| segments_cross(pair[0], pair[1], a, b)))
+    });
+
+    let mut pull = open(echo_spell(), (1280.0, 800.0));
+    click(&mut pull, "mode-grimoire")?;
+    pull.frame(1.0);
+    drag(&mut pull, "socket-reply-in-content", (0.0, 140.0))?;
+    pull.update(|app, _| {
+        app.sync_edits();
+    });
+    let pulled = pull.state.canvas.wires.iter().filter(|wire| wire.to_node.0 == "reply" && wire.to_socket == "content").count();
+
+    Ok(json!({
+        "failure": failure,
+        "tileWhole": tile_whole,
+        "grimoireTitleWhole": title_whole,
+        "wrongHeadline": wrong_headline,
+        "nameErrors": name_errors,
+        "namePlaque": name_plaque,
+        "stackedCrossings": stacked_crossings,
+        "stackedLanes": stacked_lanes,
+        "branchMoods": branch_moods,
+        "longSpilled": spilled,
+        "longResultInside": result_inside,
+        "structuredModel": structured_model,
+        "temperature": temperature,
+        "ladleCrossed": ladle_crossed,
+        "pulledWires": pulled,
+    }))
+}
 fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
@@ -5554,6 +5834,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("plain-sight") => plain_sight(),
         Some("close-quarters") => close_quarters(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("true-runs") => true_runs(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("clear-signals") => clear_signals(),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("drawn-truths") => drawn_truths(),

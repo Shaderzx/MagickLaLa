@@ -1425,6 +1425,25 @@ test('Studio keeps its promises: a prompt typed over a shelf shortcut stays type
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});test('Every signal is clear: a failed step names its real cause while finished pours stay lit, 960 model tiles never slice, the 960 Grimoire keeps the potion name, a wrong-type wire says so, bad variable names are marked on their rows and the plaque, stacked ribbons never cross and their bottles dim on a hex, long route names stay inside, Structured JSON shows its model, temperature changes one step, the ladle never crosses a pour, and a wire can be pulled off an input', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['clear-signals']);
+
+  expect(report.failure).toEqual({ headlineHasCause: true, traceHasCause: true, dimmedFinishedPours: [] });
+  expect(report.tileWhole).toBe(true);
+  expect(report.grimoireTitleWhole).toBe(true);
+  expect(report.wrongHeadline).not.toContain('needs "content"');
+  expect(report.wrongHeadline).toContain('Int');
+  expect(report.nameErrors).toEqual(['Duplicate name', 'Needs a name']);
+  expect(report.namePlaque).not.toBe('Hexed');
+  expect(report.stackedCrossings).toEqual([]);
+  expect(report.stackedLanes).toEqual([]);
+  expect(report.branchMoods).toEqual(['Hexed', 'Hexed']);
+  expect(report.longSpilled).toEqual([]);
+  expect(report.longResultInside).toBe(true);
+  expect(report.structuredModel).toBe(true);
+  expect(report.temperature).toEqual({ second: 0.4, variable: 'Float(0.4)' });
+  expect(report.ladleCrossed).toBe(false);
+  expect(report.pulledWires).toBe(0);
 });test('A brew locks the recipe and the bottles tell the truth: typing, saving, adding, dragging cards and drawing wires all wait until the brew ends and the lit result survives, branch bottles show no step numbers before a brew, a running bottle simmers without a check, a published branch potion shows its sealed version on the bottle, and thirteen-step and thirty-eight-step brews and a many-issue Check keep every log chip and the result inside the log at 960 and 1280', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-locks-'));
   try {

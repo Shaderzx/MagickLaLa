@@ -412,13 +412,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     let simmering = card.status == ExecutionStatus::Running;
     let untaken = has_run && !taken && !simmering && state.brewed_clean();
     let sealed = state.release_badge.is_some() && !has_run;
-    let bottle_mood = if taken {
-        CauldronMood::Brewed
-    } else if untaken {
-        CauldronMood::Hexed
-    } else {
-        CauldronMood::Ready
-    };
+    let bottle_mood = branch_bottle_mood(state, card);
     let bottle_h = 66.0;
     let route = crate::cauldron::route_label(state, &card.id);
     let title = state.display_title(&card.id);
@@ -511,6 +505,18 @@ pub(crate) fn branch_bottle_view<S: 'static>(
         .child(bottle_art)
         .child(tag)
         .on_press(move |s: &mut S| lens(s).select(Some(select_id.clone())))
+}
+
+pub fn branch_bottle_mood(state: &CanvasState, card: &NodeCardModel) -> CauldronMood {
+    let taken = card.status == ExecutionStatus::Succeeded;
+    let simmering = card.status == ExecutionStatus::Running;
+    if taken {
+        CauldronMood::Brewed
+    } else if state.has_run() && !simmering && state.brewed_clean() {
+        CauldronMood::Hexed
+    } else {
+        CauldronMood::Ready
+    }
 }
 
 pub fn bottle_art_mood(state: &CanvasState, output: &NodeCardModel) -> CauldronMood {
