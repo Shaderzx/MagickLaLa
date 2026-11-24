@@ -845,7 +845,8 @@ fn grimoire_card_view<S: 'static>(
     lens: fn(&mut S) -> &mut CanvasState,
 ) -> El {
     let zoom = state.camera.zoom;
-    let dimmed = state.has_run() && card.status == ExecutionStatus::Idle && !card.selected;
+    let shelved = state.is_shelved(&card.id);
+    let dimmed = (state.has_run() && card.status == ExecutionStatus::Idle && !card.selected) || shelved;
     let tone = category_tone(&card.category, state.light);
     let [x, y] = state.camera.world_to_screen(card.position);
     let card_w = card.size[0] * zoom;
@@ -880,7 +881,7 @@ fn grimoire_card_view<S: 'static>(
                 .children((zoom >= DETAIL_ZOOM).then(|| text(&card.kind).font(TextStyle::new(kind_size, 500.0).mono()).color(kind_color).truncate())),
         );
     let perched_badge = status_box(card.status, card.duration_ms, p, zoom).or_else(|| {
-        dimmed.then(|| {
+        (dimmed || shelved).then(|| {
             let badge_bg = p.untaken_pill_fill();
             let badge_ink = p.untaken_pill_ink();
             row()
@@ -889,7 +890,7 @@ fn grimoire_card_view<S: 'static>(
                 .radius((6.5 * zoom).max(6.0))
                 .fill(badge_bg)
                 .border(1.0, dimmed_border)
-                .child(text("Untaken").font(TextStyle::new((11.0 * zoom).clamp(11.0, 12.0), 650.0)).color(badge_ink))
+                .child(text(if shelved { "Set aside" } else { "Untaken" }).font(TextStyle::new((11.0 * zoom).clamp(11.0, 12.0), 650.0)).color(badge_ink))
         })
     });
     let header = row()

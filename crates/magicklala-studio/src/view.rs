@@ -1169,10 +1169,8 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
         return list.child(col().w_full().py(24.0).items_center().gap(6.0).child(label("No variables yet", 12.5, 500.0, t.mute)));
     }
     app.spell.variables.iter().enumerate().fold(list, |list, (idx, variable)| {
-        let remove_name = variable.name.clone();
-        let toggle_name = variable.name.clone();
-        let menu_open = app.open_var_type.as_deref() == Some(variable.name.as_str());
-        let pending_reset = app.pending_type_reset.as_ref().filter(|(n, _)| n == &variable.name).map(|(_, ty)| *ty);
+        let menu_open = app.open_var_type == Some(idx);
+        let pending_reset = app.pending_type_reset.filter(|(open, _)| *open == idx).map(|(_, ty)| ty);
         let (bound_hint, bound_active) = app.variable_binding_hint(&variable.name);
         let name_widget = if let Some(name_edit) = app.var_name_edits.get(idx) {
             text_input(name_edit, font(12.0, 700.0).mono())
@@ -1218,7 +1216,7 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
                     .child(label(format!("{:?}", variable.ty), 11.5, 650.0, t.ink))
                     .child(canvas(chevron_down_shape(t.ink_2)).size(9.0, 7.0))
                     .on_press(move |app: &mut StudioApp| {
-                        app.toggle_var_type_menu(&toggle_name);
+                        app.toggle_var_type_menu_at(idx);
                     }),
             )
             .child(
@@ -1232,7 +1230,7 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
                     .border(1.0, t.rule)
                     .child(label("Remove", 10.5, 600.0, t.ink_2))
                     .on_press(move |app: &mut StudioApp| {
-                        app.remove_variable(&remove_name);
+                        app.remove_variable_at(idx);
                     }),
             );
         let row_top = if app.compact_toolbar() {
@@ -1319,7 +1317,6 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
             );
         }
         if menu_open {
-            let var_name = variable.name.clone();
             let current_ty = variable.ty;
             let choices = [SocketType::String, SocketType::Int, SocketType::Float, SocketType::Bool, SocketType::Json, SocketType::Any];
             let dropdown = choices.into_iter().fold(
@@ -1334,7 +1331,6 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
                     .border(1.2, t.broth_mid),
                 |menu, choice| {
                     let selected = choice == current_ty;
-                    let pick_name = var_name.clone();
                     menu.child(
                         row()
                             .w_full()
@@ -1350,7 +1346,7 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
                             } else {
                                 el().size(11.0, 11.0)
                             })
-                            .on_press(move |app: &mut StudioApp| app.set_variable_type(&pick_name, choice)),
+                            .on_press(move |app: &mut StudioApp| app.set_variable_type_at(idx, choice)),
                     )
                 },
             );
@@ -1581,7 +1577,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     }
     let id = card.id.clone();
     let field = editable_field(&card.kind);
-    let editor_height = if has_error { 86.0 } else { prompt_editor_height(app.size) };
+    let editor_height = if has_error || (compact && app.trace_height() > IDLE_TRACE_HEIGHT) { 86.0 } else { prompt_editor_height(app.size) };
     let wired_source = field.and_then(|field| {
         app.canvas.wires.iter().find(|wire| wire.to_node == card.id && wire.to_socket == field).map(|wire| {
             let title = app.canvas.card(&wire.from_node).map_or_else(|| wire.from_node.0.clone(), |source| app.canvas.display_title(&source.id));

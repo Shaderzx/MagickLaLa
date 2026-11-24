@@ -139,6 +139,26 @@ fn socket_pairs(wires: &[Wire]) -> Vec<(SocketRef, SocketRef)> {
         .collect()
 }
 
+fn same_recipe(a: &SpellGraph, b: &SpellGraph) -> bool {
+    let steps = |graph: &SpellGraph| {
+        let mut steps: Vec<(String, String, String)> = graph.nodes.iter().map(|node| (node.id.0.clone(), node.kind.clone(), node.config.to_string())).collect();
+        steps.sort();
+        steps
+    };
+    let links = |graph: &SpellGraph| {
+        let mut links: Vec<(String, String, String, String)> =
+            graph.wires.iter().map(|wire| (wire.from_node.0.clone(), wire.from_socket.clone(), wire.to_node.0.clone(), wire.to_socket.clone())).collect();
+        links.sort();
+        links
+    };
+    a.name == b.name
+        && a.description == b.description
+        && a.variables == b.variables
+        && a.subgraphs == b.subgraphs
+        && steps(a) == steps(b)
+        && links(a) == links(b)
+}
+
 fn recipe_from(spell: &SpellGraph, canvas: &CanvasState, specs: &[NodeSpec]) -> SpellGraph {
     let mut graph = spell.clone();
     graph.shelf.clear();
@@ -778,8 +798,8 @@ pub struct StudioApp {
     pub frozen_edit: TextEdit,
     pub trace_expanded: bool,
     pub model_menu_open: bool,
-    pub open_var_type: Option<String>,
-    pub pending_type_reset: Option<(String, SocketType)>,
+    pub open_var_type: Option<usize>,
+    pub pending_type_reset: Option<(usize, SocketType)>,
     pub pending_restore_version: Option<u32>,
     pub pending_switch: Option<PendingSwitch>,
     pub var_name_edits: Vec<TextEdit>,
@@ -1142,29 +1162,11 @@ impl StudioApp {
     }
 
     pub fn remove_variable_at(&mut self, index: usize) {
-        if let Some(name) = self.spell.variables.get(index).map(|variable| variable.name.clone()) {
-            self.remove_variable(&name);
-        }
-    }
-
-    pub fn toggle_var_type_menu_at(&mut self, index: usize) {
-        if let Some(name) = self.spell.variables.get(index).map(|variable| variable.name.clone()) {
-            self.toggle_var_type_menu(&name);
-        }
-    }
-
-    pub fn set_variable_type_at(&mut self, index: usize, ty: SocketType) {
-        if let Some(name) = self.spell.variables.get(index).map(|variable| variable.name.clone()) {
-            self.set_variable_type(&name, ty);
-        }
-    }
-
-    pub fn remove_variable(&mut self, name: &str) {
-        if self.is_running() {
+        if self.is_running() || index >= self.spell.variables.len() {
             return;
         }
-        let Some(index) = self.spell.variables.iter().position(|v| v.name == name) else { return };
         let variable = self.spell.variables.remove(index);
+        let name = variable.name.clone();
         let name_edit = if index < self.var_name_edits.len() { self.var_name_edits.remove(index) } else { TextEdit::new(&variable.name) };
         let default_edit = if index < self.var_default_edits.len() {
             self.var_default_edits.remove(index)
@@ -1173,36 +1175,31 @@ impl StudioApp {
         };
         self.undo_stack.push(UndoEntry::Variable { index, variable, name_edit, default_edit });
         self.undo_banner = Some(format!("Removed variable {name}"));
-        if self.open_var_type.as_deref() == Some(name) {
-            self.open_var_type = None;
-        }
-        if self.pending_type_reset.as_ref().is_some_and(|(n, _)| n == name) {
-            self.pending_type_reset = None;
-        }
+        self.open_var_type = self.open_var_type.filter(|open| *open != index).map(|open| if open > index { open - 1 } else { open });
+        self.pending_type_reset = self.pending_type_reset.filter(|(open, _)| *open != index).map(|(open, ty)| (if open > index { open - 1 } else { open }, ty));
         self.validation = ValidationState::Unchecked;
         self.canvas.validated = false;
         self.dirty = true;
         self.sync_spell();
     }
 
-    pub fn toggle_var_type_menu(&mut self, name: &str) {
+    pub fn toggle_var_type_menu_at(&mut self, index: usize) {
         if self.is_running() {
             return;
         }
         self.pending_type_reset = None;
-        if self.open_var_type.as_deref() == Some(name) {
-            self.open_var_type = None;
-        } else {
-            self.open_var_type = Some(name.to_owned());
-        }
+        self.open_var_type = if self.open_var_type == Some(index) { None } else { Some(index) };
     }
 
-    pub fn set_variable_type(&mut self, name: &str, ty: SocketType) {
-        if self.is_running() {
+    fn reset_value(ty: SocketType) -> Option<Value> {
+        (ty != SocketType::Json).then(|| Self::zero_value(ty))
+    }
+
+    pub fn set_variable_type_at(&mut self, index: usize, ty: SocketType) {
+        if self.is_running() || index >= self.spell.variables.len() {
             return;
         }
         self.open_var_type = None;
-        let Some(index) = self.spell.variables.iter().position(|v| v.name == name) else { return };
         if self.spell.variables[index].ty == ty {
             self.pending_type_reset = None;
             return;
@@ -1210,7 +1207,7 @@ impl StudioApp {
         let raw = self.var_default_edits.get(index).map(|e| e.text.clone()).unwrap_or_else(|| Self::format_value(self.spell.variables[index].default.as_ref()));
         if raw.trim().is_empty() {
             self.spell.variables[index].ty = ty;
-            self.spell.variables[index].default = Some(Self::zero_value(ty));
+            self.spell.variables[index].default = Self::reset_value(ty);
             if let Some(edit) = self.var_default_edits.get_mut(index) {
                 *edit = TextEdit::new(Self::format_value(self.spell.variables[index].default.as_ref()));
             }
@@ -1227,7 +1224,7 @@ impl StudioApp {
             self.pending_type_reset = None;
             self.dirty = true;
         } else {
-            self.pending_type_reset = Some((name.to_owned(), ty));
+            self.pending_type_reset = Some((index, ty));
         }
     }
 
@@ -1235,11 +1232,12 @@ impl StudioApp {
         if self.is_running() {
             return;
         }
-        let Some((name, ty)) = self.pending_type_reset.take() else { return };
-        let Some(index) = self.spell.variables.iter().position(|v| v.name == name) else { return };
+        let Some((index, ty)) = self.pending_type_reset.take() else { return };
+        if index >= self.spell.variables.len() {
+            return;
+        }
         self.spell.variables[index].ty = ty;
-        let val = Self::zero_value(ty);
-        self.spell.variables[index].default = Some(val);
+        self.spell.variables[index].default = Self::reset_value(ty);
         if let Some(edit) = self.var_default_edits.get_mut(index) {
             *edit = TextEdit::new(Self::format_value(self.spell.variables[index].default.as_ref()));
         }
@@ -1323,6 +1321,7 @@ impl StudioApp {
                 self.aside_bridges.insert(entry.node.clone(), bridges);
             }
         }
+        self.rebuild_bridges();
         let viewport = self.canvas_size();
         self.canvas.fit(viewport);
         self.canvas.select(self.canvas.nodes.iter().find(|card| card.kind == "ai/generate_text").map(|card| card.id.clone()));
@@ -1660,6 +1659,7 @@ impl StudioApp {
         }
         match toss {
             magicklala_canvas::Toss::Aside(id) => {
+                let shortcuts: Vec<(SocketRef, SocketRef)> = self.aside_bridges.values().flatten().cloned().collect();
                 let removed: Vec<(SocketRef, SocketRef)> = self
                     .canvas
                     .wires
@@ -1668,26 +1668,28 @@ impl StudioApp {
                     .map(|wire| {
                         (SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()), SocketRef::new(wire.to_node.clone(), wire.to_socket.clone()))
                     })
+                    .filter(|pair| !shortcuts.contains(pair))
                     .collect();
                 if removed.is_empty() {
-                    self.canvas.shelve(&id);
+                    self.canvas.set_aside(&id);
+                    self.rebuild_bridges();
                     self.validation = ValidationState::Unchecked;
                     self.sync_spell();
                     return;
                 }
-                let bridges = self.bridge_around(&id);
-                let title = self.canvas.display_title(&id);
+                self.canvas.set_aside(&id);
                 self.aside_wires.insert(id.clone(), removed.clone());
-                self.aside_bridges.insert(id.clone(), bridges.clone());
+                self.rebuild_bridges();
+                let title = self.canvas.display_title(&id);
+                let bridges = self.aside_bridges.get(&id).cloned().unwrap_or_default();
                 self.undo_stack.push(UndoEntry::Aside { id, wires: removed, bridges });
                 self.undo_banner = Some(format!("Set aside {title}"));
             }
             magicklala_canvas::Toss::IntoPot(id) => {
                 self.canvas.unshelve(&id);
                 let stash = self.aside_wires.remove(&id).unwrap_or_default();
-                if let Some(bridges) = self.aside_bridges.remove(&id) {
-                    self.drop_bridges(&bridges);
-                }
+                let stale: Vec<(SocketRef, SocketRef)> = self.aside_bridges.drain().flat_map(|(_, wires)| wires).collect();
+                self.drop_bridges(&stale);
                 let (waiting, stash): (Vec<_>, Vec<_>) = stash.into_iter().partition(|(from, to)| {
                     let other = if from.node == id { &to.node } else { &from.node };
                     self.canvas.is_shelved(other)
@@ -1711,11 +1713,13 @@ impl StudioApp {
                         restored += 1;
                     }
                 }
-                if restored == 0 {
-                    let Some(kind) = self.canvas.card(&id).map(|card| card.kind.clone()) else { return };
-                    let Some(spec) = self.specs.iter().find(|spec| spec.kind == kind).cloned() else { return };
+                if restored == 0
+                    && let Some(kind) = self.canvas.card(&id).map(|card| card.kind.clone())
+                    && let Some(spec) = self.specs.iter().find(|spec| spec.kind == kind).cloned()
+                {
                     self.auto_wire_cauldron_ingredient(&id, &spec);
                 }
+                self.rebuild_bridges();
                 self.canvas.toss_count += 1;
             }
         }
@@ -2030,6 +2034,9 @@ impl StudioApp {
     }
 
     pub fn sync_spell(&mut self) {
+        if self.aside_wires.keys().chain(self.aside_bridges.keys()).any(|id| !self.canvas.is_shelved(id)) {
+            self.rebuild_bridges();
+        }
         self.sync_edits();
     }
 
@@ -2074,6 +2081,11 @@ impl StudioApp {
             self.canvas.clear_run_marks();
             self.canvas.last_brew = None;
             self.canvas.brew_total_ms = None;
+            self.validation = ValidationState::Unchecked;
+            self.canvas.invalid_brew = false;
+            self.canvas.validated = false;
+            self.hex_findings.clear();
+            self.trace.retain(|line| line.kind != "RunRejected");
         }
         self.spell.nodes = nodes;
         self.spell.wires = wires;
@@ -2081,7 +2093,8 @@ impl StudioApp {
         self.draft_status = None;
         self.publish_status = None;
         self.store_error = None;
-        self.active_release_version = None;
+        self.active_release_version = self.live_release_matching_recipe();
+        self.canvas.release_badge = self.active_release_version.map(|version| format!("v{version}"));
         self.dirty = true;
         self.canvas.spell_name = self.spell.name.clone();
         self.canvas.release_badge = None;
@@ -2221,6 +2234,94 @@ impl StudioApp {
         bridges
     }
 
+    fn rebuild_bridges(&mut self) {
+        let stale: Vec<(SocketRef, SocketRef)> = self.aside_bridges.drain().flat_map(|(_, wires)| wires).collect();
+        self.drop_bridges(&stale);
+        let canvas = &self.canvas;
+        self.aside_wires.retain(|id, _| canvas.is_shelved(id));
+        let mut known: Vec<(SocketRef, SocketRef)> = self
+            .canvas
+            .wires
+            .iter()
+            .map(|wire| (SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()), SocketRef::new(wire.to_node.clone(), wire.to_socket.clone())))
+            .collect();
+        for pair in self.aside_wires.values().flatten() {
+            if !known.contains(pair) {
+                known.push(pair.clone());
+            }
+        }
+        let shelved: Vec<NodeId> = self.canvas.nodes.iter().filter(|card| self.canvas.is_shelved(&card.id)).map(|card| card.id.clone()).collect();
+        for id in shelved {
+            let bridges = self.bypass_for(&id, &known);
+            if !bridges.is_empty() {
+                self.aside_bridges.insert(id, bridges);
+            }
+        }
+    }
+
+    fn output_type(&self, socket: &SocketRef) -> Option<SocketType> {
+        self.canvas.card(&socket.node)?.outputs.iter().find(|output| output.name == socket.socket).map(|output| output.ty)
+    }
+
+    fn input_type(&self, socket: &SocketRef) -> Option<SocketType> {
+        self.canvas.card(&socket.node)?.inputs.iter().find(|input| input.name == socket.socket).map(|input| input.ty)
+    }
+
+    fn reach_past_shelf(&self, id: &NodeId, known: &[(SocketRef, SocketRef)], flow: bool, upstream: bool) -> Vec<SocketRef> {
+        let mut found = Vec::new();
+        let mut seen = vec![id.clone()];
+        let mut queue = VecDeque::from([id.clone()]);
+        while let Some(node) = queue.pop_front() {
+            for (from, to) in known {
+                let (near, far) = if upstream { (to, from) } else { (from, to) };
+                if near.node != node || self.output_type(from).is_some_and(|ty| ty.is_flow()) != flow {
+                    continue;
+                }
+                if node != *id && !flow {
+                    continue;
+                }
+                if self.canvas.is_shelved(&far.node) {
+                    if !seen.contains(&far.node) {
+                        seen.push(far.node.clone());
+                        queue.push_back(far.node.clone());
+                    }
+                } else if !found.contains(far) {
+                    found.push(far.clone());
+                }
+            }
+        }
+        found
+    }
+
+    fn bypass_for(&mut self, id: &NodeId, known: &[(SocketRef, SocketRef)]) -> Vec<(SocketRef, SocketRef)> {
+        let mut bridges = Vec::new();
+        let sources = self.reach_past_shelf(id, known, true, true);
+        let targets = self.reach_past_shelf(id, known, true, false);
+        if let ([source], [target]) = (sources.as_slice(), targets.as_slice())
+            && !self.is_fed(&target.node, &target.socket)
+            && self.canvas.connect_sockets(source, target).is_ok()
+        {
+            bridges.push((source.clone(), target.clone()));
+        }
+        let value_sources: Vec<(SocketRef, SocketType)> =
+            self.reach_past_shelf(id, known, false, true).into_iter().filter_map(|source| self.output_type(&source).map(|ty| (source, ty))).collect();
+        for target in self.reach_past_shelf(id, known, false, false) {
+            if self.is_fed(&target.node, &target.socket) {
+                continue;
+            }
+            let Some(want) = self.input_type(&target) else { continue };
+            let mut ranked: Vec<&(SocketRef, SocketType)> = value_sources.iter().filter(|(_, ty)| want.accepts(*ty)).collect();
+            ranked.sort_by_key(|(_, ty)| *ty != want);
+            for (source, _) in ranked {
+                if self.canvas.connect_sockets(source, &target).is_ok() {
+                    bridges.push((source.clone(), target.clone()));
+                    break;
+                }
+            }
+        }
+        bridges
+    }
+
     fn drop_bridges(&mut self, bridges: &[(SocketRef, SocketRef)]) {
         self.canvas.wires.retain(|wire| {
             !bridges
@@ -2230,6 +2331,14 @@ impl StudioApp {
     }
 
     fn hex_findings_for_spell(&self) -> Vec<HexFinding> {
+        let variable_findings: Vec<HexFinding> = self
+            .variable_errors()
+            .into_iter()
+            .map(|message| HexFinding { node: None, socket: None, readable: message.clone(), message, mistyped: false })
+            .collect();
+        if !variable_findings.is_empty() {
+            return variable_findings;
+        }
         let version_findings: Vec<HexFinding> = self
             .brew_graph()
             .nodes
@@ -2264,6 +2373,10 @@ impl StudioApp {
     }
 
     fn check_spell_with_root(&self, root: SubgraphKey) -> Result<(), Vec<String>> {
+        let variable_errors = self.variable_errors();
+        if !variable_errors.is_empty() {
+            return Err(variable_errors);
+        }
         let version_errors = self.release_version_errors();
         if !version_errors.is_empty() {
             return Err(version_errors);
@@ -2333,13 +2446,18 @@ impl StudioApp {
 
     fn live_release_matching_recipe(&self) -> Option<u32> {
         let release = self.last_published.as_ref()?;
-        (self.spell.nodes.iter().all(|node| node.kind != SUBGRAPH_KIND) && release.graph == self.brew_graph()).then_some(release.version)
+        let recipe = self.brew_graph();
+        (recipe.nodes.iter().all(|node| node.kind != SUBGRAPH_KIND) && same_recipe(&release.graph, &recipe)).then_some(release.version)
     }
 
     pub fn is_unchanged_from_live_release(&self) -> bool {
-        self.active_release_version.is_some()
-            && self.spell.nodes.iter().all(|node| node.kind != SUBGRAPH_KIND)
-            && self.last_published.as_ref().is_none_or(|release| release.graph == self.brew_graph())
+        self.active_release_version.is_some() && self.live_release_matching_recipe().is_some()
+    }
+
+    fn variable_errors(&self) -> Vec<String> {
+        (0..self.spell.variables.len())
+            .filter_map(|index| self.var_default_error(index).map(|problem| format!("{}: {problem}", self.spell.variables[index].name)))
+            .collect()
     }
 
     pub fn has_recipe_trigger(&self) -> bool {
@@ -2700,12 +2818,14 @@ impl StudioApp {
         match entry {
             UndoEntry::Aside { id, wires, bridges } => {
                 self.drop_bridges(&bridges);
-                self.aside_bridges.remove(&id);
+                let stale: Vec<(SocketRef, SocketRef)> = self.aside_bridges.drain().flat_map(|(_, wires)| wires).collect();
+                self.drop_bridges(&stale);
                 self.canvas.unshelve(&id);
                 for (from, to) in &wires {
                     let _ = self.canvas.connect_sockets(from, to);
                 }
                 self.aside_wires.remove(&id);
+                self.rebuild_bridges();
                 self.validation = ValidationState::Unchecked;
                 self.sync_spell();
             }
@@ -2867,7 +2987,7 @@ impl StudioApp {
         self.draft_status = None;
         self.publish_status = None;
         self.require_disk("save drafts")?;
-        let version_errors = self.release_version_errors();
+        let version_errors = [self.variable_errors(), self.release_version_errors()].concat();
         if !version_errors.is_empty() {
             return Err(self.refuse(format!("Cannot save the draft: {}", version_errors.join("; "))));
         }

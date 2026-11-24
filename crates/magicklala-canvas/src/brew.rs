@@ -166,6 +166,7 @@ pub fn potion_ends(state: &CanvasState) -> Vec<NodeId> {
         .filter(|card| !state.is_shelved(&card.id))
         .filter(|card| state.wires.iter().any(|wire| wire.to_node == card.id && wire.ty.is_flow()))
         .filter(|card| !state.wires.iter().any(|wire| wire.from_node == card.id))
+        .filter(|card| reach.contains(&card.id))
         .map(|card| card.id.clone())
         .collect()
 }

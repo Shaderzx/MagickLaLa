@@ -562,6 +562,10 @@ impl CanvasState {
             card.status = ExecutionStatus::Idle;
             card.duration_ms = None;
             card.step_order = None;
+            for socket in &mut card.inputs {
+                socket.flagged = false;
+                socket.mistyped = false;
+            }
         }
         self.brew_summary = None;
         self.last_brew = None;
