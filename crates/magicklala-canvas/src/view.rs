@@ -448,7 +448,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     } else if let Some(vintage) = state.release_badge.as_ref().filter(|_| sealed) {
         row().px(5.0).py(1.0).radius(5.5).fill(p.primary_bg).child(text(vintage).font(TextStyle::new(11.0, 700.0).features("'tnum' 1")).color(p.primary_ink))
     } else {
-        row().px(5.5).py(1.5).radius(7.0).fill(p.wash_2).border(1.0, p.rule_2).child(text("Branch").font(TextStyle::new(11.0, 650.0)).color(p.ink_2))
+        el()
     };
     let card_bg = if hexed {
         p.hex_tint

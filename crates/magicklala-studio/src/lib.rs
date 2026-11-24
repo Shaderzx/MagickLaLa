@@ -29,7 +29,7 @@ pub const OPEN_TRACE_HEIGHT: f32 = 196.0;
 pub const PALETTE_CATEGORY_ORDER: [&str; 13] =
     ["events", "flow", "ai", "memory", "knowledge", "io", "code", "variables", "text", "logic", "json", "network", "time"];
 pub const LEGACY_KIND_PREFIX: &str = "core/";
-pub const CONTEXT_MENU_SIZE: (f32, f32) = (248.0, 197.0);
+pub const CONTEXT_MENU_SIZE: (f32, f32) = (200.0, 197.0);
 pub const QUICK_ADD_KIND: &str = "ai/generate_text";
 pub const COMPACT_TOOLBAR_BELOW: f32 = 1120.0;
 pub const STUDIO_PROJECT: &str = "Studio";
@@ -2993,7 +2993,19 @@ impl StudioApp {
             self.versions.get(&card.id).map(|e| e.text.clone()),
         ));
         self.close_context_menu();
-        if let Some(new_id) = self.spawn_at(&card.kind, [anchor[0] + 24.0, anchor[1] + 24.0])
+        let at = [anchor[0] + 24.0, anchor[1] + 24.0];
+        let spawned = if self.canvas.is_shelved(&card.id) { self.place_ingredient(&card.kind, at, false) } else { self.spawn_at(&card.kind, at) };
+        if let Some(new_id) = &spawned
+            && let Some(copy) = self.canvas.nodes.iter_mut().find(|other| &other.id == new_id)
+        {
+            for socket in &card.inputs {
+                copy.ensure_socket(&socket.name, socket.ty, false);
+            }
+            for socket in &card.outputs {
+                copy.ensure_socket(&socket.name, socket.ty, true);
+            }
+        }
+        if let Some(new_id) = spawned
             && let Some((cfg, prompt, version)) = selected_clone
         {
             if let Some(cfg) = cfg {
@@ -3344,8 +3356,26 @@ fn remember_size(size: (f32, f32)) {
     }
 }
 
-pub fn studio_key(_: &mut StudioApp, _: &rune::KeyEvent, _: &mut rune::Tx) -> bool {
-    false
+pub fn studio_key(app: &mut StudioApp, key: &rune::KeyEvent, _: &mut rune::Tx) -> bool {
+    match &key.key {
+        rune::Key::Escape if app.canvas.context_menu.is_some() => {
+            app.close_context_menu();
+            true
+        }
+        rune::Key::Escape if app.canvas.selection.is_some() => {
+            app.canvas.select(None);
+            true
+        }
+        rune::Key::Delete | rune::Key::Backspace if app.canvas.selection.is_some() && !app.is_running() => {
+            app.delete_selected_node();
+            true
+        }
+        _ if key.is_command('z') && !key.mods.shift && !app.undo_stack.is_empty() => {
+            app.undo();
+            true
+        }
+        _ => false,
+    }
 }
 
 fn spec(config: StudioConfig) -> AppSpec<StudioApp> {
@@ -3355,6 +3385,7 @@ fn spec(config: StudioConfig) -> AppSpec<StudioApp> {
         families: STUDIO_FAMILIES,
         setup: Some(StudioApp::set_waker),
         poll: Some(|app, _, _| app.poll_background() | app.sync_edits()),
+        on_key: Some(studio_key),
         ..AppSpec::new(TITLE, config.size, StudioApp::demo, studio_view)
     }
 }

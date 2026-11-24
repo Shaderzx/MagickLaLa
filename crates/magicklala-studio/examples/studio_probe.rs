@@ -3592,6 +3592,13 @@ fn shot(args: &[String]) -> Result<serde_json::Value, String> {
         click(&mut rt, "mode-grimoire")?;
         rt.frame(4.0);
     }
+    if asked("menu")
+        && let Some(first) = magicklala_canvas::recipe_order(&rt.state.canvas).first().cloned()
+        && let Some(card) = layout_rect(&rt, &format!("node-{}", first.0))
+    {
+        right_click(&mut rt, (card[0] + card[2] * 0.5, card[1] + card[3] * 0.5));
+        rt.frame(4.0);
+    }
     let app = std::mem::replace(&mut rt.state, StudioApp::from_registry());
     render_headless_snapshot_state(&out, app).map_err(|error| error.to_string())?;
     Ok(json!({ "out": out }))

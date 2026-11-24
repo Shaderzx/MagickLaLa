@@ -135,10 +135,23 @@ fn menu_item(spec: MenuItemSpec<'_>, t: &HearthPalette, action: fn(&mut StudioAp
     } else {
         item.child(text(spec.shortcut).font(if spec.shortcut == "⌫" { font(13.0, 500.0) } else { font(11.2, 500.0).mono() }).color(t.mute))
     };
-    if spec.enabled { item.on_press(action) } else { item }
+    if spec.enabled { item.on_press(action) } else { item.role("button").label(spec.caption).disabled(true) }
 }
 
 fn context_tether(card: [f32; 4], menu: [f32; 2], t: &HearthPalette) -> Option<El> {
+    let below = menu[1] >= card[1] + card[3];
+    let above = menu[1] + CONTEXT_MENU_SIZE.1 <= card[1];
+    if below || above {
+        let x = (card[0] + card[2] * 0.5).clamp(menu[0] + 24.0, menu[0] + CONTEXT_MENU_SIZE.0 - 24.0).clamp(card[0] + 12.0, card[0] + card[2] - 12.0);
+        let (card_y, menu_y) = if below { (card[1] + card[3], menu[1]) } else { (card[1], menu[1] + CONTEXT_MENU_SIZE.1) };
+        let top = card_y.min(menu_y) - 4.0;
+        let from = [4.0, card_y - top];
+        let to = [4.0, menu_y - top];
+        let thread = rune::Shape::new().line(from, to, 1.6, rune::LineCap::Round, t.gold);
+        let thread = magicklala_canvas::hearth::fill_ellipse(thread, from[0], from[1], 3.0, 3.0, t.gold);
+        let thread = magicklala_canvas::hearth::fill_ellipse(thread, to[0], to[1], 2.2, 2.2, t.gold);
+        return Some(canvas(thread).key("context-tether").size(8.0, (menu_y - card_y).abs() + 8.0).absolute(x - 4.0, top));
+    }
     let on_right = menu[0] >= card[0] + card[2];
     let card_edge = if on_right { card[0] + card[2] } else { card[0] };
     let menu_edge = if on_right { menu[0] } else { menu[0] + CONTEXT_MENU_SIZE.0 };
@@ -172,22 +185,35 @@ fn context_tether(card: [f32; 4], menu: [f32; 2], t: &HearthPalette) -> Option<E
 fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<(El, Option<El>)> {
     let anchor = app.canvas.context_menu?;
     let view = app.canvas_size();
+    let plan = (app.canvas.mode == WorkbenchMode::Cauldron).then(|| magicklala_canvas::brew_plan(&app.canvas, view));
+    let rows = match (app.canvas.selection.is_some(), plan.is_some()) {
+        (true, true) => 4.0_f32,
+        (true, false) => 3.0,
+        (false, _) => 2.0,
+    };
+    let (menu_w, menu_h) = (CONTEXT_MENU_SIZE.0, (10.0 + 24.0 + 2.0 + rows * 29.0 + (rows + 2.0) * 2.0).min(CONTEXT_MENU_SIZE.1));
+    let plaque_top = plan.as_ref().map_or(view.1, |plan| plan.plaque_top);
+    let covers_pot = |[x, y]: [f32; 2]| {
+        plan.as_ref().is_some_and(|plan| x < plan.pot[0] + plan.pot[2] && x + menu_w > plan.pot[0] && y < plan.pot[1] + plan.pot[3] && y + menu_h > plan.pot[1])
+    };
+    let clamp = |[x, y]: [f32; 2]| [x.min(view.0 - menu_w - 12.0).max(12.0), y.min(view.1 - menu_h - 12.0).min(plaque_top - menu_h - 8.0).max(12.0)];
     let beside = app.canvas.context_card.filter(|_| app.canvas.selection.is_some()).map(|card| {
-        let right = card[0] + card[2] + 10.0;
-        let left = card[0] - CONTEXT_MENU_SIZE.0 - 10.0;
-        let x = if right + CONTEXT_MENU_SIZE.0 <= view.0 - 8.0 {
-            right
-        } else if left >= 8.0 {
-            left
-        } else {
-            anchor[0]
-        };
-        [x, card[1]]
+        let column = card[0].min(view.0 - menu_w - 12.0).max(12.0);
+        let shy = plan.as_ref().map_or(column, |plan| column.min(plan.pot[0] - menu_w - 6.0));
+        let below = card[1] + card[3] + 10.0;
+        let above = card[1] - menu_h - 10.0;
+        let spots =
+            [[card[0] + card[2] + 10.0, card[1]], [card[0] - menu_w - 10.0, card[1]], [column, below], [column, above], [shy, below], [shy, above]].map(clamp);
+        let hides_card =
+            |[x, y]: [f32; 2]| x < card[0] + card[2] - 4.0 && x + menu_w > card[0] + 4.0 && y < card[1] + card[3] - 4.0 && y + menu_h > card[1] + 4.0;
+        spots
+            .iter()
+            .find(|spot| !covers_pot(**spot) && !hides_card(**spot))
+            .or_else(|| spots.iter().find(|spot| !covers_pot(**spot)))
+            .copied()
+            .unwrap_or(spots[0])
     });
-    let [px, py] = beside.unwrap_or(anchor);
-    let x = px.min(view.0 - CONTEXT_MENU_SIZE.0 - 12.0).max(12.0);
-    let plaque_top = if app.canvas.mode == WorkbenchMode::Cauldron { magicklala_canvas::brew_plan(&app.canvas, view).plaque_top } else { view.1 };
-    let y = py.min(view.1 - CONTEXT_MENU_SIZE.1 - 12.0).min(plaque_top - CONTEXT_MENU_SIZE.1 - 8.0).max(12.0);
+    let [x, y] = beside.unwrap_or_else(|| clamp(anchor));
     let tether = app.canvas.context_card.filter(|_| beside.is_some()).and_then(|card| context_tether(card, [x, y], t));
     let selected_card = app.canvas.selected_card();
     let selected_title = selected_card.map(|card| app.canvas.display_title(&card.id));
@@ -233,20 +259,13 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<(El, Option<El>)> 
         match plan.card(&card.id)?.role {
             magicklala_canvas::BrewRole::Ingredient => Some(("context-set-aside", "Set aside", StudioApp::set_aside_selected as fn(&mut StudioApp))),
             magicklala_canvas::BrewRole::Aside => Some(("context-pour-in", "Pour into cauldron", StudioApp::pour_selected_in as fn(&mut StudioApp))),
-            magicklala_canvas::BrewRole::Bottle => None,
+            magicklala_canvas::BrewRole::Bottle => Some(("context-set-aside", "Set aside", StudioApp::set_aside_selected as fn(&mut StudioApp))),
         }
     });
     card = match selected_title {
-        Some(title) => card
+        Some(_) => card
             .child(menu_item(
-                MenuItemSpec {
-                    key: "context-duplicate-node",
-                    caption: &format!("Duplicate {title}"),
-                    shortcut: "",
-                    enabled: idle,
-                    primary: true,
-                    danger: false,
-                },
+                MenuItemSpec { key: "context-duplicate-node", caption: "Duplicate", shortcut: "", enabled: idle, primary: true, danger: false },
                 t,
                 StudioApp::duplicate_selected_node,
             ))
@@ -280,7 +299,7 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<(El, Option<El>)> 
                     key: &palette_key(QUICK_ADD_KIND).replacen("palette-", "context-add-", 1),
                     caption: &quick_add,
                     shortcut: "",
-                    enabled: true,
+                    enabled: idle,
                     primary: true,
                     danger: false,
                 },
