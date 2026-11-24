@@ -5441,6 +5441,87 @@ fn hands_on() -> Result<serde_json::Value, String> {
         "menuCoversPot": covered,
     }))
 }
+fn many_bottle_spell(count: usize) -> SpellGraph {
+    let mut spell = SpellGraph::new(&format!("{count} Bottles"));
+    let place = |id: &str, kind: &str, x: f32, y: f32, config: serde_json::Value| NodeInstance {
+        id: NodeId::from(id),
+        kind: kind.to_owned(),
+        position: [x, y],
+        config,
+    };
+    spell.nodes = vec![
+        place("trigger", "event/on_message", 0.0, 0.0, serde_json::Value::Null),
+        place("words", "text/template", 260.0, 0.0, json!({ "template": "Heard: {{content}}" })),
+    ];
+    let wire = |id: String, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id.as_str()),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    spell.wires = vec![wire("w0".to_owned(), ("trigger", "out"), ("words", "in")), wire("w1".to_owned(), ("trigger", "content"), ("words", "content"))];
+    for index in 0..count {
+        let id = format!("reply_{index}");
+        spell.nodes.push(place(&id, "io/send_message", 560.0, index as f32 * 120.0, serde_json::Value::Null));
+        spell.wires.push(wire(format!("f{index}"), ("words", "out"), (&id, "in")));
+        spell.wires.push(wire(format!("c{index}"), ("words", "text"), (&id, "content")));
+    }
+    spell
+}
+
+fn crowded_bottles(args: &[String]) -> Result<serde_json::Value, String> {
+    let mut report = Vec::new();
+    for count in [4_usize, 8] {
+        for size in [(1280.0_f32, 800.0_f32), (960.0, 640.0)] {
+            let mut app = StudioApp::with_spell(many_bottle_spell(count), registry_specs());
+            app.size = size;
+            let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+            rt.frame(0.0);
+            let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+            let s = plan.scale;
+            let bottles: Vec<&magicklala_canvas::BrewCard> = plan.with_role(magicklala_canvas::BrewRole::Bottle).collect();
+            let ribbons = magicklala_canvas::cauldron::ribbon_paths(&plan);
+            let body = |ribbon: &Vec<[f32; 2]>| -> Vec<[f32; 2]> {
+                let tap = ribbon.first().copied().unwrap_or_default();
+                let mouth = ribbon.last().copied().unwrap_or_default();
+                ribbon
+                    .iter()
+                    .copied()
+                    .filter(|p| (p[0] - tap[0]).hypot(p[1] - tap[1]) > 30.0 * s && (p[0] - mouth[0]).hypot(p[1] - mouth[1]) > 10.0 * s)
+                    .collect()
+            };
+            let mut crossings = Vec::new();
+            for (index, ribbon) in ribbons.iter().enumerate() {
+                for (other, theirs) in ribbons.iter().enumerate().skip(index + 1) {
+                    if polylines_cross(&body(ribbon), &body(theirs)) {
+                        crossings.push(format!("{index}x{other}"));
+                    }
+                }
+            }
+            let mut through = Vec::new();
+            for (index, ribbon) in ribbons.iter().enumerate() {
+                let own = bottles.get(index).map(|card| card.id.clone());
+                for card in &plan.cards {
+                    if Some(&card.id) == own.as_ref() {
+                        continue;
+                    }
+                    let r = card.rect;
+                    let halo = 4.0 * s;
+                    if body(ribbon).iter().any(|p| p[0] > r[0] - halo && p[0] < r[0] + r[2] + halo && p[1] > r[1] - halo && p[1] < r[1] + r[3] + halo) {
+                        through.push(format!("{index}>{}", card.id.0));
+                    }
+                }
+            }
+            report.push(json!({ "case": format!("{count}@{}", size.0), "crossings": crossings, "through": through }));
+            if let Some(dir) = args.get(1) {
+                let app = std::mem::replace(&mut rt.state, StudioApp::from_registry());
+                render_headless_snapshot_state(&PathBuf::from(dir).join(format!("bottles{count}_{}.png", size.0)), app).map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    Ok(json!(report))
+}
 fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
@@ -6346,6 +6427,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("honest-dials") => honest_dials(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("workbench-truths") => workbench_truths(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("hands-on") => hands_on(),
+        Some("crowded-bottles") => crowded_bottles(&args),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("drawn-truths") => drawn_truths(),

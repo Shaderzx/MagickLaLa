@@ -1550,3 +1550,11 @@ test('Hands on the workbench: Escape clears a pick and closes a menu, Delete rem
   expect(report.bottle).toEqual({ caption: ['Duplicate'], offered: true, aside: true });
   expect(report.menuCoversPot).toEqual([]);
 });
+test('Crowded shelves stay untangled: with four or eight bottles at 1280 and 960 no two bottle ribbons cross and no ribbon runs through another card', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['crowded-bottles']);
+
+  for (const shelf of report) {
+    expect({ case: shelf.case, crossings: shelf.crossings, through: shelf.through }).toEqual({ case: shelf.case, crossings: [], through: [] });
+  }
+  expect(report.map((shelf: { case: string }) => shelf.case)).toEqual(['4@1280', '4@960', '8@1280', '8@960']);
+});
