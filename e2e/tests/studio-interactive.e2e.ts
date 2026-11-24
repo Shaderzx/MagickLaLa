@@ -1179,7 +1179,7 @@ test('What Studio shows, brews and publishes is the same recipe: a spare reply s
     expect(report.shelf).toEqual({ wiredDelay: 'Ingredient', looseSend: 'Aside' });
     expect(report.tray).toEqual({ role: 'Aside', brews: 0 });
     expect(report.midBrew.bottle).toBe('Ready');
-    expect(report.midBrew.publish).toMatch(/brewing/);
+    expect(report.midBrew.publish).toMatch(/until the brew ends/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
