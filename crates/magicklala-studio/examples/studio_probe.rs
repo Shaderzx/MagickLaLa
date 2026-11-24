@@ -1417,6 +1417,9 @@ fn capture_surfaces(out_dir: &Path) -> Result<serde_json::Value, String> {
     save("08-execution-trace-1280x800.png", executed)?;
 
     let mut menu = base_desktop();
+    let picked = menu.canvas.selection.clone();
+    let menu_plan = magicklala_canvas::brew_plan(&menu.canvas, menu.canvas_size());
+    menu.canvas.context_card = picked.as_ref().and_then(|id| menu_plan.card(id)).map(|card| card.rect);
     menu.canvas.context_menu = Some([24.0, 456.0]);
     save("09-context-menu-1280x800.png", menu)?;
 
@@ -1766,7 +1769,7 @@ fn toss() -> Result<serde_json::Value, String> {
     let positions_before: Vec<[f32; 2]> = rt.state.canvas.nodes.iter().map(|card| card.position).collect();
     let pantry_drop = pantry_toss(&mut rt, "ai/generate_text", "Generate Text")?;
     let mut full_rt = headless(StudioApp::from_registry());
-    let pantry_full = pantry_toss(&mut full_rt, "text/template", "Template")?;
+    let pantry_full = pantry_toss(&mut full_rt, "var/get", "Get Variable")?;
 
     let mut aside_rt = headless(StudioApp::from_registry());
     let target = "recall";
@@ -2668,6 +2671,31 @@ fn carbon_r4() -> Result<serde_json::Value, String> {
         "singularPlurals": singular_plurals,
     }))
 }
+fn polylines_cross(a: &[[f32; 2]], b: &[[f32; 2]]) -> bool {
+    let side = |p: [f32; 2], q: [f32; 2], r: [f32; 2]| (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+    a.windows(2).any(|s| {
+        b.windows(2).any(|t| {
+            let (d1, d2) = (side(s[0], s[1], t[0]), side(s[0], s[1], t[1]));
+            let (d3, d4) = (side(t[0], t[1], s[0]), side(t[0], t[1], s[1]));
+            d1 * d2 < 0.0 && d3 * d4 < 0.0
+        })
+    })
+}
+
+fn dozen_lanes() -> serde_json::Value {
+    let mut app = StudioApp::with_spell(dozen_ingredient_spell(), registry_specs());
+    app.size = (960.0, 640.0);
+    let plan = magicklala_canvas::brew_plan(&app.canvas, app.canvas_size());
+    let pours = magicklala_canvas::cauldron::pour_paths(&app.canvas, &plan);
+    let ribbons = magicklala_canvas::cauldron::ribbon_paths(&plan);
+    let crossing: Vec<String> =
+        pours.iter().filter(|(_, points)| ribbons.iter().any(|ribbon| polylines_cross(points, ribbon))).map(|(id, _)| id.0.clone()).collect();
+    let mut lanes: Vec<i64> = pours.iter().filter_map(|(_, points)| points.get(6).map(|point| (point[0] * 10.0).round() as i64)).collect();
+    lanes.sort_unstable();
+    lanes.dedup();
+    json!({ "crossing": crossing, "strands": lanes.len(), "pours": pours.len() })
+}
+
 fn carbon_r4b() -> Result<serde_json::Value, String> {
     let pulled = |delete: bool| -> Result<serde_json::Value, String> {
         let mut rt = headless(StudioApp::from_registry());
@@ -2783,6 +2811,7 @@ fn carbon_r4b() -> Result<serde_json::Value, String> {
         "bottlePill": bottle_pill,
         "tints": tints,
         "midBrew": mid_brew,
+        "dozenLanes": dozen_lanes(),
         "menu": { "setAside": set_aside, "afterAside": after_aside, "pourIn": pour_in, "afterPour": after_pour },
     }))
 }

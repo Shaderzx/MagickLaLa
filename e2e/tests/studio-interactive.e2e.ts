@@ -889,7 +889,7 @@ test('Dragging Generate Text from the pantry onto a full support cauldron pours 
   expect(pantryDrop.ghostDuringDrag).toBe(false);
 });
 
-test('Dragging a Template onto a cauldron whose every input is already fed adds it set aside and leaves every existing wire untouched', { timeout: 900_000 }, async () => {
+test('Dragging a Get Variable onto a cauldron whose every input is already fed adds it set aside and leaves every existing wire untouched', { timeout: 900_000 }, async () => {
   const { pantryFull } = await studioProbe(['toss']);
 
   expect(pantryFull.nodesAfter).toBe(pantryFull.nodesBefore + 1);
@@ -1145,7 +1145,7 @@ test('Studio fits and counts honestly at 960 by 640: variable names keep their o
   expect(report.singularPlurals).toEqual([]);
 });
 
-test('Studio mends and guards the recipe around every step: pulling the model out keeps the reply fed, setting aside a Replace gives the reply its words back, a tossed Template is wired between the message and the reply, a bottle missing its words says so on the bottle, a single bottle has the potion colour, nothing changes mid-brew, and the card menu can set an ingredient aside and pour it back in', { timeout: 900_000 }, async () => {
+test('Studio mends and guards the recipe around every step: pulling the model out keeps the reply fed, setting aside a Replace gives the reply its words back, a tossed Template is wired between the message and the reply, a bottle missing its words says so on the bottle, a single bottle has the potion colour, twelve ingredients pour down twelve separate strands that never cross the pour from pot to bottle, nothing changes mid-brew, and the card menu can set an ingredient aside and pour it back in', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['carbon-r4b']);
 
   for (const pulled of [report.pullModel.aside, report.pullModel.deleted]) {
@@ -1160,5 +1160,6 @@ test('Studio mends and guards the recipe around every step: pulling the model ou
   expect(report.bottlePill).toBe('Missing "content"');
   expect(report.tints.bottle).toBe(report.tints.potion);
   expect(report.midBrew).toEqual({ nodes: 0, vars: 0, stillSimmering: true });
+  expect(report.dozenLanes).toEqual({ crossing: [], strands: 12, pours: 12 });
   expect(report.menu).toEqual({ setAside: true, afterAside: 'Aside', pourIn: true, afterPour: 'Ingredient' });
 });
