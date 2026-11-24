@@ -3426,7 +3426,7 @@ fn geometry_and_polish(db_path: &Path) -> Result<serde_json::Value, String> {
     let ribbon_through_pot = magicklala_canvas::cauldron::ribbon_paths(&hook_plan)
         .iter()
         .flat_map(|ribbon| ribbon.iter().skip(5).copied().collect::<Vec<_>>())
-        .filter(|point| point[0] > hpot[0] && point[0] < hpot[0] + hpot[2] && point[1] > hpot[1] && point[1] < hpot[1] + hpot[3])
+        .filter(|point| point[0] > hpot[0] && point[0] < hpot[0] + hpot[2] && point[1] > hpot[1] + hpot[3] * 0.46 && point[1] < hpot[1] + hpot[3])
         .count();
 
     let light = magicklala_canvas::HearthPalette::for_theme(true);
