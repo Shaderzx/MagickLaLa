@@ -1352,6 +1352,19 @@ impl StudioApp {
             self.auto_wire_cauldron_ingredient(&id, &spec);
             self.canvas.toss_count += 1;
         }
+        let source = self
+            .canvas
+            .wires
+            .iter()
+            .find(|wire| wire.to_node == id && wire.ty.is_flow())
+            .or_else(|| self.canvas.wires.iter().find(|wire| wire.to_node == id))
+            .map(|wire| wire.from_node.clone());
+        let near = match source.and_then(|from| self.canvas.card(&from).map(|card| [card.position[0] + card.size[0] + 40.0, card.position[1]])) {
+            Some(after) => after,
+            None => self.canvas.card(&id).map(|card| card.position).unwrap_or(center),
+        };
+        let spot = self.canvas.free_spot(&id, near);
+        self.canvas.move_node(&id, spot);
         self.validation = ValidationState::Unchecked;
         self.sync_spell();
         Some(id)

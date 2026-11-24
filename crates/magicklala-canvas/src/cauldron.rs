@@ -149,32 +149,13 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
     shape
 }
 
-fn route_label(state: &CanvasState, bottle: &NodeId) -> Option<String> {
+pub(crate) fn route_label(state: &CanvasState, bottle: &NodeId) -> Option<String> {
     state
         .wires
         .iter()
         .find(|wire: &&WireModel| &wire.to_node == bottle && wire.ty.is_flow())
         .map(|wire| wire.from_socket.clone())
         .filter(|socket| socket != "out")
-}
-
-fn route_pill(state: &CanvasState, placed: &BrewCard, multi: bool, scale: f32, p: &HearthPalette) -> Option<El> {
-    if !multi {
-        return None;
-    }
-    let label = route_label(state, &placed.id)?;
-    let card = state.card(&placed.id)?;
-    let taken = matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Running);
-    let neck = bottle_neck(placed, true);
-    let pill = row()
-        .key(format!("route-{}", placed.id.0))
-        .px(7.0)
-        .py(2.0)
-        .radius(8.0)
-        .fill(if taken { p.route_taken_fill() } else { p.card })
-        .border(1.0, if taken { p.broth_mid } else { p.rule_2 })
-        .child(text(label).font(TextStyle::new(11.0, if taken { 700.0 } else { 600.0 }).mono()).color(if taken { p.broth_ink() } else { p.ink_2 }));
-    Some(row().absolute(neck[0] + 30.0 * scale, neck[1] - 10.0).child(pill))
 }
 
 fn bubbles(mood: CauldronMood, plan: &BrewPlan, p: &HearthPalette, tint: Option<Color>) -> Vec<El> {
@@ -473,9 +454,6 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         };
         board =
             board.child(el().key(format!("node-{}", placed.id.0)).size(natural[0], natural[1]).absolute(origin[0], origin[1]).child(view).scale(plan.scale));
-        if let Some(pill) = route_pill(state, placed, multi, plan.scale, &p) {
-            board = board.child(pill);
-        }
     }
     if let Some(ghost) = plan.ghost_bottle {
         board = board.child(
@@ -485,7 +463,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
                 .child(canvas(ghost_potion_bottle_shape(state.light, ghost[2], ghost[3] * 0.6)).size(ghost[2], ghost[3] * 0.6)),
         );
     }
-    board = board.child(mode_switcher(state, &p, lens));
+    board = board.child(mode_switcher(state, &p, lens, size));
     if let Some(keyed) = legend(state, mood, &plan, size, &p) {
         board = board.child(keyed);
     }

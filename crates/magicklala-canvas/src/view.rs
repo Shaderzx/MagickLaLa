@@ -116,7 +116,7 @@ pub(crate) fn cauldron_mood(state: &CanvasState) -> CauldronMood {
     CauldronMood::Ready
 }
 
-pub(crate) fn mode_switcher<S: 'static>(state: &CanvasState, p: &HearthPalette, lens: fn(&mut S) -> &mut CanvasState) -> El {
+pub(crate) fn mode_switcher<S: 'static>(state: &CanvasState, p: &HearthPalette, lens: fn(&mut S) -> &mut CanvasState, size: (f32, f32)) -> El {
     let is_cauldron = state.mode == WorkbenchMode::Cauldron;
     let pill = |key: &str, caption: &str, active: bool, target: WorkbenchMode| {
         row()
@@ -133,6 +133,10 @@ pub(crate) fn mode_switcher<S: 'static>(state: &CanvasState, p: &HearthPalette, 
                 let c = lens(s);
                 c.mode = target;
                 c.context_menu = None;
+                if target == WorkbenchMode::Grimoire && !c.grimoire_fitted {
+                    c.fit(size);
+                    c.grimoire_fitted = true;
+                }
             })
     };
     row()
@@ -378,9 +382,19 @@ pub(crate) fn branch_bottle_view<S: 'static>(
         CauldronMood::Ready
     };
     let bottle_h = 66.0;
-    let branch = card.id.0.strip_suffix("_reply").unwrap_or(&card.id.0);
-    let short = card.title.split_whitespace().next().unwrap_or(&card.title);
-    let title = format!("{short} · {branch}");
+    let title = card.title.clone();
+    let route = crate::cauldron::route_label(state, &card.id).map(|label| {
+        row()
+            .key(format!("route-{}", card.id.0))
+            .px(6.0)
+            .py(1.0)
+            .radius(7.0)
+            .fill(if taken { p.route_taken_fill() } else { p.card })
+            .border(1.0, if taken { p.broth_mid } else { p.rule_2 })
+            .child(
+                text(label).font(TextStyle::new(11.0, if taken { 700.0 } else { 600.0 }).mono()).color(if taken { p.broth_ink() } else { p.ink_2 }).truncate(),
+            )
+    });
     let bottle_art = canvas(potion_bottle_shape(bottle_mood, state.light, width, bottle_h, false, crate::cauldron::potion_tint(state))).size(width, bottle_h);
     let pill = if taken {
         let ms_text = match card.duration_ms {
@@ -428,7 +442,10 @@ pub(crate) fn branch_bottle_view<S: 'static>(
         .border(if taken || card.selected { 1.6 } else { 1.1 }, card_border)
         .shadow(2.0, 8.0, if untaken { Color::TRANSPARENT } else { p.shadow_card })
         .child(text(title).font(TextStyle::new(12.5, 750.0)).color(title_col).truncate())
-        .child(text(&card.kind).font(TextStyle::new(11.0, 500.0).mono()).color(sub_col).truncate());
+        .child(match route {
+            Some(route) => row().w_full().child(route),
+            None => row().w_full().child(text(&card.kind).font(TextStyle::new(11.0, 500.0).mono()).color(sub_col).truncate()),
+        });
     let mut tag_wrap = el().w_full().child(tag_inner).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(pill));
     if let Some(num) = step_num {
         let step_badge = row()
@@ -635,7 +652,7 @@ fn grimoire_graph_view<S: 'static>(state: &CanvasState, size: (f32, f32), lens: 
         .child(wires);
 
     let mut board = state.nodes.iter().fold(board, |board, card| board.child(grimoire_card_view(state, card, &p, palette, lens)));
-    board = board.child(mode_switcher(state, &p, lens));
+    board = board.child(mode_switcher(state, &p, lens, size));
 
     if !state.nodes.is_empty() && size.0 >= 420.0 && size.1 >= 260.0 {
         let has_run = state.has_run();

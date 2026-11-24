@@ -236,6 +236,7 @@ pub struct CanvasState {
     pub drag: DragState,
     pub context_menu: Option<[f32; 2]>,
     pub context_card: Option<[f32; 4]>,
+    pub grimoire_fitted: bool,
     pub last_connect_error: Option<ConnectError>,
     pub light: bool,
     pub mode: WorkbenchMode,
@@ -315,6 +316,22 @@ impl CanvasState {
         self.nodes.iter_mut().for_each(|card| card.selected = Some(&card.id) == node.as_ref());
         self.selection = node;
         self.context_menu = None;
+    }
+
+    pub fn free_spot(&self, id: &NodeId, near: [f32; 2]) -> [f32; 2] {
+        let Some(size) = self.card(id).map(|card| card.size) else { return near };
+        let clear = |at: [f32; 2]| {
+            self.nodes.iter().filter(|other| &other.id != id).all(|other| {
+                at[0] + size[0] + 24.0 <= other.position[0]
+                    || other.position[0] + other.size[0] + 24.0 <= at[0]
+                    || at[1] + size[1] + 24.0 <= other.position[1]
+                    || other.position[1] + other.size[1] + 24.0 <= at[1]
+            })
+        };
+        (0..40)
+            .map(|step| [near[0] + (step / 8) as f32 * (size[0] + 32.0), near[1] + ((step % 8) as f32 - 0.0) * 64.0 * if step % 2 == 0 { 1.0 } else { -1.0 }])
+            .find(|at| clear(*at))
+            .unwrap_or(near)
     }
 
     pub fn move_node(&mut self, id: &NodeId, position: [f32; 2]) -> bool {
