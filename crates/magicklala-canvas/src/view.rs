@@ -363,6 +363,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     shell
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn branch_bottle_view<S: 'static>(
     state: &CanvasState,
     card: &NodeCardModel,
@@ -467,6 +468,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
         .on_press(move |s: &mut S| lens(s).select(Some(select_id.clone())))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn potion_stand_view<S: 'static>(
     state: &CanvasState,
     output: &NodeCardModel,
