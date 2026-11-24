@@ -1003,7 +1003,8 @@ test('The cauldron keeps the recipe honest: a tossed Add Memory is fed only from
   expect(report.memory.feeders.some((wire: string) => wire.startsWith('recall.'))).toBe(false);
   expect(report.memory.feeders).toContain('llm.text->content');
   expect(report.memory.replyFeeders).toEqual(expect.arrayContaining(['llm.text->content']));
-  expect(report.memory.replyFeeders.some((wire: string) => wire.startsWith(report.memory.id + '.'))).toBe(false);
+  expect(report.memory.replyFeeders.filter((wire: string) => wire.endsWith('->content'))).toEqual(['llm.text->content']);
+  expect(report.memory.replyFeeders).toContain(report.memory.id + '.out->in');
   expect(report.researchCheck).toBe('valid');
   expect(report.mistyped.card).toContain('Wrong type "prompt"');
   expect(report.mistyped.plaque).toBe('Hexed · wrong type "prompt"');
