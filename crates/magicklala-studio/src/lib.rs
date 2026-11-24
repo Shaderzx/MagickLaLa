@@ -668,6 +668,7 @@ pub struct Release {
 
 #[derive(Debug, Clone)]
 pub enum UndoEntry {
+    Aside { id: NodeId, wires: Vec<(SocketRef, SocketRef)> },
     Node { card: NodeCardModel, prompt: Option<TextEdit>, version: Option<TextEdit>, config: Option<serde_json::Value>, wires: Vec<WireModel> },
     Variable { index: usize, variable: VariableDef, name_edit: TextEdit, default_edit: TextEdit },
 }
@@ -1123,6 +1124,8 @@ impl StudioApp {
     pub fn load_graph(&mut self, graph: SpellGraph) {
         let mode = self.canvas.mode;
         let light = self.theme == Theme::Light;
+        self.stop_active_run();
+        self.aside_wires.clear();
         self.spell = graph;
         self.canvas = CanvasState::from_graph(&self.spell, &self.specs);
         self.canvas.mode = mode;
@@ -1183,14 +1186,13 @@ impl StudioApp {
         self.pending_switch = None;
     }
 
-    fn drop_active_run(&mut self) {
+    fn stop_active_run(&mut self) {
         if let Some(active) = self.active.take() {
             active.token.cancel();
             if !active.handle.is_finished() {
                 self.stopping.push(active.handle);
             }
         }
-        self.chat.clear();
         self.trace.clear();
         self.trace_events.clear();
         self.pending_trace.clear();
@@ -1198,6 +1200,11 @@ impl StudioApp {
         self.run_started = None;
         self.canvas.running_brew = false;
         self.canvas.last_brew = None;
+    }
+
+    fn drop_active_run(&mut self) {
+        self.stop_active_run();
+        self.chat.clear();
     }
 
     fn detach_spell_history(&mut self) {
@@ -1367,6 +1374,11 @@ impl StudioApp {
     }
 
     pub fn pantry_drop(&mut self, cancelled: bool) -> Option<NodeId> {
+        if self.is_running() {
+            self.pantry_drag = None;
+            self.canvas.pot_hover = false;
+            return None;
+        }
         let point = self.pantry_drag_point();
         let over_pot = self.pantry_drag_over_pot();
         let drag = self.pantry_drag.take()?;
@@ -1386,6 +1398,9 @@ impl StudioApp {
     }
 
     pub fn toss(&mut self, toss: magicklala_canvas::Toss) {
+        if self.is_running() {
+            return;
+        }
         match toss {
             magicklala_canvas::Toss::Aside(id) => {
                 let removed: Vec<(SocketRef, SocketRef)> = self
@@ -1401,11 +1416,20 @@ impl StudioApp {
                     return;
                 }
                 self.canvas.set_aside(&id);
-                self.aside_wires.insert(id, removed);
+                let title = self.canvas.card(&id).map(|card| card.title.clone()).unwrap_or_default();
+                self.aside_wires.insert(id.clone(), removed.clone());
+                self.undo_stack.push(UndoEntry::Aside { id, wires: removed });
+                self.undo_banner = Some(format!("Set aside {title}"));
             }
             magicklala_canvas::Toss::IntoPot(id) => {
                 let stash = self.aside_wires.remove(&id).unwrap_or_default();
-                let restored = stash.iter().filter(|(from, to)| self.canvas.connect_sockets(from, to).is_ok()).count();
+                let mut restored = 0;
+                for (from, to) in &stash {
+                    let open = !self.is_fed(&to.node, &to.socket) && self.canvas.card(&from.node).is_some() && self.canvas.card(&to.node).is_some();
+                    if open && self.canvas.connect_sockets(from, to).is_ok() {
+                        restored += 1;
+                    }
+                }
                 if restored == 0 {
                     let Some(kind) = self.canvas.card(&id).map(|card| card.kind.clone()) else { return };
                     let Some(spec) = self.specs.iter().find(|spec| spec.kind == kind).cloned() else { return };
@@ -1675,6 +1699,10 @@ impl StudioApp {
         if !vars_changed && nodes == self.spell.nodes && wires == self.spell.wires && subgraphs == self.spell.subgraphs {
             return false;
         }
+        let unplaced = |list: &[NodeInstance]| list.iter().map(|node| (node.id.clone(), node.kind.clone(), node.config.clone())).collect::<Vec<_>>();
+        if vars_changed || wires != self.spell.wires || subgraphs != self.spell.subgraphs || unplaced(&nodes) != unplaced(&self.spell.nodes) {
+            self.canvas.clear_run_marks();
+        }
         self.spell.nodes = nodes;
         self.spell.wires = wires;
         self.spell.subgraphs = subgraphs;
@@ -1874,6 +1902,7 @@ impl StudioApp {
             return false;
         }
         self.runs += 1;
+        self.canvas.brew_summary = None;
         self.trace.clear();
         self.trace_events.clear();
         self.pending_trace.clear();
@@ -2139,6 +2168,7 @@ impl StudioApp {
         let Some(selected_id) = self.canvas.selection.clone() else { return };
         let attached_wires: Vec<WireModel> = self.canvas.wires.iter().filter(|w| w.from_node == selected_id || w.to_node == selected_id).cloned().collect();
         if let Some(removed) = self.canvas.remove_selected_node() {
+            self.aside_wires.remove(&removed.id);
             let prompt = self.prompts.remove(&removed.id);
             let version = self.versions.remove(&removed.id);
             let config = self.configs.remove(&removed.id);
@@ -2155,6 +2185,16 @@ impl StudioApp {
         let Some(entry) = self.undo_stack.pop() else { return };
         self.undo_banner = None;
         match entry {
+            UndoEntry::Aside { id, wires } => {
+                for (from, to) in &wires {
+                    if !self.is_fed(&to.node, &to.socket) {
+                        let _ = self.canvas.connect_sockets(from, to);
+                    }
+                }
+                self.aside_wires.remove(&id);
+                self.validation = ValidationState::Unchecked;
+                self.sync_spell();
+            }
             UndoEntry::Node { card, prompt, version, config, wires } => {
                 let id = card.id.clone();
                 if let Some(prompt) = prompt {
@@ -2279,10 +2319,7 @@ impl StudioApp {
         self.dirty = false;
         self.active_release_version = Some(release.version);
         let version = release.version;
-        let ingr_count = self.canvas.nodes.iter().filter(|card| card.kind != "io/send_message").count();
-        let word = if ingr_count == 1 { "ingredient" } else { "ingredients" };
         self.canvas.release_badge = Some(format!("v{version}"));
-        self.canvas.brew_summary = Some(format!("Published v{version} · {ingr_count} {word}"));
         self.publish_status = Some(format!("Published v{version}"));
         self.last_published = Some(release);
         Ok(version)

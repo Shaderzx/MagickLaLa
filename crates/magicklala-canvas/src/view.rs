@@ -327,10 +327,9 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
                     }
                     let Some(placed) = plan.card(&node_id) else { return };
                     let dropped_at = [placed.rect[0] + placed.rect[2] * 0.5 + drag.dx, placed.rect[1] + placed.rect[3] * 0.5 + drag.dy];
-                    let over_pot = plan.is_over_pot(dropped_at);
-                    if over_pot && aside {
+                    if aside && plan.is_over_pot(dropped_at) {
                         toss(s, Toss::IntoPot(node_id.clone()));
-                    } else if !over_pot && !aside {
+                    } else if !aside && plan.is_in_aside_zone(dropped_at) {
                         toss(s, Toss::Aside(node_id.clone()));
                     }
                 }
@@ -610,6 +609,11 @@ fn grimoire_graph_view<S: 'static>(state: &CanvasState, size: (f32, f32), lens: 
             tx.instant();
             let canvas = lens(s);
             let hit = canvas.node_at(canvas.camera.screen_to_world([press.x, press.y]));
+            canvas.context_card = hit.as_ref().and_then(|id| canvas.card(id)).map(|card| {
+                let top_left = canvas.camera.world_to_screen(card.position);
+                let bottom_right = canvas.camera.world_to_screen([card.position[0] + card.size[0], card.position[1] + card.size[1]]);
+                [top_left[0], top_left[1], bottom_right[0] - top_left[0], bottom_right[1] - top_left[1]]
+            });
             canvas.select(hit);
             canvas.context_menu = Some([press.x, press.y]);
         })

@@ -41,6 +41,7 @@ pub struct BrewPlan {
     pub pot: [f32; 4],
     pub plaque_top: f32,
     pub ghost_bottle: Option<[f32; 4]>,
+    pub aside_zone: [f32; 4],
     pub cards: Vec<BrewCard>,
 }
 
@@ -59,6 +60,11 @@ impl BrewPlan {
 
     pub fn pour_radius(&self) -> f32 {
         self.pot[2].max(self.pot[3]) * 0.72
+    }
+
+    pub fn is_in_aside_zone(&self, point: [f32; 2]) -> bool {
+        let zone = self.aside_zone;
+        point[0] >= zone[0] && point[0] <= zone[0] + zone[2] && point[1] >= zone[1] && point[1] <= zone[1] + zone[3] && !self.is_over_pot(point)
     }
 
     pub fn is_over_pot(&self, point: [f32; 2]) -> bool {
@@ -204,5 +210,11 @@ pub fn brew_plan(state: &CanvasState, size: (f32, f32)) -> BrewPlan {
     }
     let pot = to_screen(pot_x, (block_h - pot_block_h) * 0.5, POT_SIZE[0], POT_SIZE[1]);
     let ghost_bottle = bottles.is_empty().then(|| to_screen(bottles_x, (block_h - SINGLE_BOTTLE_SIZE[1]) * 0.5, SINGLE_BOTTLE_SIZE[0], SINGLE_BOTTLE_SIZE[1]));
-    BrewPlan { scale, pot, plaque_top: pot[1] + pot[3] + 8.0 * scale, ghost_bottle, cards }
+    let plaque_top = pot[1] + pot[3] + 8.0 * scale;
+    let aside_row_top = to_screen(0.0, aside_top, 0.0, 0.0)[1] - ASIDE_GAP * 0.5 * scale;
+    let block_bottom = to_screen(0.0, block_h, 0.0, 0.0)[1] + 12.0 * scale;
+    let zone_top = if aside.is_empty() { block_bottom.max(plaque_top + 40.0 * scale) } else { aside_row_top.max(plaque_top + 40.0 * scale) };
+    let zone_top = zone_top.min(size.1 - 84.0).max(0.0);
+    let aside_zone = [0.0, zone_top, size.0, (size.1 - zone_top).max(84.0)];
+    BrewPlan { scale, pot, plaque_top, ghost_bottle, aside_zone, cards }
 }

@@ -139,8 +139,21 @@ fn menu_item(spec: MenuItemSpec<'_>, t: &HearthPalette, action: fn(&mut StudioAp
 fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<El> {
     let anchor = app.canvas.context_menu?;
     let view = app.canvas_size();
-    let x = anchor[0].min(view.0 - CONTEXT_MENU_SIZE.0 - 12.0).max(12.0);
-    let y = anchor[1].min(view.1 - CONTEXT_MENU_SIZE.1 - 12.0).max(12.0);
+    let beside = app.canvas.context_card.filter(|_| app.canvas.selection.is_some()).map(|card| {
+        let right = card[0] + card[2] + 10.0;
+        let left = card[0] - CONTEXT_MENU_SIZE.0 - 10.0;
+        let x = if right + CONTEXT_MENU_SIZE.0 <= view.0 - 8.0 {
+            right
+        } else if left >= 8.0 {
+            left
+        } else {
+            anchor[0]
+        };
+        [x, card[1]]
+    });
+    let [px, py] = beside.unwrap_or(anchor);
+    let x = px.min(view.0 - CONTEXT_MENU_SIZE.0 - 12.0).max(12.0);
+    let y = py.min(view.1 - CONTEXT_MENU_SIZE.1 - 12.0).max(12.0);
     let selected_card = app.canvas.selected_card();
     let selected_title = selected_card.map(|card| card.title.as_str());
     let quick_add_title = app.specs.iter().find(|spec| spec.kind == QUICK_ADD_KIND).map_or(QUICK_ADD_KIND, |spec| spec.title.as_str());

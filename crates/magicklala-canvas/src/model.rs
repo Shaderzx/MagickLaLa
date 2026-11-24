@@ -233,6 +233,7 @@ pub struct CanvasState {
     pub hovered: Option<NodeId>,
     pub drag: DragState,
     pub context_menu: Option<[f32; 2]>,
+    pub context_card: Option<[f32; 4]>,
     pub last_connect_error: Option<ConnectError>,
     pub light: bool,
     pub mode: WorkbenchMode,
@@ -481,6 +482,18 @@ impl CanvasState {
             WorkbenchMode::Cauldron => self.brew_camera.zoom_about_origin(factor),
             WorkbenchMode::Grimoire => self.camera.zoom_by(factor, pivot),
         }
+    }
+
+    pub fn clear_run_marks(&mut self) {
+        self.wires.iter_mut().for_each(|wire| wire.active = false);
+        for card in &mut self.nodes {
+            card.status = ExecutionStatus::Idle;
+            card.duration_ms = None;
+            card.step_order = None;
+        }
+        self.brew_summary = None;
+        self.last_brew = None;
+        self.running_brew = false;
     }
 
     pub fn has_run(&self) -> bool {

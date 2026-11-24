@@ -173,6 +173,7 @@ fn plaque_text(state: &CanvasState, mood: CauldronMood, plan: &BrewPlan) -> Stri
     match mood {
         CauldronMood::Empty => "Empty cauldron".to_owned(),
         CauldronMood::Hexed if state.last_brew == Some(magicklala_graph::RunStatus::TimedOut) => "Timed out".to_owned(),
+        CauldronMood::Hexed if state.last_brew == Some(magicklala_graph::RunStatus::Failed) => "Failed".to_owned(),
         CauldronMood::Hexed => "Hexed".to_owned(),
         CauldronMood::Ready if state.last_brew == Some(magicklala_graph::RunStatus::Cancelled) => format!("Cancelled · {ingredients} {word}{aside_part}"),
         CauldronMood::Simmering => format!("Brewing · {ingredients} {word}"),
@@ -328,13 +329,9 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         .on_secondary_press_local(move |s: &mut S, press, tx| {
             tx.instant();
             let canvas = lens(s);
-            let hit = hits
-                .iter()
-                .rev()
-                .find_map(|(id, r)| (press.x >= r[0] && press.x <= r[0] + r[2] && press.y >= r[1] && press.y <= r[1] + r[3]).then(|| id.clone()));
-            if hit.is_some() {
-                canvas.select(hit);
-            }
+            let hit = hits.iter().rev().find(|(_, r)| press.x >= r[0] && press.x <= r[0] + r[2] && press.y >= r[1] && press.y <= r[1] + r[3]);
+            canvas.context_card = hit.map(|(_, r)| *r);
+            canvas.select(hit.map(|(id, _)| id.clone()));
             canvas.context_menu = Some([press.x, press.y]);
         })
         .child(hearth_glow)
@@ -344,7 +341,31 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
     for bubble in bubbles(mood, &plan, &p) {
         board = board.child(bubble);
     }
-    if state.pot_hover {
+    let lifted = match &state.drag {
+        DragState::LiftingVial { node, offset } => {
+            plan.card(node).map(|placed| (placed.role, [placed.rect[0] + placed.rect[2] * 0.5 + offset[0], placed.rect[1] + placed.rect[3] * 0.5 + offset[1]]))
+        }
+        _ => None,
+    };
+    if let Some((BrewRole::Ingredient, point)) = lifted {
+        let zone = plan.aside_zone;
+        let inside = plan.is_in_aside_zone(point);
+        board = board.child(
+            row()
+                .key("aside-tray")
+                .size(zone[2] - 28.0, zone[3] - 14.0)
+                .absolute(zone[0] + 14.0, zone[1])
+                .radius(18.0)
+                .continuous_corners()
+                .justify_center()
+                .items_center()
+                .fill(if inside { with_alpha(p.gold_hi, 0.14) } else { with_alpha(p.card, 0.55) })
+                .border(if inside { 2.0 } else { 1.4 }, if inside { p.simmer_ink() } else { p.rule_2 })
+                .child(text("Set aside").font(TextStyle::new(12.0, 700.0)).color(if inside { p.simmer_ink() } else { p.ink_2 })),
+        );
+    }
+    let lifted_over_pot = matches!(lifted, Some((BrewRole::Aside, point)) if plan.is_over_pot(point));
+    if state.pot_hover || lifted_over_pot {
         let w = plan.pot[2] * 0.86;
         let [hx, hy] = rim_point(&plan, 0.5);
         board = board.child(
