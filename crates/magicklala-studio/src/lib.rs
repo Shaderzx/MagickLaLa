@@ -183,7 +183,9 @@ impl StudioWorkspace {
     fn of(record: SpellRecord, releases: Vec<SpellRelease>) -> Self {
         let recipe = recipe_of(&record.graph, &registry_specs());
         let (graph, active_release) = match releases.last() {
-            Some(release) if release.graph == recipe => (record.graph, Some(release.version)),
+            Some(release) if same_recipe(&release.graph, &recipe) && recipe.nodes.iter().all(|node| node.kind != SUBGRAPH_KIND) => {
+                (record.graph, Some(release.version))
+            }
             Some(release) if release.created_at > record.updated_at => (release.graph.clone(), Some(release.version)),
             _ => (record.graph, None),
         };
@@ -2097,7 +2099,6 @@ impl StudioApp {
         self.canvas.release_badge = self.active_release_version.map(|version| format!("v{version}"));
         self.dirty = true;
         self.canvas.spell_name = self.spell.name.clone();
-        self.canvas.release_badge = None;
         self.canvas.validated = matches!(self.validation, ValidationState::Valid);
         self.canvas.invalid_brew = matches!(self.validation, ValidationState::Invalid(_));
         self.canvas.running_brew = self.is_running();

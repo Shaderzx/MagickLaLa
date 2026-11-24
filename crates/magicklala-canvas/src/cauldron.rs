@@ -69,15 +69,15 @@ fn cubic_samples(from: [f32; 2], c1: [f32; 2], c2: [f32; 2], to: [f32; 2], steps
 
 fn lane_route(from: [f32; 2], to: [f32; 2], lane: f32, s: f32) -> Vec<[f32; 2]> {
     let rising = to[1] - 10.0 * s < from[1];
-    let turn = [lane, if rising { to[1] - 10.0 * s } else { to[1] - 44.0 * s }];
+    let turn = [lane, if rising { to[1] - 6.0 * s } else { to[1] - 24.0 * s }];
     let bend = ((from[1] - turn[1]).abs() * 0.5).min(48.0 * s);
     let approach = [lane, if rising { turn[1] + bend } else { turn[1] - bend }];
     let mut points = cubic_samples(from, [from[0] + (lane - from[0]) * 0.7, from[1]], approach, turn, 28);
     points.pop();
     let heading = [turn[0] - approach[0], turn[1] - approach[1]];
     let length = heading[0].hypot(heading[1]).max(0.01);
-    let carry = [turn[0] + heading[0] / length * 22.0 * s, turn[1] + heading[1] / length * 22.0 * s];
-    points.extend(cubic_samples(turn, carry, [to[0] - 6.0 * s, to[1] - 26.0 * s], to, 16));
+    let carry = [turn[0] + heading[0] / length * 12.0 * s, turn[1] + heading[1] / length * 12.0 * s];
+    points.extend(cubic_samples(turn, carry, [to[0] - 6.0 * s, to[1] - 16.0 * s], to, 16));
     points
 }
 
@@ -107,54 +107,51 @@ fn ribbon_course(plan: &BrewPlan, from: [f32; 2], to: [f32; 2], own: Option<&Nod
         let r = card.rect;
         [r[0] - 8.0 * s, r[1] + r[3] * 0.46, r[2] + 16.0 * s, r[3] * 0.54]
     });
+    let inside = |r: [f32; 4], points: &[[f32; 2]]| {
+        points.iter().filter(|point| point[0] >= r[0] && point[0] <= r[0] + r[2] && point[1] >= r[1] && point[1] <= r[1] + r[3]).count()
+    };
     let hits = |points: &[[f32; 2]]| -> usize {
         let body = &points[..points.len().saturating_sub(points.len() / 8)];
-        let inside =
-            |r: [f32; 4]| points.iter().filter(|point| point[0] >= r[0] && point[0] <= r[0] + r[2] && point[1] >= r[1] && point[1] <= r[1] + r[3]).count();
-        plan.cards
-            .iter()
-            .filter(|card| Some(&card.id) != own)
-            .map(|card| {
-                let r = card.rect;
-                body.iter().filter(|point| point[0] >= r[0] && point[0] <= r[0] + r[2] && point[1] >= r[1] && point[1] <= r[1] + r[3]).count()
-            })
-            .sum::<usize>()
-            + own_tag.map_or(0, inside)
+        plan.cards.iter().filter(|card| Some(&card.id) != own).map(|card| inside(card.rect, body)).sum::<usize>() + own_tag.map_or(0, |tag| inside(tag, points))
     };
-    let mut best = cubic_samples(from, [from[0] + (to[0] - from[0]) * 0.4, from[1]], [to[0], to[1] - 30.0 * s], to, 44);
-    let mut best_hits = hits(&best);
-    let blocking: Vec<[f32; 4]> = plan
-        .cards
-        .iter()
-        .filter(|card| Some(&card.id) != own)
-        .map(|card| card.rect)
-        .filter(|r| best.iter().any(|point| point[0] >= r[0] && point[0] <= r[0] + r[2] && point[1] >= r[1] && point[1] <= r[1] + r[3]))
-        .collect();
+    let overshoot = |points: &[[f32; 2]]| -> u32 {
+        let top = points.iter().map(|point| point[1]).fold(f32::MAX, f32::min);
+        (to[1].min(from[1]) - top - 20.0 * s).max(0.0).round() as u32
+    };
+    let dx = to[0] - from[0];
+    let direct = cubic_samples(from, [from[0] + dx * 0.4, from[1]], [to[0], to[1] - 16.0 * s], to, 44);
+    let blocking: Vec<[f32; 4]> = plan.cards.iter().filter(|card| Some(&card.id) != own).map(|card| card.rect).filter(|r| inside(*r, &direct) > 0).collect();
     let lanes_floor = plan.lanes.map_or(f32::MIN, |[shelf_bottom, band]| shelf_bottom + band + 6.0 * s);
-    let ceiling = (blocking.iter().map(|rect| rect[1]).fold(to[1] - 30.0 * s, f32::min) - 14.0 * s - blocking.len() as f32 * 5.0 * s).max(lanes_floor);
+    let ceiling =
+        (blocking.iter().map(|rect| rect[1]).fold(to[1] - 16.0 * s, f32::min) - 6.0 * s - blocking.len().saturating_sub(1) as f32 * 4.0 * s).max(lanes_floor);
     let climb_x = blocking.iter().map(|rect| rect[0]).fold(to[0], f32::min) - 18.0 * s;
-    let over = over_route(from, to, ceiling, climb_x, s);
-    let over_hits = hits(&over);
-    if over_hits < best_hits {
-        best = over;
-        best_hits = over_hits;
+    let mut candidates = vec![direct];
+    for (lead, tuck, lift) in [(0.3, 1.0, 10.0), (0.5, 1.0, 10.0), (0.2, 1.6, 14.0), (0.45, 0.0, 12.0), (0.15, 2.4, 6.0)] {
+        candidates.push(cubic_samples(from, [from[0] + dx * lead, from[1]], [to[0] - 22.0 * s * tuck, to[1] - lift * s], to, 44));
     }
+    candidates.push(over_route(from, to, ceiling, climb_x, s));
     let own_left = own.and_then(|id| plan.card(id)).map(|card| card.rect[0]);
     let column_left = plan.with_role(BrewRole::Bottle).map(|card| card.rect[0]).reduce(f32::min);
     for lane in [own_left, column_left].into_iter().flatten().map(|x| x - 14.0 * s).filter(|x| *x > from[0] + 8.0 * s) {
-        if best_hits == 0 {
-            break;
-        }
-        let candidate = lane_route(from, to, lane, s);
-        let count = hits(&candidate);
-        if count < best_hits {
-            best = candidate;
-            best_hits = count;
-        }
+        candidates.push(lane_route(from, to, lane, s));
     }
-    best
+    let sharp = |points: &[[f32; 2]]| -> bool {
+        let steps: Vec<[f32; 2]> = std::iter::once([1.0, 0.0])
+            .chain(points.windows(2).map(|pair| [pair[1][0] - pair[0][0], pair[1][1] - pair[0][1]]))
+            .filter(|step| step[0].hypot(step[1]) > 0.01)
+            .collect();
+        steps.windows(2).any(|pair| {
+            let dot = pair[0][0] * pair[1][0] + pair[0][1] * pair[1][1];
+            dot / (pair[0][0].hypot(pair[0][1]) * pair[1][0].hypot(pair[1][1])) < 0.34
+        })
+    };
+    candidates
+        .into_iter()
+        .enumerate()
+        .min_by_key(|(order, points)| (hits(points), sharp(points), overshoot(points), *order))
+        .map(|(_, points)| points)
+        .unwrap_or_default()
 }
-
 fn landing(plan: &BrewPlan, placed: &BrewCard, index: usize, spread: f32) -> ([f32; 2], f32) {
     if !plan.flank {
         return (rim_point(plan, index as f32 / spread.max(1.0)), (36.0 - index as f32 * 10.0).max(0.0) * plan.scale);

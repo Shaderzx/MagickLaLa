@@ -408,7 +408,7 @@ fn toolbar(app: &StudioApp, t: &HearthPalette) -> El {
         .child(brand)
         .child(divider())
         .child(row().min_w(0.0).shrink().child(heading(&app.spell.name, 14.5, 750.0, t.ink).truncate()));
-    if !empty_graph {
+    if !empty_graph && app.canvas.mode == WorkbenchMode::Grimoire {
         let stats_box =
             row().h(24.0).px(8.5).radius(12.0).continuous_corners().items_center().fill(t.wash_2).border(1.0, t.rule).child(label(stats, 11.0, 550.0, t.ink_2));
         left = left.child(stats_box);
@@ -760,14 +760,11 @@ fn left_rail(app: &StudioApp, t: &HearthPalette) -> El {
                     })
                 })
             };
-            let in_pot_count = magicklala_canvas::brew_plan(&app.canvas, app.canvas_size()).with_role(magicklala_canvas::BrewRole::Ingredient).count();
             let footer_text = if !query.is_empty() {
                 let m_word = if filtered.len() == 1 { "match" } else { "matches" };
-                format!("{} {m_word} · {} in cauldron", filtered.len(), in_pot_count)
-            } else if app.canvas.nodes.is_empty() {
-                format!("{} ingredients", app.specs.len())
+                format!("{} {m_word}", filtered.len())
             } else {
-                format!("{} ingredients · {} in cauldron", app.specs.len(), in_pot_count)
+                format!("{} ingredients", app.specs.len())
             };
             let scroll_list = col()
                 .key("left-rail-scroll")

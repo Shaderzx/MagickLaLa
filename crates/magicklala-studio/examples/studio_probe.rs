@@ -4174,9 +4174,11 @@ fn one_voice(db_path: &Path) -> Result<serde_json::Value, String> {
             let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
             for (index, ribbon) in magicklala_canvas::cauldron::ribbon_paths(&plan).iter().enumerate() {
                 let mouth = ribbon.last().copied().unwrap_or_default();
+                let tap = ribbon.first().copied().unwrap_or_default();
                 let top = ribbon.iter().map(|point| point[1]).fold(f32::MAX, f32::min);
-                if mouth[1] - top > 24.0 * plan.scale {
-                    peaks.push(format!("{name}@{}: ribbon {index} peaks {}px above its mouth", size.0, (mouth[1] - top).round()));
+                let climb = mouth[1].min(tap[1]) - top;
+                if climb > 24.0 * plan.scale {
+                    peaks.push(format!("{name}@{}: ribbon {index} climbs {}px above its tap and mouth", size.0, climb.round()));
                 }
             }
         }
