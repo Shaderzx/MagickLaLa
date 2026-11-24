@@ -1376,13 +1376,7 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
         }
         list.child(item)
     });
-    col()
-        .key("inspector-trace")
-        .gap(10.0)
-        .pt(12.0)
-        .child(header)
-        .child(inspector_section_heading("Brewing sequence", t))
-        .child(steps)
+    col().key("inspector-trace").gap(10.0).pt(12.0).child(header).child(inspector_section_heading("Brewing sequence", t)).child(steps)
 }
 
 fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
@@ -1727,14 +1721,12 @@ fn playground_panel(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         );
     }
     let body = if transcript.is_empty() {
-        col()
-            .w_full()
-            .pt(40.0)
-            .px(14.0)
-            .items_center()
-            .gap(10.0)
-            .child(canvas(empty_bottle_mark(light, 42.0)).size(42.0, 42.0))
-            .child(heading("No messages yet", 15.0, 800.0, t.ink))
+        col().w_full().pt(40.0).px(14.0).items_center().gap(10.0).child(canvas(empty_bottle_mark(light, 42.0)).size(42.0, 42.0)).child(heading(
+            "No messages yet",
+            15.0,
+            800.0,
+            t.ink,
+        ))
     } else {
         transcript.iter().enumerate().fold(col().gap(2.0).pt(8.0).pb(12.0), |mut list, (index, message)| {
             if message.from_user && index > 0 {

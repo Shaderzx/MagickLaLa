@@ -1794,7 +1794,10 @@ fn plain_words() -> Result<serde_json::Value, String> {
     let headings: Vec<String> = PALETTE_CATEGORY_ORDER
         .iter()
         .filter_map(|category| {
-            rt.elements().into_iter().find(|element| element.key.as_deref() == Some(&format!("palette-heading-{category}"))).and_then(|element| element.label.or(element.text))
+            rt.elements()
+                .into_iter()
+                .find(|element| element.key.as_deref() == Some(&format!("palette-heading-{category}")))
+                .and_then(|element| element.label.or(element.text))
         })
         .collect();
     let mut tabs: Vec<String> = Vec::new();
@@ -1820,7 +1823,13 @@ fn texts_under(rt: &mut Runtime<StudioApp>, key: &str) -> String {
             None => return false,
         }
     };
-    elements.iter().enumerate().filter(|(index, element)| !element.exiting && inside(*index)).filter_map(|(_, element)| element.text.clone()).collect::<Vec<_>>().join(" ")
+    elements
+        .iter()
+        .enumerate()
+        .filter(|(index, element)| !element.exiting && inside(*index))
+        .filter_map(|(_, element)| element.text.clone())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn live_finish(rt: &mut Runtime<StudioApp>) -> Result<(), String> {
