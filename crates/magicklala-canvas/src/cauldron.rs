@@ -1,7 +1,7 @@
 use magicklala_graph::NodeId;
 use rune::{Beat, Color, El, LineCap, LoopSpec, Path, Phase, Sequence, Shape, TextStyle, canvas, el, row, text};
 
-use crate::brew::{BrewCard, BrewPlan, BrewRole, MULTI_BOTTLE_SIZE, SINGLE_BOTTLE_SIZE, VIAL_SIZE, brew_plan};
+use crate::brew::{BrewCard, BrewPlan, BrewRole, MULTI_BOTTLE_SIZE, SINGLE_BOTTLE_SIZE, brew_plan};
 use crate::hearth::{
     CauldronMood, HearthPalette, StreamStyle, category_tone, distillation_ribbon_shape, ghost_potion_bottle_shape, hero_cauldron_shape, pouring_stream_shape,
     stream_ink, with_alpha,
@@ -396,8 +396,8 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         } else {
             placed.recipe_step
         };
-        let origin = card_frame(placed.rect, VIAL_SIZE, plan.scale, lifted_offset(state, &placed.id));
-        let vial = ingredient_vial_card(state, card, step, origin, VIAL_SIZE, placed.role == BrewRole::Aside, &p, lens, toss, plan.clone());
+        let origin = card_frame(placed.rect, plan.vial, plan.scale, lifted_offset(state, &placed.id));
+        let vial = ingredient_vial_card(state, card, step, origin, plan.vial, placed.role == BrewRole::Aside, &p, lens, toss, plan.clone());
         board = board.child(vial.scale(plan.scale));
     }
     for placed in &bottles {

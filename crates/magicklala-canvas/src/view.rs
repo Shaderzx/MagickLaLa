@@ -191,18 +191,20 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     let node_id = card.id.clone();
     let select_id = card.id.clone();
 
+    let dense = dims[1] < 50.0;
+    let badge = if dense { 30.0 } else { 38.0 };
     let vial_badge = el()
-        .size(38.0, 38.0)
-        .radius(19.0)
+        .size(badge, badge)
+        .radius(badge * 0.5)
         .fill(if hexed { with_alpha(p.hex, 0.14) } else { tone.tint })
         .border(1.3, if hexed { p.hex } else { tone.border })
         .center()
-        .child(canvas(mini_vial_icon(&card.category, state.light, 29.0)).size(29.0, 29.0));
+        .child(canvas(mini_vial_icon(&card.category, state.light, badge * 0.76)).size(badge * 0.76, badge * 0.76));
 
     let step_badge = step_num.map(|num| {
         row()
-            .size(17.0, 17.0)
-            .radius(8.5)
+            .size(20.0, 20.0)
+            .radius(10.0)
             .items_center()
             .justify_center()
             .fill(if hexed {
@@ -222,7 +224,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
                     p.rule_2
                 },
             )
-            .child(text(num.to_string()).font(TextStyle::new(9.2, 750.0).features("'tnum' 1")).color(if hexed || card.status == ExecutionStatus::Succeeded {
+            .child(text(num.to_string()).font(TextStyle::new(11.0, 750.0).features("'tnum' 1")).color(if hexed || card.status == ExecutionStatus::Succeeded {
                 p.primary_ink
             } else {
                 p.ink_2
@@ -243,7 +245,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
                 .fill(p.card)
                 .border(1.2, p.hex)
                 .shadow(2.0, 6.0, p.shadow_card)
-                .child(text(missing_label).font(TextStyle::new(9.2, 750.0)).color(p.hex)),
+                .child(text(missing_label).font(TextStyle::new(11.0, 750.0)).color(p.hex)),
         )
     } else if card.status == ExecutionStatus::Succeeded {
         let ms_text = match card.duration_ms {
@@ -259,10 +261,12 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
                 .fill(p.card)
                 .border(1.0, p.broth_mid)
                 .shadow(2.0, 6.0, p.shadow_card)
-                .child(text(ms_text).font(TextStyle::new(9.5, 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam })),
+                .child(text(ms_text).font(TextStyle::new(11.0, 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam })),
         )
     } else if card.status == ExecutionStatus::Running {
-        Some(row().px(6.0).py(1.5).radius(7.0).fill(p.card).border(1.0, p.gold).child(text("Simmering").font(TextStyle::new(9.2, 750.0)).color(p.simmer_ink())))
+        Some(
+            row().px(6.0).py(1.5).radius(7.0).fill(p.card).border(1.0, p.gold).child(text("Simmering").font(TextStyle::new(11.0, 750.0)).color(p.simmer_ink())),
+        )
     } else if dimmed {
         let untaken_label = state
             .wires
@@ -277,14 +281,14 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
                 .radius(7.0)
                 .fill(p.untaken_pill_fill())
                 .border(1.0, p.untaken_border())
-                .child(text(untaken_label).font(TextStyle::new(9.2, 700.0)).color(p.untaken_pill_ink())),
+                .child(text(untaken_label).font(TextStyle::new(11.0, 700.0)).color(p.untaken_pill_ink())),
         )
     } else {
         None
     };
 
     let top_row =
-        row().w_full().items_center().child(text(&card.title).font(TextStyle::new(12.4, 750.0)).color(if dimmed { untaken_title } else { p.ink }).truncate());
+        row().w_full().items_center().child(text(&card.title).font(TextStyle::new(13.0, 750.0)).color(if dimmed { untaken_title } else { p.ink }).truncate());
 
     let sub_color = if hexed {
         p.hex
@@ -306,7 +310,11 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         .border(border_w, border_col)
         .shadow(if card.selected { 5.0 } else { 3.0 }, if card.selected { 14.0 } else { 9.0 }, if dimmed { Color::TRANSPARENT } else { p.shadow_card })
         .child(vial_badge)
-        .child(col().grow(1.0).min_w(0.0).gap(2.0).child(top_row).child(text(&card.kind).font(TextStyle::new(9.8, 500.0).mono()).color(sub_color).truncate()))
+        .child(if dense {
+            col().grow(1.0).min_w(0.0).child(top_row)
+        } else {
+            col().grow(1.0).min_w(0.0).gap(2.0).child(top_row).child(text(&card.kind).font(TextStyle::new(11.5, 500.0).mono()).color(sub_color).truncate())
+        })
         .on_press(move |s: &mut S| lens(s).select(Some(select_id.clone())))
         .on_drag(move |s: &mut S, drag, tx| {
             tx.instant();
@@ -387,7 +395,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
             .fill(p.card)
             .border(1.0, p.broth_mid)
             .shadow(2.0, 6.0, p.shadow_card)
-            .child(text(ms_text).font(TextStyle::new(9.5, 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam }))
+            .child(text(ms_text).font(TextStyle::new(11.0, 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam }))
     } else if untaken {
         row()
             .px(5.5)
@@ -395,9 +403,9 @@ pub(crate) fn branch_bottle_view<S: 'static>(
             .radius(7.0)
             .fill(p.untaken_pill_fill())
             .border(1.0, p.untaken_border())
-            .child(text("Untaken").font(TextStyle::new(9.2, 700.0)).color(p.untaken_title()))
+            .child(text("Untaken").font(TextStyle::new(11.0, 700.0)).color(p.untaken_title()))
     } else {
-        row().px(5.5).py(1.5).radius(7.0).fill(p.wash_2).border(1.0, p.rule_2).child(text("Branch").font(TextStyle::new(9.2, 650.0)).color(p.ink_2))
+        row().px(5.5).py(1.5).radius(7.0).fill(p.wash_2).border(1.0, p.rule_2).child(text("Branch").font(TextStyle::new(11.0, 650.0)).color(p.ink_2))
     };
     let card_bg = if untaken { p.untaken_fill() } else { p.card };
     let card_border = if card.selected || taken {
@@ -419,8 +427,8 @@ pub(crate) fn branch_bottle_view<S: 'static>(
         .fill(card_bg)
         .border(if taken || card.selected { 1.6 } else { 1.1 }, card_border)
         .shadow(2.0, 8.0, if untaken { Color::TRANSPARENT } else { p.shadow_card })
-        .child(text(title).font(TextStyle::new(11.4, 750.0)).color(title_col).truncate())
-        .child(text(&card.kind).font(TextStyle::new(9.5, 500.0).mono()).color(sub_col).truncate());
+        .child(text(title).font(TextStyle::new(12.5, 750.0)).color(title_col).truncate())
+        .child(text(&card.kind).font(TextStyle::new(11.0, 500.0).mono()).color(sub_col).truncate());
     let mut tag_wrap = el().w_full().child(tag_inner).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(pill));
     if let Some(num) = step_num {
         let step_badge = row()
@@ -429,7 +437,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
             .items_center()
             .justify_center()
             .fill(p.primary_bg)
-            .child(text(num.to_string()).font(TextStyle::new(9.2, 750.0).features("'tnum' 1")).color(p.primary_ink));
+            .child(text(num.to_string()).font(TextStyle::new(11.0, 750.0).features("'tnum' 1")).color(p.primary_ink));
         tag_wrap = tag_wrap.child(el().absolute(-6.0, -7.0).child(step_badge));
     }
     let tag = col().w_full().child(tag_wrap);
@@ -469,7 +477,7 @@ pub(crate) fn potion_stand_view<S: 'static>(
 
     let out_brewed = primary_output.is_some_and(|c| c.status == ExecutionStatus::Succeeded);
     let mut header_row =
-        row().w_full().gap(4.0).items_center().justify_between().child(text(spell_label).font(TextStyle::new(12.0, 750.0)).color(p.ink).truncate());
+        row().w_full().gap(4.0).items_center().justify_between().child(text(spell_label).font(TextStyle::new(13.0, 750.0)).color(p.ink).truncate());
     if sealed_vintage && let Some(vintage) = &state.release_badge {
         header_row = header_row.child(
             row()
@@ -477,7 +485,7 @@ pub(crate) fn potion_stand_view<S: 'static>(
                 .py(1.0)
                 .radius(5.5)
                 .fill(p.primary_bg)
-                .child(text(vintage).font(TextStyle::new(9.5, 700.0).features("'tnum' 1")).color(p.primary_ink)),
+                .child(text(vintage).font(TextStyle::new(11.0, 700.0).features("'tnum' 1")).color(p.primary_ink)),
         );
     } else if out_brewed {
         header_row = header_row.child(
@@ -487,7 +495,7 @@ pub(crate) fn potion_stand_view<S: 'static>(
                 .radius(5.5)
                 .fill(p.route_taken_fill())
                 .border(1.0, p.broth_mid)
-                .child(text("Test").font(TextStyle::new(9.2, 700.0)).color(if state.light { p.broth_deep } else { p.broth_foam })),
+                .child(text("Test").font(TextStyle::new(11.0, 700.0)).color(if state.light { p.broth_deep } else { p.broth_foam })),
         );
     }
     let mut tag_card = col()
@@ -501,8 +509,8 @@ pub(crate) fn potion_stand_view<S: 'static>(
         .border(if selected { 2.0 } else { 1.2 }, if selected { p.broth_mid } else { p.rule_2 })
         .shadow(3.0, 10.0, p.shadow_card)
         .child(header_row)
-        .child(text(out_title).font(TextStyle::new(11.0, 600.0)).color(p.ink_2).truncate())
-        .child(text(out_kind).font(TextStyle::new(9.5, 500.0).mono()).color(p.mute).truncate());
+        .child(text(out_title).font(TextStyle::new(12.0, 600.0)).color(p.ink_2).truncate())
+        .child(text(out_kind).font(TextStyle::new(11.0, 500.0).mono()).color(p.mute).truncate());
     if out_brewed {
         let ms_text = match primary_output.and_then(|c| c.duration_ms) {
             Some(0) => "✓ <1ms".to_owned(),
@@ -516,7 +524,7 @@ pub(crate) fn potion_stand_view<S: 'static>(
             .fill(p.card)
             .border(1.0, p.broth_mid)
             .shadow(2.0, 6.0, p.shadow_card)
-            .child(text(ms_text).font(TextStyle::new(9.5, 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam }));
+            .child(text(ms_text).font(TextStyle::new(11.0, 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam }));
         let mut wrapped = el().w_full().child(tag_card).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(timing_pill));
         if let Some(num) = step_num {
             let step_badge = row()
@@ -525,7 +533,7 @@ pub(crate) fn potion_stand_view<S: 'static>(
                 .items_center()
                 .justify_center()
                 .fill(p.primary_bg)
-                .child(text(num.to_string()).font(TextStyle::new(9.2, 750.0).features("'tnum' 1")).color(p.primary_ink));
+                .child(text(num.to_string()).font(TextStyle::new(11.0, 750.0).features("'tnum' 1")).color(p.primary_ink));
             wrapped = wrapped.child(el().absolute(-5.0, -7.0).child(step_badge));
         }
         tag_card = col().w_full().child(wrapped);
