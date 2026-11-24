@@ -3006,6 +3006,19 @@ fn fit_and_wording(db_path: &Path) -> Result<serde_json::Value, String> {
         .filter(|card| !text_lines_under(&compact, &format!("node-{}", card.id.0)).iter().any(|(line, _)| line == &card.kind))
         .map(|card| card.kind.clone())
         .collect();
+    let mut measure = magicklala_studio::studio_text_system();
+    let mut formulas_cut = Vec::new();
+    for spell in [StudioApp::from_registry().spell.clone(), dozen_ingredient_spell()] {
+        let rt = sized(spell, (960.0, 640.0));
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        for card in rt.state.canvas.nodes.iter().filter(|card| plan.card(&card.id).is_some_and(|placed| placed.role != magicklala_canvas::BrewRole::Bottle)) {
+            let Some((_, rect)) = text_lines_under(&rt, &format!("node-{}", card.id.0)).into_iter().find(|(line, _)| line == &card.kind) else { continue };
+            let (natural, _) = measure.measure(&card.kind, rune::TextStyle::new(11.5, 500.0).mono(), 1.0);
+            if natural * plan.scale > rect[2] + 1.0 {
+                formulas_cut.push(card.kind.clone());
+            }
+        }
+    }
 
     let empty_log = texts_under(&mut sized(SpellGraph::new("New Potion"), (1280.0, 800.0)), "trace-strip");
     let support_log = texts_under(&mut sized(StudioApp::from_registry().spell.clone(), (1280.0, 800.0)), "trace-strip");
@@ -3060,6 +3073,7 @@ fn fit_and_wording(db_path: &Path) -> Result<serde_json::Value, String> {
         "strandClearance": clearance,
         "ringBelowSwitch": rings,
         "formulasMissingAt960": formulas,
+        "formulasCutAt960": formulas_cut,
         "logs": { "empty": empty_log, "support": support_log },
         "midBrewPublishError": mid_brew_error,
         "noDbPublishError": no_db_error,

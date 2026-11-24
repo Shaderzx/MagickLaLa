@@ -1193,6 +1193,7 @@ test('Studio reads as one finished product: twelve strands keep clear of every c
     expect(report.strandClearance).toBeGreaterThanOrEqual(6);
     for (const gap of report.ringBelowSwitch) expect(gap).toBeGreaterThanOrEqual(8);
     expect(report.formulasMissingAt960).toEqual([]);
+    expect(report.formulasCutAt960).toEqual([]);
     expect(report.logs.empty).toContain('Not brewed yet');
     expect(report.logs.support).toContain('Not brewed yet');
     expect(report.logs.empty).not.toMatch(/Idle/);
