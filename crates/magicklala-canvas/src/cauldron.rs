@@ -62,6 +62,10 @@ fn pouring_cards<'a>(state: &'a CanvasState, plan: &'a BrewPlan) -> impl Iterato
         .filter(|(_, card)| !state.has_run() || matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Running))
 }
 
+pub fn bottle_filled(state: &CanvasState, _bottle: &NodeCardModel) -> bool {
+    cauldron_mood(state) == CauldronMood::Brewed
+}
+
 pub fn potion_tint(state: &CanvasState, plan: &BrewPlan) -> Option<Color> {
     let liquids: Vec<Color> = pouring_cards(state, plan).map(|(_, card)| category_tone(&card.category, state.light).liquid).collect();
     brew_tint(&liquids)

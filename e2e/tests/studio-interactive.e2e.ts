@@ -1073,8 +1073,10 @@ test('Setting aside or deleting the middle step of a recipe joins the steps arou
     expect(pulled.outcome).toBe('Succeeded');
     expect(pulled.reply).toBe('done');
     expect(pulled.plaque).toMatch(/^Brewed · /);
+    expect(pulled.bottleFull).toBe(true);
   }
   expect(emptyBottle.reply).not.toBe('done');
+  expect(emptyBottle.bottleFull).toBe(false);
   expect(emptyBottle.plaque).toMatch(/bottle empty/);
 });
 
@@ -1104,4 +1106,10 @@ test('Studio tells the truth in the corners: a tossed Replace really shapes the 
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('Dropping a pantry ingredient on the set-aside tray adds it set aside with no wires instead of stirring it in', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['tray-drop']);
+
+  expect(report).toEqual({ added: 1, role: 'Aside', wires: 0 });
 });

@@ -2471,6 +2471,7 @@ fn pull_middle() -> Result<serde_json::Value, String> {
         click(rt, "run-spell")?;
         live_finish(rt)?;
         Ok(json!({
+            "bottleFull": rt.state.canvas.card(&NodeId::from("reply")).is_some_and(|card| magicklala_canvas::cauldron::bottle_filled(&rt.state.canvas, card)),
             "check": check,
             "outcome": rt.state.last_run.as_ref().map(|report| report.outcome.label()),
             "reply": rt.state.canvas.card(&NodeId::from("reply")).map(|card| card.status.label()),
@@ -2632,6 +2633,24 @@ fn sol_r3(db_path: &Path) -> Result<serde_json::Value, String> {
     }))
 }
 
+fn tray_drop() -> Result<serde_json::Value, String> {
+    let mut rt = headless(StudioApp::from_registry());
+    rt.update(|app, _| app.palette_query = rune::TextEdit::new("Generate Text"));
+    rt.frame(1.0);
+    rt.frame(3.0);
+    let key = "palette-ai-generate_text";
+    let row = rt.find(key).ok_or("no pantry row")?;
+    let canvas = rt.presented("canvas").map(|(rect, _)| rect).ok_or("no canvas")?;
+    let before = rt.state.spell.nodes.len();
+    drag(&mut rt, key, (canvas[0] + 60.0 - row.0, canvas[1] + canvas[3] - 30.0 - row.1))?;
+    let added = rt.state.spell.nodes.iter().skip(before).map(|node| node.id.0.clone()).next();
+    Ok(json!({
+        "added": rt.state.spell.nodes.len() - before,
+        "role": added.as_ref().and_then(|id| role_of(&rt.state, id)),
+        "wires": added.as_ref().map(|id| wires_of(&rt.state, id)),
+    }))
+}
+
 fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
         Some("surfaces") => capture_surfaces(Path::new(args.get(1).ok_or("missing output directory")?)),
@@ -2650,6 +2669,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("pour-shape") => pour_shape(),
         Some("r3-look") => r3_look(),
         Some("pull-middle") => pull_middle(),
+        Some("tray-drop") => tray_drop(),
         Some("sol-r3") => sol_r3(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
