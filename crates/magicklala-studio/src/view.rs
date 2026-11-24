@@ -160,7 +160,7 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<El> {
     );
     let mut card = col()
         .key("context-menu")
-        .size(CONTEXT_MENU_SIZE.0, CONTEXT_MENU_SIZE.1)
+        .w(CONTEXT_MENU_SIZE.0)
         .padding(5.0)
         .gap(2.0)
         .radius(13.0)
