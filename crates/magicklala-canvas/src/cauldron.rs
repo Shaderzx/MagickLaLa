@@ -27,26 +27,113 @@ fn rim_point(plan: &BrewPlan, share: f32) -> [f32; 2] {
 }
 
 fn spout_point(plan: &BrewPlan) -> [f32; 2] {
-    let pot = plan.pot;
-    if plan.flank {
-        let (cx, cy, u) = pot_frame(pot);
-        [cx + 94.0 * u, cy + 30.0 * u]
-    } else {
-        [pot[0] + pot[2] * 0.76, pot[1] + pot[3] * 0.42]
-    }
+    let (cx, cy, u) = pot_frame(plan.pot);
+    [cx + 94.0 * u, cy + 30.0 * u]
 }
 
 fn pot_frame(pot: [f32; 4]) -> (f32, f32, f32) {
     (pot[0] + pot[2] * 0.5, pot[1] + pot[3] * 0.56, (pot[2].min(pot[3]) / 240.0).clamp(0.55, 1.35))
 }
 
-fn tap_shape(mut shape: Shape, plan: &BrewPlan, p: &HearthPalette) -> Shape {
-    let (cx, cy, u) = pot_frame(plan.pot);
-    let pipe = Path::new().move_to([cx + 66.0 * u, cy + 30.0 * u]).line_to([cx + 90.0 * u, cy + 30.0 * u]);
-    shape = shape.stroke_path(&pipe, 7.0 * u, LineCap::Round, p.gold);
-    shape = shape.stroke_path(&pipe, 2.4 * u, LineCap::Round, p.gold_hi);
-    shape = fill_circle(shape, cx + 70.0 * u, cy + 30.0 * u, 5.2 * u, p.gold);
-    fill_circle(shape, cx + 93.0 * u, cy + 30.0 * u, 4.4 * u, p.gold_hi)
+fn tap_shape(size: [f32; 2], p: &HearthPalette) -> Shape {
+    let (cx, cy, u) = pot_frame([0.0, 0.0, size[0], size[1]]);
+    let mut shape = Shape::new();
+    let pipe = Path::new().move_to([cx + 66.0 * u, cy + 30.0 * u]).line_to([cx + 91.0 * u, cy + 30.0 * u]);
+    shape = shape.stroke_path(&pipe, 8.4 * u, LineCap::Round, p.iron_rim);
+    shape = shape.stroke_path(&pipe, 6.2 * u, LineCap::Round, p.gold);
+    shape = shape.stroke_path(&pipe, 2.0 * u, LineCap::Round, p.gold_hi);
+    let stem = Path::new().move_to([cx + 83.0 * u, cy + 27.0 * u]).line_to([cx + 83.0 * u, cy + 20.5 * u]);
+    shape = shape.stroke_path(&stem, 2.6 * u, LineCap::Round, p.gold);
+    let key = Path::new().move_to([cx + 78.5 * u, cy + 20.0 * u]).line_to([cx + 87.5 * u, cy + 20.0 * u]);
+    shape = shape.stroke_path(&key, 3.4 * u, LineCap::Round, p.iron_rim);
+    shape = shape.stroke_path(&key, 1.6 * u, LineCap::Round, p.gold_hi);
+    shape = fill_circle(shape, cx + 67.5 * u, cy + 30.0 * u, 6.0 * u, p.iron_rim);
+    shape = fill_circle(shape, cx + 67.5 * u, cy + 30.0 * u, 4.6 * u, p.gold);
+    shape = fill_circle(shape, cx + 66.4 * u, cy + 28.9 * u, 1.5 * u, p.gold_hi);
+    shape = fill_circle(shape, cx + 92.5 * u, cy + 30.0 * u, 4.6 * u, p.iron_rim);
+    fill_circle(shape, cx + 92.5 * u, cy + 30.0 * u, 3.4 * u, p.gold_hi)
+}
+
+fn cubic_samples(from: [f32; 2], c1: [f32; 2], c2: [f32; 2], to: [f32; 2], steps: usize) -> Vec<[f32; 2]> {
+    (0..=steps)
+        .map(|step| {
+            let t = step as f32 / steps as f32;
+            let u = 1.0 - t;
+            [
+                u * u * u * from[0] + 3.0 * u * u * t * c1[0] + 3.0 * u * t * t * c2[0] + t * t * t * to[0],
+                u * u * u * from[1] + 3.0 * u * u * t * c1[1] + 3.0 * u * t * t * c2[1] + t * t * t * to[1],
+            ]
+        })
+        .collect()
+}
+
+fn lane_route(from: [f32; 2], to: [f32; 2], lane: f32, s: f32) -> Vec<[f32; 2]> {
+    let turn = [lane, to[1] - 10.0 * s];
+    let bend = ((from[1] - turn[1]).abs() * 0.5).min(48.0 * s);
+    let rise = if turn[1] < from[1] { bend } else { -bend };
+    let mut points = cubic_samples(from, [from[0] + (lane - from[0]) * 0.7, from[1]], [lane, turn[1] + rise], turn, 28);
+    points.pop();
+    points.extend(cubic_samples(turn, [lane, turn[1] - 26.0 * s], [to[0], to[1] - 30.0 * s], to, 16));
+    points
+}
+
+fn over_route(from: [f32; 2], to: [f32; 2], ceiling: f32, climb_x: f32, s: f32) -> Vec<[f32; 2]> {
+    let corner = 22.0 * s;
+    let rise = [climb_x.clamp(from[0] + corner, (to[0] - corner * 2.0).max(from[0] + corner)), ceiling];
+    let fall = [to[0] - corner, ceiling];
+    let mut points = cubic_samples(from, [rise[0] - corner * 0.4, from[1]], [rise[0] - corner * 0.1, ceiling + (from[1] - ceiling) * 0.35], rise, 14);
+    points.pop();
+    let run = ((fall[0] - rise[0]).max(0.0) / (6.0 * s)).ceil().max(1.0) as usize;
+    points.extend((0..run).map(|step| [rise[0] + (fall[0] - rise[0]) * step as f32 / run as f32, ceiling]));
+    points.extend(cubic_samples(fall, [to[0] - corner * 0.2, ceiling], [to[0], ceiling + (to[1] - ceiling) * 0.4], to, 12));
+    points
+}
+
+fn ribbon_route(plan: &BrewPlan, to: [f32; 2], own: Option<&NodeId>) -> Vec<[f32; 2]> {
+    let from = spout_point(plan);
+    let s = plan.scale.max(0.4);
+    let hits = |points: &[[f32; 2]]| -> usize {
+        let body = &points[..points.len().saturating_sub(points.len() / 8)];
+        plan.cards
+            .iter()
+            .filter(|card| Some(&card.id) != own)
+            .map(|card| {
+                let r = card.rect;
+                body.iter().filter(|point| point[0] >= r[0] && point[0] <= r[0] + r[2] && point[1] >= r[1] && point[1] <= r[1] + r[3]).count()
+            })
+            .sum()
+    };
+    let mut best = cubic_samples(from, [from[0] + (to[0] - from[0]) * 0.4, from[1] - 12.0 * s], [to[0], to[1] - 30.0 * s], to, 44);
+    let mut best_hits = hits(&best);
+    let blocking: Vec<[f32; 4]> = plan
+        .cards
+        .iter()
+        .filter(|card| Some(&card.id) != own)
+        .map(|card| card.rect)
+        .filter(|r| best.iter().any(|point| point[0] >= r[0] && point[0] <= r[0] + r[2] && point[1] >= r[1] && point[1] <= r[1] + r[3]))
+        .collect();
+    let ceiling = blocking.iter().map(|rect| rect[1]).fold(to[1] - 30.0 * s, f32::min) - 14.0 * s - blocking.len() as f32 * 5.0 * s;
+    let climb_x = blocking.iter().map(|rect| rect[0]).fold(to[0], f32::min) - 18.0 * s;
+    let over = over_route(from, to, ceiling, climb_x, s);
+    let over_hits = hits(&over);
+    if over_hits < best_hits {
+        best = over;
+        best_hits = over_hits;
+    }
+    let own_left = own.and_then(|id| plan.card(id)).map(|card| card.rect[0]);
+    let column_left = plan.with_role(BrewRole::Bottle).map(|card| card.rect[0]).reduce(f32::min);
+    for lane in [own_left, column_left].into_iter().flatten().map(|x| x - 14.0 * s).filter(|x| *x > from[0] + 8.0 * s) {
+        if best_hits == 0 {
+            break;
+        }
+        let candidate = lane_route(from, to, lane, s);
+        let count = hits(&candidate);
+        if count < best_hits {
+            best = candidate;
+            best_hits = count;
+        }
+    }
+    best
 }
 
 fn landing(plan: &BrewPlan, placed: &BrewCard, index: usize, spread: f32) -> ([f32; 2], f32) {
@@ -63,26 +150,12 @@ fn landing(plan: &BrewPlan, placed: &BrewCard, index: usize, spread: f32) -> ([f
 pub fn ribbon_paths(plan: &BrewPlan) -> Vec<Vec<[f32; 2]>> {
     let bottles: Vec<&BrewCard> = plan.with_role(BrewRole::Bottle).collect();
     let multi = bottles.len() > 1;
-    let spout = spout_point(plan);
-    let ghost = plan.ghost_bottle.map(|ghost| [ghost[0] + ghost[2] * 0.5, ghost[1] + ghost[3] * 0.15]);
-    bottles
-        .iter()
-        .map(|placed| bottle_neck(placed, multi))
-        .chain(ghost)
-        .map(|to| {
-            let (c1, c2) = crate::hearth::ribbon_controls(spout, to, plan.flank);
-            (0..=44)
-                .map(|step| {
-                    let t = step as f32 / 44.0;
-                    let u = 1.0 - t;
-                    [
-                        u * u * u * spout[0] + 3.0 * u * u * t * c1[0] + 3.0 * u * t * t * c2[0] + t * t * t * to[0],
-                        u * u * u * spout[1] + 3.0 * u * u * t * c1[1] + 3.0 * u * t * t * c2[1] + t * t * t * to[1],
-                    ]
-                })
-                .collect()
-        })
-        .collect()
+    let ghost = plan.ghost_bottle.map(|ghost| ribbon_route(plan, ghost_neck(ghost), None));
+    bottles.iter().map(|placed| ribbon_route(plan, bottle_neck(placed, multi), Some(&placed.id))).chain(ghost).collect()
+}
+
+fn ghost_neck(ghost: [f32; 4]) -> [f32; 2] {
+    [ghost[0] + ghost[2] * 0.5, ghost[1] + ghost[3] * 0.15]
 }
 
 fn bottle_neck(card: &BrewCard, multi: bool) -> [f32; 2] {
@@ -298,10 +371,6 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
             _ => pouring_stream_shape(shape, vial_mouth(placed, plan), to, style),
         };
     }
-    let spout = spout_point(plan);
-    if plan.flank {
-        shape = tap_shape(shape, plan, p);
-    }
     for placed in &bottles {
         let Some(card) = state.card(&placed.id) else { continue };
         let taken = matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Running);
@@ -309,9 +378,7 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
         let ribbon_mood = if multi && taken { CauldronMood::Brewed } else { mood };
         shape = distillation_ribbon_shape(
             shape,
-            spout,
-            bottle_neck(placed, multi),
-            plan.flank,
+            &ribbon_route(plan, bottle_neck(placed, multi), Some(&placed.id)),
             ribbon_mood,
             state.light,
             taken,
@@ -320,17 +387,7 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
         );
     }
     if let Some(ghost) = plan.ghost_bottle {
-        shape = distillation_ribbon_shape(
-            shape,
-            spout,
-            [ghost[0] + ghost[2] * 0.5, ghost[1] + ghost[3] * 0.15],
-            plan.flank,
-            CauldronMood::Empty,
-            state.light,
-            false,
-            false,
-            None,
-        );
+        shape = distillation_ribbon_shape(shape, &ribbon_route(plan, ghost_neck(ghost), None), CauldronMood::Empty, state.light, false, false, None);
     }
     shape
 }
@@ -429,7 +486,8 @@ fn plaque(state: &CanvasState, mood: CauldronMood, plan: &BrewPlan, p: &HearthPa
     let hexed = mood == CauldronMood::Hexed;
     let width = 360.0;
     let [cx, _] = plan.pot_center();
-    row().w(width).justify_center().absolute(cx - width * 0.5, plan.plaque_top).child(
+    let shrink = plan.scale.min(1.0);
+    row().w(width).h(28.0).justify_center().absolute(cx - width * 0.5, plan.plaque_top - 14.0 * (1.0 - shrink)).scale(shrink).child(
         row()
             .key("cauldron-plaque")
             .h(28.0)
@@ -446,32 +504,28 @@ fn plaque(state: &CanvasState, mood: CauldronMood, plan: &BrewPlan, p: &HearthPa
     )
 }
 
-fn legend(state: &CanvasState, mood: CauldronMood, size: (f32, f32), p: &HearthPalette) -> Option<El> {
-    let untaken = state.has_run() && state.nodes.iter().any(|card| card.status == ExecutionStatus::Idle);
-    let hexed = mood == CauldronMood::Hexed;
-    if !untaken && !hexed {
-        return None;
+fn shelf_plank_shape(size: [f32; 2], ledges: &[f32], s: f32, p: &HearthPalette) -> Shape {
+    let mut shape = Shape::new();
+    let thick = 9.0 * s;
+    for &ledge in ledges {
+        let y = ledge + 2.0 * s;
+        let bracket = |shape: Shape, x: f32| {
+            let arm = Path::new().move_to([x, y + thick]).line_to([x, y + thick + 12.0 * s]).line_to([x + 12.0 * s, y + thick]);
+            shape.stroke_path(&arm, 2.6 * s, LineCap::Round, p.iron_rim)
+        };
+        shape = bracket(shape, size[0] * 0.14);
+        shape = bracket(shape, size[0] * 0.86 - 12.0 * s);
+        let board =
+            Path::new().move_to([2.0 * s, y]).line_to([size[0] - 2.0 * s, y]).line_to([size[0] - 2.0 * s, y + thick]).line_to([2.0 * s, y + thick]).close();
+        shape = shape.fill_path(&board, p.wood);
+        shape = shape.line([3.0 * s, y + 1.2 * s], [size[0] - 3.0 * s, y + 1.2 * s], 1.6 * s, LineCap::Round, p.wood_hi);
+        shape = shape.line([3.0 * s, y + thick], [size[0] - 3.0 * s, y + thick], 1.2 * s, LineCap::Round, with_alpha(p.iron_rim, 0.55));
+        for grain in [0.22_f32, 0.47, 0.71] {
+            let x = size[0] * grain;
+            shape = shape.line([x, y + thick * 0.45], [x + 22.0 * s, y + thick * 0.55], 0.9 * s, LineCap::Round, with_alpha(p.iron_rim, 0.28));
+        }
     }
-    let dash = |color: Color| row().gap(3.0).items_center().child(el().w(6.0).h(2.0).fill(color)).child(el().w(6.0).h(2.0).fill(color));
-    let mut keyed = row()
-        .key("canvas-legend")
-        .gap(12.0)
-        .px(11.0)
-        .py(6.0)
-        .radius(10.0)
-        .continuous_corners()
-        .items_center()
-        .fill(p.card)
-        .border(1.0, p.rule)
-        .absolute(14.0, (size.1 - 38.0).max(12.0));
-    if hexed {
-        keyed = keyed
-            .child(row().gap(5.0).items_center().child(dash(p.hex)).child(text("Hexed").font(TextStyle::new(11.0, 650.0)).color(p.hex)))
-            .child(row().gap(5.0).items_center().child(dash(p.mute)).child(text("Blocked").font(TextStyle::new(11.0, 600.0)).color(p.ink_2)));
-    } else if untaken {
-        keyed = keyed.child(row().gap(5.0).items_center().child(dash(p.mute)).child(text("Untaken").font(TextStyle::new(11.0, 600.0)).color(p.ink_2)));
-    }
-    Some(keyed)
+    shape
 }
 
 fn lifted_offset(state: &CanvasState, id: &NodeId) -> [f32; 2] {
@@ -520,6 +574,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
                 .key("hero-cauldron")
                 .size(pot[2], pot[3]),
         )
+        .child(canvas(tap_shape([pot[2], pot[3]], &p)).key("pot-tap").size(pot[2], pot[3]).absolute(0.0, 0.0))
         .on_press(move |s: &mut S| lens(s).select(None));
 
     let hits: Vec<(NodeId, [f32; 4])> = plan.cards.iter().map(|card| (card.id.clone(), card.rect)).collect();
@@ -579,11 +634,14 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
                 .absolute(zone[0] + 14.0, zone[1])
                 .radius(18.0)
                 .continuous_corners()
-                .justify_center()
-                .items_center()
-                .fill(if inside { with_alpha(p.gold_hi, 0.14) } else { with_alpha(p.card, 0.55) })
-                .border(if inside { 2.0 } else { 1.4 }, if inside { p.simmer_ink() } else { p.rule_2 })
-                .child(text("Set aside").font(TextStyle::new(12.0, 700.0)).color(if inside { p.simmer_ink() } else { p.ink_2 })),
+                .fill(if inside { with_alpha(p.gold_hi, 0.16) } else { with_alpha(p.card, 0.35) })
+                .child(
+                    canvas(shelf_plank_shape([zone[2] - 28.0, zone[3] - 14.0], &[(zone[3] - 14.0) * 0.62], 1.0, &p))
+                        .key("aside-tray-plank")
+                        .size(zone[2] - 28.0, zone[3] - 14.0)
+                        .absolute(0.0, 0.0)
+                        .opacity(if inside { 1.0 } else { 0.7 }),
+                ),
         );
     }
     let lifted_over_pot = matches!(lifted, Some((BrewRole::Aside, point)) if plan.is_over_pot(point));
@@ -611,22 +669,18 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
     let multi = bottles.len() > 1;
     let aside_rects: Vec<[f32; 4]> = plan.with_role(BrewRole::Aside).map(|card| card.rect).collect();
     if let Some(first) = aside_rects.first() {
-        let pad = 12.0 * plan.scale;
-        let head = 24.0 * plan.scale.max(0.8);
+        let s = plan.scale.max(0.4);
+        let pad = 14.0 * s;
         let left = aside_rects.iter().map(|r| r[0]).fold(first[0], f32::min) - pad;
-        let top = aside_rects.iter().map(|r| r[1]).fold(first[1], f32::min) - pad - head;
+        let top = aside_rects.iter().map(|r| r[1]).fold(first[1], f32::min);
         let right = aside_rects.iter().map(|r| r[0] + r[2]).fold(first[0] + first[2], f32::max) + pad;
-        let bottom = aside_rects.iter().map(|r| r[1] + r[3]).fold(first[1] + first[3], f32::max) + pad;
-        board = board.child(
-            el().key("aside-shelf")
-                .size(right - left, bottom - top)
-                .absolute(left, top)
-                .radius(16.0)
-                .continuous_corners()
-                .fill(with_alpha(p.wash_2, 0.75))
-                .border(1.2, p.rule_2)
-                .child(row().absolute(12.0, 5.0).child(text("Set aside").font(TextStyle::new(11.0, 700.0)).color(p.ink_2))),
-        );
+        let bottom = aside_rects.iter().map(|r| r[1] + r[3]).fold(first[1] + first[3], f32::max) + 26.0 * s;
+        let mut ledges: Vec<f32> = aside_rects.iter().map(|r| r[1] + r[3] - top).collect();
+        ledges.sort_by(f32::total_cmp);
+        ledges.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+        board = board.child(el().key("aside-shelf").size(right - left, bottom - top).absolute(left, top).child(
+            canvas(shelf_plank_shape([right - left, bottom - top], &ledges, s, &p)).key("aside-plank").size(right - left, bottom - top).absolute(0.0, 0.0),
+        ));
     }
     for placed in plan.cards.iter().filter(|card| card.role != BrewRole::Bottle) {
         let Some(card) = state.card(&placed.id) else { continue };
@@ -669,8 +723,5 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         );
     }
     board = board.child(mode_switcher(state, &p, lens, size));
-    if let Some(keyed) = legend(state, mood, size, &p) {
-        board = board.child(keyed);
-    }
     board
 }

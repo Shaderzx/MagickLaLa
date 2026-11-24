@@ -87,6 +87,8 @@ fn button_el(key: &str, caption: &str, kind: ButtonKind, padding: f32, t: &Heart
         .items_center()
         .fill(fill)
         .border(width, border)
+        .label(caption)
+        .disabled(matches!(kind, ButtonKind::Disabled))
         .child(label(caption, 12.0, 650.0, ink));
     if matches!(kind, ButtonKind::Disabled) { el } else { el.on_press(action) }
 }
@@ -409,7 +411,7 @@ fn toolbar(app: &StudioApp, t: &HearthPalette) -> El {
     let hexed = matches!(app.validation, ValidationState::Invalid(_));
     let published_unchanged = app.is_unchanged_from_live_release();
     let check_kind = if empty_graph { ButtonKind::Disabled } else { ButtonKind::Secondary };
-    let brew_kind = if empty_graph || hexed { ButtonKind::Disabled } else { ButtonKind::Primary };
+    let brew_kind = if empty_graph || hexed || !app.has_recipe_trigger() { ButtonKind::Disabled } else { ButtonKind::Primary };
     let bottle_kind = if empty_graph || hexed || published_unchanged || app.is_running() { ButtonKind::Disabled } else { ButtonKind::Secondary };
     let save_kind = if empty_graph || app.is_running() { ButtonKind::Disabled } else { ButtonKind::Secondary };
     let theme_caption = if app.theme == Theme::Dark { "Midnight" } else { "Sunlit" };

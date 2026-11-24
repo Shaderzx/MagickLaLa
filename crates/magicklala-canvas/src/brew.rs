@@ -246,6 +246,7 @@ const CROWDED: Metrics =
 const TIGHT: Metrics = Metrics { vial: [160.0, 42.0], ..CROWDED };
 const READABLE: f32 = 0.92;
 const LEGIBLE: f32 = 0.8;
+const SHELVED: f32 = 0.7;
 
 pub fn brew_plan(state: &CanvasState, size: (f32, f32)) -> BrewPlan {
     let roomy = plan_with(state, size, ROOMY);
@@ -253,21 +254,37 @@ pub fn brew_plan(state: &CanvasState, size: (f32, f32)) -> BrewPlan {
         return roomy.1;
     }
     let stacked_metrics = Metrics { pot: [204.0, 198.0], col_gap: 24.0, ..CROWDED };
-    let candidates = [
-        (plan_with(state, size, CROWDED), READABLE),
-        (plan_flanked(state, size, CROWDED), LEGIBLE),
-        (plan_flanked(state, size, TIGHT), LEGIBLE),
-        (plan_stacked(state, size, stacked_metrics), READABLE),
-        (plan_with(state, size, TIGHT), READABLE),
-        (plan_stacked(state, size, stacked_metrics), LEGIBLE),
-        (plan_with(state, size, TIGHT), LEGIBLE),
-        (plan_stacked(state, size, Metrics { pot: [204.0, 198.0], ..TIGHT }), LEGIBLE),
+    let layouts: [&dyn Fn() -> (f32, BrewPlan); 6] = [
+        &|| plan_with(state, size, CROWDED),
+        &|| plan_flanked(state, size, CROWDED),
+        &|| plan_flanked(state, size, TIGHT),
+        &|| plan_stacked(state, size, stacked_metrics),
+        &|| plan_with(state, size, TIGHT),
+        &|| plan_stacked(state, size, Metrics { pot: [204.0, 198.0], ..TIGHT }),
     ];
-    let pick = candidates
-        .iter()
-        .position(|((fit, _), floor)| fit >= floor)
-        .unwrap_or_else(|| candidates.iter().enumerate().fold(0, |best, (index, ((fit, _), _))| if *fit > candidates[best].0.0 { index } else { best }));
-    candidates.into_iter().nth(pick).map(|((_, plan), _)| plan).unwrap_or_else(|| plan_with(state, size, TIGHT).1)
+    let order = [(0, READABLE), (1, LEGIBLE), (2, LEGIBLE), (3, READABLE), (4, READABLE), (3, LEGIBLE), (4, LEGIBLE), (5, LEGIBLE)];
+    let mut built: [Option<(f32, BrewPlan)>; 6] = Default::default();
+    for (index, floor) in order {
+        let (fit, plan) = built[index].get_or_insert_with(|| layouts[index]());
+        if *fit >= floor {
+            return plan.clone();
+        }
+    }
+    let best_fit = built.iter().flatten().map(|(fit, _)| *fit).fold(0.0, f32::max);
+    if let Some((fit, plan)) = &built[2]
+        && *fit >= SHELVED
+        && *fit >= best_fit * 0.9
+    {
+        return plan.clone();
+    }
+    built
+        .into_iter()
+        .flatten()
+        .fold(None, |best: Option<(f32, BrewPlan)>, (fit, plan)| match best {
+            Some((top, _)) if top >= fit => best,
+            _ => Some((fit, plan)),
+        })
+        .map_or_else(|| plan_with(state, size, TIGHT).1, |(_, plan)| plan)
 }
 fn plan_flanked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, BrewPlan) {
     let order = recipe_order(state);

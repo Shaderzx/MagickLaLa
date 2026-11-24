@@ -5,7 +5,7 @@ use crate::brew::BrewPlan;
 use crate::cauldron::{Toss, TossHook, cauldron_workbench_view};
 use crate::hearth::{
     CauldronMood, HearthPalette, WireStyle, brand_cauldron_mark, category_tone, fill_circle, fill_star4, grimoire_wire_shape, hex, mini_vial_icon,
-    potion_bottle_shape, sparkle_connector_h, tabletop_circle_shape, with_alpha,
+    potion_bottle_shape, tabletop_circle_shape, with_alpha,
 };
 use crate::model::{CARD_HEADER, SOCKET_ROW};
 use crate::{CanvasState, DragState, ExecutionStatus, NodeCardModel, SocketModel, SocketRef, WorkbenchMode};
@@ -92,7 +92,7 @@ pub fn interactive_canvas_view<S: 'static>(state: &CanvasState, size: (f32, f32)
 }
 
 pub fn cauldron_mood(state: &CanvasState) -> CauldronMood {
-    if state.nodes.is_empty() {
+    if state.nodes.iter().all(|card| state.is_shelved(&card.id)) {
         return CauldronMood::Empty;
     }
     if state.running_brew {
@@ -557,12 +557,12 @@ pub(crate) fn potion_stand_view<S: 'static>(
     let pos = [pos_x, pos_y];
     let primary_output = Some(output);
     let bottled = state.release_badge.is_some();
-    let sealed_vintage = bottled && !matches!(mood, CauldronMood::Brewed | CauldronMood::Simmering | CauldronMood::Hexed | CauldronMood::Empty);
+    let sealed_vintage = bottled && !matches!(mood, CauldronMood::Simmering | CauldronMood::Hexed | CauldronMood::Empty);
     let bottle_h = 104.0;
     let art_mood = bottle_art_mood(state, output);
     let bottle_art = canvas(potion_bottle_shape(art_mood, state.light, width, bottle_h, bottled, tint)).key("hero-potion-bottle").size(width, bottle_h);
     let spell_label = if state.spell_name.is_empty() { "Potion" } else { state.spell_name.as_str() };
-    let out_title = primary_output.map_or("Bottled Potion", |c| c.title.as_str());
+    let out_title = primary_output.map_or_else(|| "Bottled Potion".to_owned(), |c| state.display_title(&c.id));
     let out_kind = primary_output.map_or("io/send_message", |c| c.kind.as_str());
     let selected = primary_output.is_some_and(|c| c.selected);
     let select_id = primary_output.map(|c| c.id.clone());
@@ -581,17 +581,8 @@ pub(crate) fn potion_stand_view<S: 'static>(
                 .fill(p.primary_bg)
                 .child(text(vintage).font(TextStyle::new(11.0, 700.0).features("'tnum' 1")).color(p.primary_ink)),
         );
-    } else if out_brewed {
-        header_row = header_row.child(
-            row()
-                .px(5.0)
-                .py(1.0)
-                .radius(5.5)
-                .fill(p.route_taken_fill())
-                .border(1.0, p.broth_mid)
-                .child(text("Test").font(TextStyle::new(11.0, 700.0)).color(if state.light { p.broth_deep } else { p.broth_foam })),
-        );
     }
+
     let mut tag_card = col()
         .w_full()
         .px(10.0)
@@ -612,7 +603,7 @@ pub(crate) fn potion_stand_view<S: 'static>(
         )
         .shadow(3.0, 10.0, p.shadow_card)
         .child(header_row)
-        .child(text(out_title).font(TextStyle::new(12.0, 600.0)).color(p.ink_2).truncate())
+        .child(text(&out_title).font(TextStyle::new(12.0, 600.0)).color(p.ink_2).truncate())
         .children((!terse).then(|| text(out_kind).font(TextStyle::new(11.0, 500.0).mono()).color(p.mute).truncate()));
     if out_brewed {
         let ms_text = match primary_output.and_then(|c| c.duration_ms) {
@@ -740,62 +731,6 @@ fn grimoire_graph_view<S: 'static>(state: &CanvasState, size: (f32, f32), lens: 
     let mut board = state.nodes.iter().fold(board, |board, card| board.child(grimoire_card_view(state, card, &p, palette, lens)));
     board = board.child(mode_switcher(state, &p, lens, size));
 
-    if !state.nodes.is_empty() && size.0 >= 420.0 && size.1 >= 260.0 {
-        let has_run = state.has_run();
-        let mut legend = row()
-            .key("canvas-legend")
-            .gap(12.0)
-            .px(11.0)
-            .py(6.0)
-            .radius(10.0)
-            .continuous_corners()
-            .items_center()
-            .fill(p.card)
-            .border(1.0, p.rule)
-            .shadow(2.0, 8.0, p.shadow_card)
-            .absolute(14.0, (size.1 - 38.0).max(12.0))
-            .child(
-                row()
-                    .gap(6.0)
-                    .items_center()
-                    .child(canvas(sparkle_connector_h(18.0, 6.0, state.light)).size(18.0, 6.0))
-                    .child(text(if has_run { "Flow used" } else { "Flow" }).font(TextStyle::new(10.5, 600.0)).color(p.ink)),
-            )
-            .child(
-                row()
-                    .gap(6.0)
-                    .items_center()
-                    .child(el().w(14.0).h(if has_run { 2.3 } else { 1.5 }).fill(if has_run {
-                        if state.light { hex(0x462A52) } else { hex(0xE8E2F5) }
-                    } else {
-                        p.data_wire
-                    }))
-                    .child(text(if has_run { "Data used" } else { "Data" }).font(TextStyle::new(10.5, 550.0)).color(p.ink_2)),
-            );
-        if has_run {
-            let dash_col = if state.light { hex(0x625574) } else { hex(0xBDB3DC) };
-            let untaken_ink = if state.light { hex(0x362E45) } else { hex(0xDDD6F0) };
-            legend = legend
-                .child(
-                    row()
-                        .gap(4.5)
-                        .items_center()
-                        .child(el().w(5.5).h(1.8).fill(dash_col))
-                        .child(el().w(5.5).h(1.8).fill(dash_col))
-                        .child(text("Untaken flow").font(TextStyle::new(10.5, 600.0)).color(untaken_ink)),
-                )
-                .child(
-                    row()
-                        .gap(3.0)
-                        .items_center()
-                        .child(el().size(2.6, 2.6).radius(1.3).fill(dash_col))
-                        .child(el().size(2.6, 2.6).radius(1.3).fill(dash_col))
-                        .child(el().size(2.6, 2.6).radius(1.3).fill(dash_col))
-                        .child(text("Untaken data").font(TextStyle::new(10.5, 600.0)).color(untaken_ink)),
-                );
-        }
-        board = board.child(legend);
-    }
     board
 }
 

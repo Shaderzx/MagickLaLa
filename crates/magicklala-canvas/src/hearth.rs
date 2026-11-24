@@ -1296,34 +1296,10 @@ pub fn pouring_stream_shape(mut shape: Shape, from: [f32; 2], to: [f32; 2], styl
     fill_star4(shape, spark_pt[0], spark_pt[1] - 8.0, 3.8, 1.2, color)
 }
 
-pub fn ribbon_controls(from: [f32; 2], to: [f32; 2], tapped: bool) -> ([f32; 2], [f32; 2]) {
-    if tapped {
-        return ([from[0] + (to[0] - from[0]) * 0.4, from[1] - 12.0], [to[0], to[1] - 30.0]);
-    }
-    distillation_curve(from, to)
-}
-
-pub fn distillation_curve(from: [f32; 2], to: [f32; 2]) -> ([f32; 2], [f32; 2]) {
-    let mid_x = (from[0] + to[0]) * 0.5;
-    if to[1] > from[1] + 56.0 {
-        ([from[0] + 64.0, from[1] - 28.0], [to[0] - (to[0] - mid_x) * 0.2, to[1] - 70.0])
-    } else {
-        let arch_y = from[1].min(to[1]) - 58.0;
-        ([from[0] + (mid_x - from[0]) * 0.42, arch_y], [to[0] - (to[0] - mid_x) * 0.25, arch_y + 10.0])
-    }
-}
-
-pub fn distillation_point(from: [f32; 2], to: [f32; 2], t: f32) -> [f32; 2] {
-    let (c1, c2) = distillation_curve(from, to);
-    cubic_point(from, c1, c2, to, t)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn distillation_ribbon_shape(
     mut shape: Shape,
-    from: [f32; 2],
-    to: [f32; 2],
-    tapped: bool,
+    pts: &[[f32; 2]],
     mood: CauldronMood,
     light: bool,
     active: bool,
@@ -1331,9 +1307,10 @@ pub fn distillation_ribbon_shape(
     tint: Option<Color>,
 ) -> Shape {
     let p = HearthPalette::for_theme(light);
-    let (c1, c2) = ribbon_controls(from, to, tapped);
+    if pts.len() < 2 {
+        return shape;
+    }
     if !active {
-        let pts = sample_cubic(from, c1, c2, to, 44, 1.0);
         let (muted, dash, gap) = if untaken {
             (if light { hex(0x5E5470) } else { hex(0xA499C4) }, 6.5, 5.2)
         } else if mood == CauldronMood::Hexed {
@@ -1343,9 +1320,9 @@ pub fn distillation_ribbon_shape(
         } else {
             (tint.unwrap_or(if light { hex(0x137B60) } else { hex(0x3AD6A6) }), 6.5, 5.2)
         };
-        return dashed_polyline(shape, &pts, dash, gap, 2.2, muted, None);
+        return dashed_polyline(shape, pts, dash, gap, 2.2, muted, None);
     }
-    let path = Path::new().move_to(from).cubic_to(c1, c2, to);
+    let path = pts[1..].iter().fold(Path::new().move_to(pts[0]), |path, point| path.line_to(*point));
     let core = match tint {
         Some(t) => t,
         None if light => hex(0x137B60),
@@ -1357,7 +1334,7 @@ pub fn distillation_ribbon_shape(
     shape = shape.stroke_path(&path, w, LineCap::Round, core);
     shape = shape.stroke_path(&path, 1.4, LineCap::Round, with_alpha(p.broth_spark, 0.90));
     for &t in &[0.24_f32, 0.50, 0.76] {
-        let pt = cubic_point(from, c1, c2, to, t);
+        let pt = pts[((pts.len() - 1) as f32 * t).round() as usize];
         shape = fill_star4(shape, pt[0], pt[1], if t == 0.50 { 5.8 } else { 3.8 }, 1.35, p.gold);
     }
     shape

@@ -3436,15 +3436,16 @@ fn cauldron_truths() -> Result<serde_json::Value, String> {
         click(&mut shelf, "zoom-out")?;
     }
     shelf.frame(2.0);
-    let plaque = layout_rect(&shelf, "cauldron-plaque").ok_or("no plaque")?;
+    let drawn = |key: &str| shelf.presented(key).map(|(rect, _)| rect);
+    let plaque = drawn("cauldron-plaque").ok_or("no plaque")?;
     let mut plaque_hits: Vec<String> = shelf
         .state
         .canvas
         .nodes
         .iter()
-        .filter_map(|card| layout_rect(&shelf, &format!("node-{}", card.id.0)).filter(|rect| rects_touch(plaque, *rect)).map(|_| card.id.0.clone()))
+        .filter_map(|card| drawn(&format!("node-{}", card.id.0)).filter(|rect| rects_touch(plaque, *rect)).map(|_| card.id.0.clone()))
         .collect();
-    if layout_rect(&shelf, "aside-shelf").is_some_and(|rect| rects_touch(plaque, rect)) {
+    if drawn("aside-shelf").is_some_and(|rect| rects_touch(plaque, rect)) {
         plaque_hits.push("aside-shelf".to_owned());
     }
 
@@ -3480,6 +3481,30 @@ fn cauldron_truths() -> Result<serde_json::Value, String> {
         "standHasTest": stand_words.iter().any(|line| line == "Test"),
     }))
 }
+fn shot(args: &[String]) -> Result<serde_json::Value, String> {
+    let name = args.get(1).ok_or("missing spell")?;
+    let number = |index: usize| args.get(index).and_then(|value| value.parse::<f32>().ok()).ok_or("missing size");
+    let size = (number(2)?, number(3)?);
+    let out = PathBuf::from(args.get(4).ok_or("missing output")?);
+    let spell = match name.as_str() {
+        "support" => StudioApp::from_registry().spell.clone(),
+        "dozen" => dozen_ingredient_spell(),
+        other => example(other)?,
+    };
+    let mut app = StudioApp::with_spell(spell, registry_specs());
+    app.size = size;
+    let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+    rt.frame(0.0);
+    if args.get(5).is_some_and(|action| action == "brew") {
+        click(&mut rt, "run-spell")?;
+        live_finish(&mut rt)?;
+        rt.frame(3.0);
+    }
+    let app = std::mem::replace(&mut rt.state, StudioApp::from_registry());
+    render_headless_snapshot_state(&out, app).map_err(|error| error.to_string())?;
+    Ok(json!({ "out": out }))
+}
+
 fn brew_locks(db_path: &Path) -> Result<serde_json::Value, String> {
     let mut slow_spell = delay_spell(1_500);
     slow_spell.nodes.push(NodeInstance {
@@ -3679,7 +3704,11 @@ fn geometry_and_polish(db_path: &Path) -> Result<serde_json::Value, String> {
     let ribbon_through_pot = magicklala_canvas::cauldron::ribbon_paths(&hook_plan)
         .iter()
         .flat_map(|ribbon| ribbon.iter().skip(5).copied().collect::<Vec<_>>())
-        .filter(|point| point[0] > hpot[0] && point[0] < hpot[0] + hpot[2] && point[1] > hpot[1] + hpot[3] * 0.46 && point[1] < hpot[1] + hpot[3])
+        .filter(|point| {
+            let u = (hpot[2].min(hpot[3]) / 240.0).clamp(0.55, 1.35);
+            let (cx, cy) = (hpot[0] + hpot[2] * 0.5, hpot[1] + hpot[3] * 0.56);
+            (point[0] - cx).abs() < 86.0 * u && point[1] > cy - 30.0 * u && point[1] < cy + 56.0 * u
+        })
         .count();
 
     let light = magicklala_canvas::HearthPalette::for_theme(true);
@@ -4077,6 +4106,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("shelf-keeps") => shelf_keeps(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("shelf-exact") => shelf_exact(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("cauldron-truths") => cauldron_truths(),
+        Some("shot") => shot(args),
         Some("fit-and-wording") => fit_and_wording(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-recipe") => one_recipe(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("tray-drop") => tray_drop(),

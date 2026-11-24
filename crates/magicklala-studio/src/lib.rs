@@ -2262,10 +2262,12 @@ impl StudioApp {
             && self.last_published.as_ref().is_none_or(|release| release.graph == self.brew_graph())
     }
 
+    pub fn has_recipe_trigger(&self) -> bool {
+        self.brew_graph().nodes.iter().any(|node| self.specs.iter().any(|spec| spec.kind == node.kind && spec.is_trigger))
+    }
+
     pub fn run_spell(&mut self) -> bool {
-        let recipe = self.brew_graph();
-        let has_trigger = recipe.nodes.iter().any(|node| self.specs.iter().any(|spec| spec.kind == node.kind && spec.is_trigger));
-        if !has_trigger || matches!(self.validation, ValidationState::Invalid(_)) {
+        if !self.has_recipe_trigger() || matches!(self.validation, ValidationState::Invalid(_)) {
             return false;
         }
         let payload = self.run_payload.clone();
