@@ -94,10 +94,23 @@ fn over_route(from: [f32; 2], to: [f32; 2], ceiling: f32, climb_x: f32, s: f32) 
 }
 
 fn ribbon_route(plan: &BrewPlan, to: [f32; 2], own: Option<&NodeId>) -> Vec<[f32; 2]> {
-    let from = spout_point(plan);
+    let tap = spout_point(plan);
     let s = plan.scale.max(0.4);
+    let lip: Vec<[f32; 2]> = (0..4).map(|step| [tap[0] + step as f32 * 4.0 * s, tap[1]]).collect();
+    let mut route = ribbon_course(plan, [tap[0] + 16.0 * s, tap[1]], to, own, s);
+    route.splice(0..0, lip);
+    route
+}
+
+fn ribbon_course(plan: &BrewPlan, from: [f32; 2], to: [f32; 2], own: Option<&NodeId>, s: f32) -> Vec<[f32; 2]> {
+    let own_tag = own.and_then(|id| plan.card(id)).map(|card| {
+        let r = card.rect;
+        [r[0] - 8.0 * s, r[1] + r[3] * 0.46, r[2] + 16.0 * s, r[3] * 0.54]
+    });
     let hits = |points: &[[f32; 2]]| -> usize {
         let body = &points[..points.len().saturating_sub(points.len() / 8)];
+        let inside =
+            |r: [f32; 4]| points.iter().filter(|point| point[0] >= r[0] && point[0] <= r[0] + r[2] && point[1] >= r[1] && point[1] <= r[1] + r[3]).count();
         plan.cards
             .iter()
             .filter(|card| Some(&card.id) != own)
@@ -105,9 +118,10 @@ fn ribbon_route(plan: &BrewPlan, to: [f32; 2], own: Option<&NodeId>) -> Vec<[f32
                 let r = card.rect;
                 body.iter().filter(|point| point[0] >= r[0] && point[0] <= r[0] + r[2] && point[1] >= r[1] && point[1] <= r[1] + r[3]).count()
             })
-            .sum()
+            .sum::<usize>()
+            + own_tag.map_or(0, inside)
     };
-    let mut best = cubic_samples(from, [from[0] + (to[0] - from[0]) * 0.4, from[1] - 12.0 * s], [to[0], to[1] - 30.0 * s], to, 44);
+    let mut best = cubic_samples(from, [from[0] + (to[0] - from[0]) * 0.4, from[1]], [to[0], to[1] - 30.0 * s], to, 44);
     let mut best_hits = hits(&best);
     let blocking: Vec<[f32; 4]> = plan
         .cards
@@ -116,7 +130,8 @@ fn ribbon_route(plan: &BrewPlan, to: [f32; 2], own: Option<&NodeId>) -> Vec<[f32
         .map(|card| card.rect)
         .filter(|r| best.iter().any(|point| point[0] >= r[0] && point[0] <= r[0] + r[2] && point[1] >= r[1] && point[1] <= r[1] + r[3]))
         .collect();
-    let ceiling = blocking.iter().map(|rect| rect[1]).fold(to[1] - 30.0 * s, f32::min) - 14.0 * s - blocking.len() as f32 * 5.0 * s;
+    let lanes_floor = plan.lanes.map_or(f32::MIN, |[shelf_bottom, band]| shelf_bottom + band + 6.0 * s);
+    let ceiling = (blocking.iter().map(|rect| rect[1]).fold(to[1] - 30.0 * s, f32::min) - 14.0 * s - blocking.len() as f32 * 5.0 * s).max(lanes_floor);
     let climb_x = blocking.iter().map(|rect| rect[0]).fold(to[0], f32::min) - 18.0 * s;
     let over = over_route(from, to, ceiling, climb_x, s);
     let over_hits = hits(&over);
@@ -164,8 +179,8 @@ fn ghost_neck(ghost: [f32; 4]) -> [f32; 2] {
 
 fn bottle_neck(card: &BrewCard, multi: bool) -> [f32; 2] {
     let rect = card.rect;
-    let neck_share = if multi { 24.0 / MULTI_BOTTLE_SIZE[1] } else { 29.0 / SINGLE_BOTTLE_SIZE[1] };
-    [rect[0] + rect[2] * 0.5, rect[1] + rect[3] * neck_share]
+    let neck_share = if multi { 17.8 / MULTI_BOTTLE_SIZE[1] } else { 28.0 / SINGLE_BOTTLE_SIZE[1] };
+    [rect[0] + rect[2] * 0.474, rect[1] + rect[3] * neck_share]
 }
 
 fn stream_for(state: &CanvasState, card: &NodeCardModel, mood: CauldronMood, p: &HearthPalette, arch_lift: f32) -> StreamStyle {
@@ -283,6 +298,12 @@ pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32
     let mut columns: Vec<f32> = ingredients.iter().map(|placed| placed.rect[0]).collect();
     columns.sort_by(f32::total_cmp);
     columns.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+    let ribbon_top = ribbon_paths(plan).iter().flatten().map(|point| point[1]).fold(f32::MAX, f32::min);
+    let lane_order: Vec<NodeId> = {
+        let mut lanes: Vec<(f32, f32, NodeId)> = ingredients.iter().map(|placed| (placed.rect[0], -placed.rect[1], placed.id.clone())).collect();
+        lanes.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        lanes.into_iter().map(|(_, _, id)| id).collect()
+    };
     ingredients
         .iter()
         .enumerate()
@@ -290,16 +311,18 @@ pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32
             let from = vial_mouth(placed, plan);
             let points = match plan.lanes {
                 Some([shelf_bottom, gap]) => {
+                    let lane_rank = lane_order.iter().position(|id| id == &placed.id).unwrap_or(0) as f32;
                     let column = columns.iter().position(|x| (x - placed.rect[0]).abs() < 1.0).unwrap_or(0);
                     let mates = ingredients.iter().filter(|other| (other.rect[0] - placed.rect[0]).abs() < 1.0).count().max(1);
                     let rank = ingredients.iter().filter(|other| (other.rect[0] - placed.rect[0]).abs() < 1.0 && other.rect[1] < placed.rect[1] - 0.5).count();
                     let offset = (mates as f32 - 1.0) * 0.5 - rank as f32;
-                    let strand = (gap * 0.4 / mates as f32).min(3.0 * plan.scale);
+                    let strand = (gap * 0.8 / mates as f32).min(6.0 * plan.scale);
                     let lane_x = placed.rect[0] + placed.rect[2] + gap * 0.5 + offset * strand;
                     let share = column as f32 / (columns.len().max(2) - 1) as f32;
                     let to = rim_point(plan, (share + offset * 0.035).clamp(0.0, 1.0));
-                    let ribbon_top = ribbon_paths(plan).iter().flatten().map(|point| point[1]).fold(f32::MAX, f32::min);
-                    let turn = [lane_x, (shelf_bottom + gap).min(ribbon_top - 8.0 * plan.scale).max(shelf_bottom + 2.0 * plan.scale)];
+                    let floor = (shelf_bottom + gap).min(ribbon_top - 8.0 * plan.scale).max(shelf_bottom + 2.0 * plan.scale);
+                    let step = ((floor - shelf_bottom - 4.0 * plan.scale) / ingredients.len().max(1) as f32).clamp(0.0, 6.0 * plan.scale);
+                    let turn = [lane_x, floor - (ingredients.len() as f32 - 1.0 - lane_rank) * step];
                     let clear_x = lane_x.min(spout_point(plan)[0] - 10.0 * plan.scale).max(to[0]);
                     let run = lane_x - clear_x;
                     let elbow = if run > 1.0 { (8.0 * plan.scale).min(run * 0.5).min((turn[1] - from[1]).abs() * 0.3) } else { 0.0 };
@@ -367,9 +390,17 @@ fn lane_stream(shape: Shape, points: &[[f32; 2]], style: StreamStyle, p: &Hearth
     if style.untaken || style.blocked {
         return crate::hearth::dashed_polyline(shape, points, 6.5, 5.2, 2.0, ink, None);
     }
-    let core = if style.active { 2.6 } else { 2.0 };
-    let shape = if style.active { shape.stroke_path(&path, core + 3.0, rune::LineCap::Round, with_alpha(style.glow, 0.32)) } else { shape };
-    shape.stroke_path(&path, core, rune::LineCap::Round, ink)
+    let core = if style.active { 2.8 } else { 2.2 };
+    let shape = shape.stroke_path(
+        &path,
+        core + if style.active { 4.0 } else { 2.6 },
+        rune::LineCap::Round,
+        with_alpha(style.glow, if style.active { 0.34 } else { 0.2 }),
+    );
+    let shape = shape.stroke_path(&path, core, rune::LineCap::Round, ink);
+    let shape = shape.stroke_path(&path, 0.8, rune::LineCap::Round, with_alpha(p.broth_spark, if style.active { 0.85 } else { 0.45 }));
+    let rim = points[points.len() - 1];
+    crate::hearth::fill_ellipse(shape, rim[0], rim[1], 4.2 * core * 0.5, 1.6 * core * 0.5, with_alpha(style.glow, 0.7))
 }
 
 fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &HearthPalette) -> Shape {
@@ -658,7 +689,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
                         .key("aside-tray-plank")
                         .size(zone[2] - 28.0, zone[3] - 14.0)
                         .absolute(0.0, 0.0)
-                        .opacity(if inside { 1.0 } else { 0.7 }),
+                        .opacity(1.0),
                 ),
         );
     }

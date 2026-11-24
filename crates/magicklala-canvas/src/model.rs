@@ -309,8 +309,9 @@ impl CanvasState {
             "Stream Message" => "Stream",
             whole => whole,
         };
+        let generic = |socket: &str| socket == "out" || socket.strip_prefix("out_").is_some_and(|rest| rest.chars().all(|c| c.is_ascii_digit()));
         let route =
-            self.wires.iter().find(|wire| &wire.to_node == id && wire.ty.is_flow()).map(|wire| wire.from_socket.as_str()).filter(|socket| *socket != "out");
+            self.wires.iter().find(|wire| &wire.to_node == id && wire.ty.is_flow()).map(|wire| wire.from_socket.as_str()).filter(|socket| !generic(socket));
         match route {
             Some(route) => format!("{short} · {route}"),
             None => format!("{short} · {}", twins.iter().position(|twin| *twin == id).unwrap_or_default() + 1),

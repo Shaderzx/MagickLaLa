@@ -214,7 +214,7 @@ fn shelf_grid(count: usize, rows_fit: usize) -> (usize, usize) {
     if count == 0 {
         return (0, 0);
     }
-    let cols = count.div_ceil(rows_fit.max(3));
+    let cols = count.div_ceil(rows_fit.clamp(3, 6));
     (cols, count.div_ceil(cols))
 }
 
@@ -391,7 +391,8 @@ fn plan_stacked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
     let shelf_h = stack_height(shelf_rows, m.vial[1], m.row_gap);
     let bottle_size = if bottles.len() > 1 { MULTI_BOTTLE_SIZE } else { SINGLE_BOTTLE_SIZE };
     let pot_block_h = m.pot[1] + PLAQUE_ROOM;
-    let shelf_gap = if ingredients.is_empty() { 0.0 } else { 36.0 };
+    let lane_band = 14.0 + 6.0 * ingredients.len().min(4) as f32;
+    let shelf_gap = if ingredients.is_empty() { 0.0 } else { 22.0 + lane_band };
     let bottle_count = bottles.len().max(1);
     let shape_for = |rows: usize| {
         let cols = bottle_count.div_ceil(rows);
@@ -473,7 +474,7 @@ fn plan_stacked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
     let zone_top = zone_top.min(size.1 - 84.0).max(0.0);
     let aside_zone = [0.0, zone_top, size.0, (size.1 - zone_top).max(84.0)];
     let shelf_bottom = to_screen(0.0, shelf_h, 0.0, 0.0)[1];
-    (fit, BrewPlan { scale, pot, plaque_top, ghost_bottle, aside_zone, vial: m.vial, lanes: Some([shelf_bottom, m.col_gap * scale]), flank: false, cards })
+    (fit, BrewPlan { scale, pot, plaque_top, ghost_bottle, aside_zone, vial: m.vial, lanes: Some([shelf_bottom, lane_band * scale]), flank: false, cards })
 }
 
 fn plan_with(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, BrewPlan) {

@@ -1641,7 +1641,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                 .grow(1.0)
                 .min_w(0.0)
                 .gap(1.5)
-                .child(heading(app.canvas.display_title(&card.id), if compact { 14.5 } else { 15.5 }, 800.0, t.ink).truncate())
+                .child(heading(app.canvas.display_title(&card.id), if compact { 14.5 } else { 15.5 }, 800.0, t.ink).wrap())
                 .child(text(&card.kind).font(font(10.5, 500.0).mono()).color(t.mute).truncate()),
         );
     let mut column = col().key("inspector-card").gap(if compact { 6.0 } else { 9.0 }).pt(if compact { 8.0 } else { 10.0 }).child(card_header);

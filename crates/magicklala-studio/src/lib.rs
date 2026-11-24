@@ -2468,8 +2468,18 @@ impl StudioApp {
         if !self.has_recipe_trigger() || matches!(self.validation, ValidationState::Invalid(_)) {
             return false;
         }
-        let payload = self.run_payload.clone();
+        let payload = self.brew_payload();
         self.start_run(None, payload, false)
+    }
+
+    fn brew_payload(&self) -> serde_json::Value {
+        let chat_shaped = self.run_payload.get("channel").is_some() && self.run_payload.get("content").is_some();
+        let webhook = self.brew_graph().nodes.iter().any(|node| node.kind == "event/on_webhook");
+        if !(chat_shaped && webhook) {
+            return self.run_payload.clone();
+        }
+        let content = self.run_payload.get("content").cloned().unwrap_or_default();
+        serde_json::json!({ "method": "POST", "path": "/hooks/studio", "headers": {}, "query": {}, "body": { "content": content } })
     }
 
     fn trigger(&self, prefer: Option<&str>, payload: &serde_json::Value) -> Option<RunTrigger> {

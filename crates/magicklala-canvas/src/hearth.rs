@@ -222,7 +222,7 @@ impl HearthPalette {
     }
 
     pub fn untaken_border(&self) -> Color {
-        if self.light { hex(0x9890AA) } else { hex(0x5E547D) }
+        if self.light { hex(0x827996) } else { hex(0x786C9E) }
     }
 
     pub fn untaken_title(&self) -> Color {
@@ -242,7 +242,7 @@ impl HearthPalette {
     }
 
     pub fn hexed_glass_stroke(&self) -> Color {
-        if self.light { hex(0x9E8FA4) } else { hex(0x6F6588) }
+        if self.light { hex(0x85758C) } else { hex(0x6F6588) }
     }
 
     pub fn sun_ink(&self) -> Color {

@@ -382,7 +382,9 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         shell = shell.child(el().key(format!("step-badge-{}", card.id.0)).absolute(if mirrored { dims[0] - 11.0 } else { -9.0 }, -9.0).child(badge));
     }
     if let Some(pill) = status_pill {
-        shell = shell.child(row().w(dims[0]).px(10.0).justify_end().absolute(0.0, -12.0).child(pill));
+        let lane = row().w(dims[0]).px(10.0).absolute(0.0, -12.0);
+        let lane = if mirrored { lane.justify_start() } else { lane.justify_end() };
+        shell = shell.child(lane.child(el().key(format!("status-pill-{}", card.id.0)).child(pill)));
     }
     shell
 }
@@ -854,7 +856,7 @@ fn grimoire_card_view<S: 'static>(
     let node_id = card.id.clone();
     let dimmed_bg = if state.light { hex(0xEBE8F0) } else { hex(0x1D182B) };
     let dimmed_header = if state.light { hex(0xE0DCE8) } else { hex(0x262038) };
-    let dimmed_border = if state.light { hex(0xB5AEC2) } else { hex(0x4F446B) };
+    let dimmed_border = p.untaken_border();
     let header_bg = if dimmed { dimmed_header } else { tone.tint };
     let header_h = CARD_HEADER * zoom;
     let title_size = (13.6 * zoom).clamp(11.8, 15.5);
