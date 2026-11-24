@@ -140,19 +140,9 @@ fn socket_pairs(wires: &[Wire]) -> Vec<(SocketRef, SocketRef)> {
         .collect()
 }
 
-fn by_value(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Number(number) => number.as_f64().and_then(serde_json::Number::from_f64).map_or_else(|| value.clone(), serde_json::Value::Number),
-        serde_json::Value::Array(items) => serde_json::Value::Array(items.iter().map(by_value).collect()),
-        serde_json::Value::Object(map) => serde_json::Value::Object(map.iter().map(|(key, item)| (key.clone(), by_value(item))).collect()),
-        other => other.clone(),
-    }
-}
-
 fn same_recipe(a: &SpellGraph, b: &SpellGraph) -> bool {
     let steps = |graph: &SpellGraph| {
-        let mut steps: Vec<(String, String, String)> =
-            graph.nodes.iter().map(|node| (node.id.0.clone(), node.kind.clone(), by_value(&node.config).to_string())).collect();
+        let mut steps: Vec<(String, String, String)> = graph.nodes.iter().map(|node| (node.id.0.clone(), node.kind.clone(), node.config.to_string())).collect();
         steps.sort();
         steps
     };
@@ -1175,11 +1165,11 @@ impl StudioApp {
         }
         let template_token = format!("{{{{{name}}}}}");
         for card in self.canvas.nodes.iter().filter(|card| !self.canvas.is_shelved(&card.id)) {
-            let in_prompt = self.prompts.get(&card.id).is_some_and(|e| e.text.contains(&template_token));
+            let renders = card.kind == "text/template";
+            let in_prompt = renders && self.prompts.get(&card.id).is_some_and(|e| e.text.contains(&template_token));
             let in_config = self.configs.get(&card.id).is_some_and(|cfg| {
                 cfg.as_object().is_some_and(|map| {
-                    map.contains_key(name)
-                        || map.values().any(|v| v.as_str().is_some_and(|s| s.contains(&template_token)))
+                    (renders && map.values().any(|v| v.as_str().is_some_and(|s| s.contains(&template_token))))
                         || (card.kind.starts_with("var/") && map.get("name").and_then(serde_json::Value::as_str) == Some(name))
                 })
             });
@@ -1565,24 +1555,21 @@ impl StudioApp {
         self.draft_status = Some(format!("Loaded v{version} into draft"));
     }
 
-    pub fn selected_temperature(&self) -> f64 {
-        if let Some(id) = self.canvas.selection.as_ref()
-            && let Some(val) = self.configs.get(id).and_then(|c| c.get("temperature")).and_then(serde_json::Value::as_f64)
-        {
-            return val;
-        }
-        self.spell.variables.iter().find(|v| v.name == "temperature").and_then(|v| v.default.as_ref()).map_or(0.4, |v| match v {
-            Value::Float(n) => *n,
-            Value::Int(n) => *n as f64,
-            _ => 0.4,
-        })
+    pub fn selected_temperature(&self) -> Option<f64> {
+        let id = self.canvas.selection.as_ref()?;
+        self.configs.get(id).and_then(|c| c.get("temperature")).and_then(serde_json::Value::as_f64)
+    }
+
+    pub fn selected_provider(&self) -> String {
+        let Some(id) = self.canvas.selection.as_ref() else { return "openai".to_owned() };
+        self.configs.get(id).and_then(|c| c.get("provider")).and_then(serde_json::Value::as_str).filter(|s| !s.is_empty()).unwrap_or("openai").to_owned()
     }
 
     pub fn adjust_temperature(&mut self, delta: f64) {
         if self.is_running() {
             return;
         }
-        let current = self.selected_temperature();
+        let current = self.selected_temperature().unwrap_or(0.7);
         let next = ((current + delta).clamp(0.0, 2.0) * 10.0).round() / 10.0;
         if let Some(id) = self.canvas.selection.clone() {
             let entry = self.configs.entry(id).or_insert_with(|| json!({}));

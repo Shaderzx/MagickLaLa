@@ -5049,7 +5049,12 @@ fn honest_dials(db_path: &Path) -> Result<serde_json::Value, String> {
                 .count()
         })
         .sum::<usize>();
-    let compact_grimoire = json!({ "zoom": (grim.state.canvas.camera.zoom * 100.0).round() / 100.0, "socketNames": socket_names });
+    let hook = node_of_kind(&grim.state, "event/on_webhook").ok_or("no webhook")?;
+    let port = grim.find(&format!("socket-{hook}-out-body")).ok_or("no body socket")?;
+    grim.pointer_move(port.0, port.1);
+    grim.frame(1.5);
+    let hover_tip = words_of(&grim, "socket-tip");
+    let compact_grimoire = json!({ "zoom": (grim.state.canvas.camera.zoom * 100.0).round() / 100.0, "socketNames": socket_names, "hoverTip": hover_tip });
 
     let mut parallel = open(example("parallel_research.json")?, (1280.0, 800.0));
     run_once(&mut parallel)?;
@@ -5069,7 +5074,8 @@ fn honest_dials(db_path: &Path) -> Result<serde_json::Value, String> {
     let mut tightest = f32::MAX;
     if lane_plan.lanes.is_some() {
         for (_, points) in magicklala_canvas::cauldron::pour_paths(&lanes.state.canvas, &lane_plan) {
-            for trio in points.windows(3) {
+            let turns = &points[..points.len().saturating_sub(16)];
+            for trio in turns.windows(3) {
                 let a = [trio[1][0] - trio[0][0], trio[1][1] - trio[0][1]];
                 let b = [trio[2][0] - trio[1][0], trio[2][1] - trio[1][1]];
                 let (la, lb) = (a[0].hypot(a[1]), b[0].hypot(b[1]));

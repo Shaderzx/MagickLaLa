@@ -379,10 +379,10 @@ pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32
                     let floor = (shelf_bottom + gap).min(ribbon_top - 8.0 * plan.scale).max(shelf_bottom + 2.0 * plan.scale);
                     let step = ((floor - shelf_bottom - 4.0 * plan.scale) / ingredients.len().max(1) as f32).clamp(0.0, 6.0 * plan.scale);
                     let turn = [lane_x, floor - (ingredients.len() as f32 - 1.0 - lane_rank) * step];
-                    let clear_x = lane_x.min(spout_point(plan)[0] - 10.0 * plan.scale).max(to[0]);
+                    let clear_x = lane_x.min(spout_point(plan)[0] - 10.0 * plan.scale).max(to[0] + 26.0 * plan.scale).min(lane_x);
                     let run = lane_x - clear_x;
-                    let elbow = if run > 1.0 { (8.0 * plan.scale).min(run * 0.5).min((turn[1] - from[1]).abs() * 0.3) } else { 0.0 };
-                    let bend = (8.0 * plan.scale).min((lane_x - from[0]).abs() * 0.8).min((turn[1] - from[1]).abs() * 0.5);
+                    let elbow = if run > 1.0 { (28.0 * plan.scale).min(run * 0.5).min((turn[1] - from[1]).abs() * 0.45) } else { 0.0 };
+                    let bend = (26.0 * plan.scale).min((lane_x - from[0]).abs()).min((turn[1] - from[1]).abs() * 0.5);
                     let side = if lane_x >= from[0] { 1.0 } else { -1.0 };
                     let corner = [lane_x - side * bend, from[1]];
                     let mut points: Vec<[f32; 2]> = (0..=4).map(|step| [from[0] + (corner[0] - from[0]) * step as f32 / 4.0, from[1]]).collect();
@@ -406,8 +406,8 @@ pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32
                     };
                     points.extend((1..=16).map(|step| {
                         let t = step as f32 / 16.0;
-                        let c1 = [to[0] + (start[0] - to[0]) * 0.35, start[1]];
-                        let c2 = [to[0], start[1] + (to[1] - start[1]) * 0.4];
+                        let c1 = if run > 1.0 { [start[0] + (to[0] - start[0]) * 0.55, start[1]] } else { [start[0], start[1] + (to[1] - start[1]) * 0.5] };
+                        let c2 = [to[0], start[1] + (to[1] - start[1]) * 0.55];
                         let u = 1.0 - t;
                         [
                             u * u * u * start[0] + 3.0 * u * u * t * c1[0] + 3.0 * u * t * t * c2[0] + t * t * t * to[0],
@@ -789,13 +789,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
     }
     for placed in plan.cards.iter().filter(|card| card.role != BrewRole::Bottle) {
         let Some(card) = state.card(&placed.id) else { continue };
-        let step = if placed.role == BrewRole::Aside {
-            None
-        } else if has_run {
-            card.step_order
-        } else {
-            placed.recipe_step
-        };
+        let step = if placed.role == BrewRole::Aside { None } else { placed.recipe_step };
         let origin = card_frame(placed.rect, plan.vial, plan.scale, lifted_offset(state, &placed.id));
         let vial = ingredient_vial_card(state, card, step, origin, plan.vial, placed.role == BrewRole::Aside, placed.mirrored, &p, lens, toss, plan.clone());
         board = board.child(vial.scale(plan.scale));

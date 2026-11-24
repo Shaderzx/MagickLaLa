@@ -433,7 +433,7 @@ fn toolbar(app: &StudioApp, t: &HearthPalette) -> El {
     let aside_count = plan.with_role(magicklala_canvas::BrewRole::Aside).count();
     let bottle_count = plan.with_role(magicklala_canvas::BrewRole::Bottle).count();
     let i_word = if ingredient_count == 1 { "ingredient" } else { "ingredients" };
-    let o_word = if bottle_count == 1 { "output" } else { "outputs" };
+    let o_word = if bottle_count == 1 { "bottle" } else { "bottles" };
     let aside_part = if aside_count > 0 { format!(" · {aside_count} aside") } else { String::new() };
     let stats = if app.canvas.mode == WorkbenchMode::Grimoire {
         let w_word = if app.canvas.wires.len() == 1 { "wire" } else { "wires" };
@@ -1402,7 +1402,13 @@ fn node_diagnostics(app: &StudioApp, card: &magicklala_canvas::NodeCardModel) ->
         found.extend(app.hex_findings.iter().filter(|finding| finding.node.as_ref() == Some(&card.id)).map(|finding| finding.readable.clone()));
     }
     if found.is_empty() && card.status == ExecutionStatus::Failed {
-        let own = app.trace.iter().rev().find(|line| line.kind == "NodeFailed" && line.node.as_ref() == Some(&card.id)).map(|line| line.detail.clone());
+        let own = app.trace.iter().rev().find(|line| line.kind == "NodeFailed" && line.node.as_ref() == Some(&card.id)).map(|line| {
+            if line.detail.contains("no LLM gateway is configured") {
+                format!("{} · set MAGICKLALA_LLM_BASE_URL and MAGICKLALA_LLM_API_KEY, then reopen Studio", line.detail)
+            } else {
+                line.detail.clone()
+            }
+        });
         let elsewhere = app.trace.iter().find(|line| line.kind == "NodeFailed").map(|line| format!("Stopped when {}", line.detail));
         found.push(own.or(elsewhere).unwrap_or_else(|| format!("{} failed during the brew.", app.canvas.display_title(&card.id))));
     }
@@ -1822,7 +1828,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     }
     let mut column = column.child(inspector_section_heading("Sockets", t)).child(sockets);
     if matches!(card.kind.as_str(), "ai/generate_text" | "ai/stream_text" | "ai/structured_json") {
-        let temp_value = app.selected_temperature().to_string();
+        let temp_value = app.selected_temperature().map_or_else(|| "Auto".to_owned(), |temperature| temperature.to_string());
         let model_name = app.selected_model_name();
         let narrow_inspector = app.compact_toolbar();
         let tile_py = if compact || has_error { 5.0 } else { 7.0 };
@@ -1841,7 +1847,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                     .continuous_corners()
                     .fill(t.card)
                     .border(1.0, t.rule_2)
-                    .child(label("Model", 10.0, 600.0, t.mute))
+                    .child(label(format!("Model · {}", app.selected_provider()), 10.0, 600.0, t.mute).truncate())
                     .child(
                         row()
                             .w_full()
@@ -2140,7 +2146,7 @@ fn chip_width(line: &TraceLine, shape: &ChipShape) -> f32 {
         ChipShape::Dot => 22.0 + 10.0,
         ChipShape::Span(_) => 46.0 + 10.0,
         ChipShape::More(_) => 120.0 + 16.0,
-        ChipShape::Full => 18.0 + 6.0 + 17.0 + 16.0 + line.detail.chars().count() as f32 * 6.6,
+        ChipShape::Full => 18.0 + 6.0 + 17.0 + 16.0 + line.detail.chars().count() as f32 * 5.8,
     }
 }
 

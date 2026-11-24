@@ -538,7 +538,8 @@ pub fn grimoire_lanes(state: &CanvasState) -> Vec<(magicklala_graph::WireId, i8)
     lanes
 }
 
-const DETAIL_ZOOM: f32 = 0.6;
+pub(crate) const DETAIL_ZOOM: f32 = 0.6;
+const KIND_ZOOM: f32 = DETAIL_ZOOM;
 
 fn bottle_hex_pill(card: &NodeCardModel, p: &HearthPalette) -> Option<El> {
     let caption = match card.inputs.iter().find(|socket| socket.flagged) {
@@ -842,11 +843,12 @@ fn socket_row(card: &NodeCardModel, row_index: usize, dimmed: bool, p: &HearthPa
         .w_full()
         .h(SOCKET_ROW * zoom)
         .px((11.0 * zoom).max(9.0))
+        .gap((6.0 * zoom).max(4.0))
         .items_center()
         .justify_between()
-        .child(label(card.inputs.get(row_index)))
+        .child(label(card.inputs.get(row_index)).truncate())
         .child(label(card.outputs.get(row_index)));
-    if row_index > 0 {
+    if row_index > 0 && zoom >= DETAIL_ZOOM {
         r = r.border_sides([1.0, 0.0, 0.0, 0.0], with_alpha(p.rule, 0.72));
     }
     r
@@ -893,7 +895,7 @@ fn grimoire_card_view<S: 'static>(
                 .justify_center()
                 .gap((1.0 * zoom).max(0.5))
                 .child(text(display_title).font(TextStyle::new(title_size, 750.0)).color(title_color).truncate())
-                .children((zoom >= DETAIL_ZOOM).then(|| text(&card.kind).font(TextStyle::new(kind_size, 500.0).mono()).color(kind_color).truncate())),
+                .children((zoom >= KIND_ZOOM).then(|| text(&card.kind).font(TextStyle::new(kind_size, 500.0).mono()).color(kind_color).truncate())),
         );
     let perched_badge = status_box(card.status, card.duration_ms, p, zoom).or_else(|| {
         (shelved || (dimmed && state.brewed_clean())).then(|| {
@@ -1052,13 +1054,38 @@ fn socket_port<S: 'static>(
     } else {
         (p.data_wire, p.card, 2.0 * zoom)
     };
-    let port = el()
+    let hovered = (card.id.clone(), socket.name.clone(), output);
+    let shows_tip = zoom < DETAIL_ZOOM && state.hover_socket.as_ref() == Some(&hovered);
+    let mut port = el()
         .key(format!("socket-{}-{side}-{}", card.id.0, socket.name))
         .size(size * zoom, size * zoom)
         .radius(radius)
         .fill(fill)
         .border((1.6 * zoom).max(1.0), border_color)
         .absolute((socket.offset[0] - size / 2.0) * zoom, (socket.offset[1] - size / 2.0) * zoom);
+    if zoom < DETAIL_ZOOM {
+        let mine = hovered.clone();
+        port = port.on_hover_change(move |s: &mut S, on, _| {
+            let canvas = lens(s);
+            if on {
+                canvas.hover_socket = Some(mine.clone());
+            } else if canvas.hover_socket.as_ref() == Some(&mine) {
+                canvas.hover_socket = None;
+            }
+        });
+    }
+    if shows_tip {
+        let tip = row()
+            .key("socket-tip")
+            .px(6.0)
+            .py(2.0)
+            .radius(6.0)
+            .fill(p.card)
+            .border(1.0, p.rule_2)
+            .child(text(&socket.name).font(TextStyle::new(11.5, 650.0)).color(p.ink));
+        let gap = size * zoom + 4.0;
+        port = port.child(if output { tip.absolute(gap, -6.0) } else { tip.absolute(-gap - 6.0 * socket.name.chars().count() as f32 - 12.0, -6.0) });
+    }
     if !output {
         if !wired {
             return port;
