@@ -1796,8 +1796,22 @@ fn visible_texts(rt: &Runtime<StudioApp>) -> Vec<String> {
 }
 
 fn plain_words() -> Result<serde_json::Value, String> {
-    let mut rt = headless(StudioApp::from_registry());
     let mut texts: Vec<String> = Vec::new();
+    let mut empty = headless(StudioApp::with_spell(SpellGraph::new("New Potion"), registry_specs()));
+    empty.frame(0.0);
+    texts.extend(visible_texts(&empty));
+    let mut broken = StudioApp::from_registry();
+    broken.spell.wires.retain(|wire| wire.id.0 != "w2");
+    broken.canvas = magicklala_canvas::CanvasState::from_graph(&broken.spell, &broken.specs);
+    let mut hexed = headless(broken);
+    click(&mut hexed, "validate")?;
+    click(&mut hexed, "tab-agents")?;
+    texts.extend(visible_texts(&hexed));
+    let mut bare = headless(StudioApp::from_registry());
+    bare.update(|app, _| app.canvas.select(None));
+    bare.frame(0.0);
+    texts.extend(visible_texts(&bare));
+    let mut rt = headless(StudioApp::from_registry());
     for tab in ["tab-inspector", "tab-trace", "tab-variables", "tab-playground"] {
         click(&mut rt, tab)?;
         rt.frame(0.0);
@@ -2050,6 +2064,99 @@ fn toss_safety() -> Result<serde_json::Value, String> {
     Ok(json!({ "nudge": nudge, "undo": undo, "leak": leak, "menu": menu, "whileRunning": while_running }))
 }
 
+fn feeders_of(app: &StudioApp, id: &str) -> Vec<String> {
+    app.spell.wires.iter().filter(|wire| wire.to_node.0 == id).map(|wire| format!("{}.{}->{}", wire.from_node.0, wire.from_socket, wire.to_socket)).collect()
+}
+
+fn contrast(ink: rune::Color, ground: rune::Color) -> f64 {
+    let over = |i: f32, g: f32| f64::from(i * ink.a + g * (1.0 - ink.a));
+    let lum = |r: f64, g: f64, b: f64| 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let x = lum(over(ink.r, ground.r), over(ink.g, ground.g), over(ink.b, ground.b));
+    let y = lum(f64::from(ground.r), f64::from(ground.g), f64::from(ground.b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+fn recipe_honesty() -> Result<serde_json::Value, String> {
+    let mut rt = headless(StudioApp::from_registry());
+    rt.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("recall"))));
+    rt.update(|app, _| {
+        app.spawn("memory/add");
+    });
+    let added = node_of_kind(&rt.state, "memory/add").ok_or("memory/add not added")?;
+    let memory = json!({ "feeders": feeders_of(&rt.state, &added), "replyFeeders": feeders_of(&rt.state, "reply"), "id": added });
+
+    let mut research = headless(StudioApp::from_registry());
+    research.update(|app, _| {
+        app.request_open_sample("Research Agent");
+        app.confirm_switch();
+    });
+    click(&mut research, "validate")?;
+    let research_check = research.state.validation.label();
+
+    let mut mistyped_spell = SpellGraph::new("Mistyped");
+    let place =
+        |id: &str, kind: &str, x: f32| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position: [x, 0.0], config: serde_json::Value::Null };
+    mistyped_spell.nodes = vec![
+        place("trigger", "event/on_message", 0.0),
+        place("recall", "memory/search", 260.0),
+        place("llm", "ai/generate_text", 520.0),
+        place("reply", "io/send_message", 780.0),
+    ];
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    mistyped_spell.wires = vec![
+        wire("w1", ("trigger", "out"), ("recall", "in")),
+        wire("w2", ("trigger", "content"), ("recall", "query")),
+        wire("w3", ("recall", "out"), ("llm", "in")),
+        wire("w4", ("recall", "results"), ("llm", "prompt")),
+        wire("w5", ("llm", "out"), ("reply", "in")),
+        wire("w6", ("llm", "text"), ("reply", "content")),
+    ];
+    let mut mistyped = runtime_for(mistyped_spell);
+    click(&mut mistyped, "validate")?;
+    let mistyped_report = json!({ "card": texts_under(&mut mistyped, "node-llm"), "plaque": texts_under(&mut mistyped, "cauldron-plaque") });
+
+    let mut empty = headless(StudioApp::with_spell(SpellGraph::new("New Potion"), registry_specs()));
+    click(&mut empty, "empty-add-trigger")?;
+    let first = node_of_kind(&empty.state, "event/on_message").ok_or("no trigger added")?;
+    let lone = role_of(&empty.state, &first);
+
+    let mut side_spell = SpellGraph::new("Remember Everything");
+    side_spell.nodes = vec![place("trigger", "event/on_message", 0.0), place("keep", "memory/add", 280.0)];
+    side_spell.wires = vec![wire("w1", ("trigger", "out"), ("keep", "in")), wire("w2", ("trigger", "content"), ("keep", "content"))];
+    let side = headless(StudioApp::with_spell(side_spell, registry_specs()));
+    let side_plan = magicklala_canvas::brew_plan(&side.state.canvas, side.state.canvas_size());
+    let side_effect = json!({ "role": role_of(&side.state, "keep"), "ghost": side_plan.ghost_bottle.is_some() });
+
+    let mut shades = Vec::new();
+    for light in [true, false] {
+        let mut blank = StudioApp::with_spell(SpellGraph::new("New Potion"), registry_specs());
+        if !light {
+            blank.toggle_theme();
+        }
+        let mut rt = headless(blank);
+        rt.frame(0.0);
+        let elements = rt.elements();
+        let brew = elements.iter().position(|element| element.key.as_deref() == Some("run-spell")).ok_or("no brew button")?;
+        let fill = elements[brew].fill;
+        let ink = elements
+            .iter()
+            .find(|element| element.parent == Some(brew) && element.text.is_some())
+            .and_then(|element| element.text_color)
+            .ok_or("no brew caption")?;
+        let palette = magicklala_canvas::HearthPalette::for_theme(light);
+        shades.push(json!({ "light": light, "disabledText": contrast(ink, fill), "ghostOutline": contrast(magicklala_canvas::hearth::ghost_ink(light), palette.paper) }));
+    }
+    Ok(
+        json!({ "memory": memory, "researchCheck": research_check, "mistyped": mistyped_report, "loneFirst": lone, "sideEffect": side_effect, "shades": shades }),
+    )
+}
+
 fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
     match args.first().map(String::as_str) {
         Some("surfaces") => capture_surfaces(Path::new(args.get(1).ok_or("missing output directory")?)),
@@ -2062,6 +2169,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("variable-defaults") => variable_defaults(),
         Some("publish-plaque") => publish_plaque(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("toss-safety") => toss_safety(),
+        Some("recipe-honesty") => recipe_honesty(),
         Some("cancel-run") => cancel_run(number(args.get(1), "delay ms")?, number(args.get(2), "deadline ms")?),
         Some("subgraph") => subgraph(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("subgraph-ref-edit") => subgraph_ref_edit(Path::new(args.get(1).ok_or("missing database path")?)),

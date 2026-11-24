@@ -907,7 +907,7 @@ test('Dragging a vial off the cauldron sets it aside with every wire removed, dr
   expect(setAside.positionsAfter).toEqual(setAside.positionsBefore);
 });
 
-test('Every Studio panel names things in plain words: pantry shelves are Events, Flow, AI, Memory, Knowledge, Outputs and so on, the right tabs read Recipe, Trace, Variables, Tasting, counts say variables, and no hint line tells the user which button to press', { timeout: 900_000 }, async () => {
+test('Every Studio panel names things in plain words: pantry shelves are Events, Flow, AI, Memory, Knowledge, Outputs and so on, the right tabs read Recipe, Trace, Variables, Tasting, counts say variables, and no hint line anywhere (empty pot, hexed spell, nothing picked, releases) tells the user what to click, drag or fix', { timeout: 900_000 }, async () => {
   const { texts } = await studioProbe(['plain-words']);
   const shown = new Set(texts as string[]);
 
@@ -915,7 +915,8 @@ test('Every Studio panel names things in plain words: pantry shelves are Events,
   for (const flourish of ['Sparks & Events', 'Whisk & Flow', 'Arcane AI', 'Memory Jars', 'Herb Lore', 'Potion Bottles', 'Rhai Runes', 'Essences', 'Pours in', 'Distills out', 'Prompt · Incantation', 'Potion spices', 'Spices']) {
     expect(shown.has(flourish)).toBe(false);
   }
-  expect((texts as string[]).filter((line) => /^(Press|Click|Send a prompt) /.test(line) || /Press Brew|\bspices?\b|Taste this potion/.test(line))).toEqual([]);
+  const hints = /\b(click|press|tap|drag|drop|select an?|start with|fix the|to add|to edit|send a prompt|herb|incantation|essence|spices?|vintages?|taste this potion)\b/i;
+  expect((texts as string[]).filter((line) => line !== 'Add On Message' && hints.test(line))).toEqual([]);
 });
 
 test('The toolbar pill and the cauldron plaque tell the truth about a brew: Brewing while it runs, Brewed only when the run succeeded, Failed when a step failed, Cancelled when it was stopped, and the pot stops simmering the moment a run ends', { timeout: 900_000 }, async () => {
@@ -994,4 +995,22 @@ test('Cauldron vials are safe to handle: a small nudge keeps every wire, setting
   expect(menu.coversCard).toBe(false);
   expect(whileRunning.running).toBe(true);
   expect(whileRunning.after).toBe(whileRunning.before);
+});
+
+test('The cauldron keeps the recipe honest: a tossed Add Memory is fed only from ingredients in the pot and never takes over the reply, the Research Agent sample passes Check, a list wired into a text prompt reads Wrong type, the first lone vial waits by the pot, a spell that ends in Add Memory bottles it instead of a ghost, and disabled buttons and the ghost bottle stay readable in both themes', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['recipe-honesty']);
+
+  expect(report.memory.feeders.some((wire: string) => wire.startsWith('recall.'))).toBe(false);
+  expect(report.memory.feeders).toContain('llm.text->content');
+  expect(report.memory.replyFeeders).toEqual(expect.arrayContaining(['llm.text->content']));
+  expect(report.memory.replyFeeders.some((wire: string) => wire.startsWith(report.memory.id + '.'))).toBe(false);
+  expect(report.researchCheck).toBe('valid');
+  expect(report.mistyped.card).toContain('Wrong type "prompt"');
+  expect(report.mistyped.plaque).toBe('Hexed · wrong type "prompt"');
+  expect(report.loneFirst).toBe('Ingredient');
+  expect(report.sideEffect).toEqual({ role: 'Bottle', ghost: false });
+  for (const shade of report.shades) {
+    expect(shade.disabledText).toBeGreaterThanOrEqual(4.5);
+    expect(shade.ghostOutline).toBeGreaterThanOrEqual(3);
+  }
 });

@@ -7,6 +7,10 @@ fn srgb_channel(byte: u32) -> f32 {
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }
 
+pub fn ghost_ink(light: bool) -> Color {
+    if light { hex(0xB8A690) } else { hex(0x5B4D7A) }
+}
+
 pub fn hex(value: u32) -> Color {
     Color { r: srgb_channel(value >> 16), g: srgb_channel(value >> 8), b: srgb_channel(value), a: 1.0 }
 }
@@ -955,7 +959,7 @@ pub fn ghost_potion_bottle_shape(light: bool, width: f32, height: f32) -> Shape 
     let cx = width * 0.5;
     let cy = height * 0.54;
     let u = (width.min(height) / 96.0).clamp(0.55, 1.3);
-    let outline = if light { hex(0xB8A690) } else { hex(0x5B4D7A) };
+    let outline = ghost_ink(light);
     let mut s = Shape::new();
     let pts: [[f32; 2]; 12] = [
         [cx - 9.0 * u, cy - 26.0 * u],
