@@ -198,12 +198,13 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     let dense = dims[1] < 50.0;
     let badge = if dense { 30.0 } else { 38.0 };
     let vial_badge = el()
+        .key(format!("vial-{}", card.id.0))
         .size(badge, badge)
         .radius(badge * 0.5)
         .fill(if hexed { with_alpha(p.hex, 0.14) } else { tone.tint })
         .border(1.3, if hexed { p.hex } else { tone.border })
         .center()
-        .child(canvas(mini_vial_icon(&card.category, state.light, badge * 0.76)).size(badge * 0.76, badge * 0.76));
+        .child(canvas(mini_vial_icon(&card.category, state.light, badge * 0.76)).size(badge * 0.76, badge * 0.76).rotate(if aside { 0.0 } else { 0.5 }));
 
     let step_badge = step_num.map(|num| {
         row()
@@ -313,12 +314,12 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         .fill(fill_col)
         .border(border_w, border_col)
         .shadow(if card.selected { 5.0 } else { 3.0 }, if card.selected { 14.0 } else { 9.0 }, if dimmed { Color::TRANSPARENT } else { p.shadow_card })
-        .child(vial_badge)
         .child(if dense {
             col().grow(1.0).min_w(0.0).child(top_row)
         } else {
             col().grow(1.0).min_w(0.0).gap(2.0).child(top_row).child(text(&card.kind).font(TextStyle::new(11.5, 500.0).mono()).color(sub_color).truncate())
         })
+        .child(vial_badge)
         .on_press(move |s: &mut S| lens(s).select(Some(select_id.clone())))
         .on_drag(move |s: &mut S, drag, tx| {
             tx.instant();

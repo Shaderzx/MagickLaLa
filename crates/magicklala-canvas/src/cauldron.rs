@@ -91,7 +91,7 @@ fn drips(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &HearthPal
         if style.untaken || style.blocked || style.hexed {
             continue;
         }
-        let from = [placed.rect[0] + placed.rect[2], placed.rect[1] + placed.rect[3] * 0.5];
+        let from = vial_mouth(placed, plan);
         let to = rim_point(plan, index as f32 / spread.max(1.0));
         let r = (if style.active { 3.4 } else { 2.6 }) * plan.scale.max(0.6);
         let period = if style.active { 0.9 } else { 1.8 };
@@ -112,6 +112,13 @@ fn drips(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &HearthPal
     out
 }
 
+fn vial_mouth(placed: &BrewCard, plan: &BrewPlan) -> [f32; 2] {
+    let scale = placed.rect[3] / plan.vial[1];
+    let badge = if plan.vial[1] < 50.0 { 30.0 } else { 38.0 };
+    let center = [placed.rect[0] + placed.rect[2] - (9.0 + badge * 0.5) * scale, placed.rect[1] + placed.rect[3] * 0.5];
+    [center[0] + badge * 0.22 * scale, center[1] - badge * 0.36 * scale]
+}
+
 fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &HearthPalette) -> Shape {
     let mut shape = Shape::new();
     let ingredients: Vec<&BrewCard> = plan.with_role(BrewRole::Ingredient).collect();
@@ -120,7 +127,7 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
     let spread = ingredients.len().max(2) as f32 - 1.0;
     for (index, placed) in ingredients.iter().enumerate() {
         let Some(card) = state.card(&placed.id) else { continue };
-        let from = [placed.rect[0] + placed.rect[2], placed.rect[1] + placed.rect[3] * 0.5];
+        let from = vial_mouth(placed, plan);
         let lift = (36.0 - index as f32 * 10.0).max(0.0) * plan.scale;
         let style = stream_for(state, card, mood, p, lift);
         shape = pouring_stream_shape(shape, from, rim_point(plan, index as f32 / spread.max(1.0)), style);

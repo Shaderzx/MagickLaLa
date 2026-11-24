@@ -5,7 +5,7 @@ use magicklala_graph::NodeId;
 use crate::{CanvasState, NodeCardModel, WireModel};
 
 pub const VIAL_SIZE: [f32; 2] = [196.0, 58.0];
-pub const POT_SIZE: [f32; 2] = [256.0, 248.0];
+pub const POT_SIZE: [f32; 2] = [300.0, 290.0];
 pub const SINGLE_BOTTLE_SIZE: [f32; 2] = [148.0, 196.0];
 pub const MULTI_BOTTLE_SIZE: [f32; 2] = [150.0, 148.0];
 const ROW_GAP: f32 = 22.0;
@@ -185,7 +185,7 @@ const ROOMY: Metrics = Metrics {
     bottle_gap: BOTTLE_GAP,
 };
 const CROWDED: Metrics =
-    Metrics { vial: [160.0, 42.0], pot: [196.0, 190.0], row_gap: 12.0, col_gap: 14.0, shelf_to_pot: 40.0, pot_to_bottles: 44.0, bottle_gap: 10.0 };
+    Metrics { vial: [160.0, 42.0], pot: [250.0, 242.0], row_gap: 12.0, col_gap: 14.0, shelf_to_pot: 40.0, pot_to_bottles: 44.0, bottle_gap: 10.0 };
 const READABLE: f32 = 0.92;
 
 pub fn brew_plan(state: &CanvasState, size: (f32, f32)) -> BrewPlan {
@@ -197,7 +197,7 @@ pub fn brew_plan(state: &CanvasState, size: (f32, f32)) -> BrewPlan {
     if crowded.0 >= READABLE {
         return crowded.1;
     }
-    let stacked = plan_stacked(state, size, CROWDED);
+    let stacked = plan_stacked(state, size, Metrics { pot: [204.0, 198.0], ..CROWDED });
     if stacked.0 > crowded.0 { stacked.1 } else { crowded.1 }
 }
 
