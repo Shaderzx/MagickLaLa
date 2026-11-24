@@ -14,7 +14,7 @@ use serde_json::json;
 
 const TOOLBAR_KEYS: [&str; 11] =
     ["toolbar-left", "validation-pill", "validate", "run-spell", "save", "publish", "theme-toggle", "zoom-out", "zoom-readout", "zoom-in", "zoom-fit"];
-const CONTEXT_MENU_ITEMS: [&str; 4] = ["context-add-ai-generate_text", "context-delete-node", "context-fit-view", "context-dismiss"];
+const CONTEXT_MENU_ITEMS: [&str; 5] = ["context-duplicate-node", "context-add-ai-generate_text", "context-delete-node", "context-fit-view", "context-dismiss"];
 
 const SETTLE: Duration = Duration::from_secs(120);
 
@@ -137,6 +137,17 @@ fn context_menu(rt: &mut Runtime<StudioApp>) -> Result<serde_json::Value, String
         .iter()
         .find(|card| card.id.0 == "search")
         .map(|card| rt.state.canvas.camera.world_to_screen([card.position[0] + 20.0, card.position[1] + 12.0]));
+    let on_card = match target {
+        Some(local) => {
+            right_click(rt, (canvas[0] + local[0], canvas[1] + local[1]));
+            let items: Vec<String> = CONTEXT_MENU_ITEMS.iter().filter(|key| rt.find(key).is_some()).map(|key| (*key).to_owned()).collect();
+            let before = rt.state.canvas.nodes.len();
+            let clicked = click(rt, "context-duplicate-node").is_ok();
+            let fresh = rt.state.canvas.nodes.iter().skip(before).map(|card| card.kind.clone()).collect::<Vec<_>>();
+            json!({ "items": items, "duplicateClicked": clicked, "duplicated": fresh, "closed": rt.state.canvas.context_menu.is_none() })
+        }
+        None => json!({ "items": [], "duplicateClicked": false, "duplicated": [], "closed": false }),
+    };
     let delete = match target {
         Some(local) => {
             right_click(rt, (canvas[0] + local[0], canvas[1] + local[1]));
@@ -167,6 +178,7 @@ fn context_menu(rt: &mut Runtime<StudioApp>) -> Result<serde_json::Value, String
         "insideCanvas": inside,
         "items": items,
         "add": { "clicked": add_clicked, "before": add_before, "after": add_after, "kind": added_kind, "closed": closed_after_add, "spellNodes": spell_nodes_after_add },
+        "onCard": on_card,
         "delete": delete,
         "fit": { "clicked": fit_clicked, "zoomBefore": zoom_before_fit, "zoomAfter": zoom_after_fit, "expectedZoom": expected.camera.zoom },
         "dismiss": { "reopened": reopened, "clicked": dismiss_clicked, "dismissed": dismissed },

@@ -40,6 +40,7 @@ type ProbeReport = {
     insideCanvas: boolean;
     items: string[];
     add: { clicked: boolean; before: number; after: number; kind: string | null; closed: boolean; spellNodes: number };
+    onCard: { items: string[]; duplicateClicked: boolean; duplicated: string[]; closed: boolean };
     delete: { selected: string | null; clicked: boolean; before: number; after: number; searchRemains: boolean; spellNodes: number };
     fit: { clicked: boolean; zoomBefore: number; zoomAfter: number; expectedZoom: number };
     dismiss: { reopened: boolean; clicked: boolean; dismissed: boolean };
@@ -98,7 +99,7 @@ function pngFacts(bytes: Buffer) {
   return { width, height, distinctColors: colors.size, entropy };
 }
 
-test('studio probe keeps example configs and dynamic wires, runs spells and chat through the real engine, publishes releases that survive a reopen, and drives palette, drag, context menu, 960px toolbar and dark and light PNGs headlessly', { timeout: 900_000 }, async () => {
+test('studio probe keeps example configs and dynamic wires, runs spells and chat through the real engine, publishes releases that survive a reopen, and drives palette, drag, a context menu that adds on empty canvas and duplicates or removes the card it was opened on, 960px toolbar and dark and light PNGs headlessly', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-probe-'));
   const desktop = join(dir, 'studio-desktop.png');
   const compact = join(dir, 'studio-compact.png');
@@ -220,9 +221,10 @@ test('studio probe keeps example configs and dynamic wires, runs spells and chat
     const menu = report.contextMenu;
     expect(menu.opened).toBe(true);
     expect(menu.insideCanvas).toBe(true);
-    expect(menu.items).toEqual(['context-add-ai-generate_text', 'context-delete-node', 'context-fit-view', 'context-dismiss']);
+    expect(menu.items).toEqual(['context-add-ai-generate_text', 'context-fit-view', 'context-dismiss']);
     expect(menu.add).toEqual({ clicked: true, before: report.defaultSpell.nodes, after: report.defaultSpell.nodes + 1, kind: 'ai/generate_text', closed: true, spellNodes: report.defaultSpell.nodes + 1 });
-    expect(menu.delete).toEqual({ selected: 'search', clicked: true, before: report.defaultSpell.nodes + 1, after: report.defaultSpell.nodes, searchRemains: false, spellNodes: report.defaultSpell.nodes });
+    expect(menu.onCard).toEqual({ items: ['context-duplicate-node', 'context-delete-node', 'context-dismiss'], duplicateClicked: true, duplicated: ['knowledge/search'], closed: true });
+    expect(menu.delete).toEqual({ selected: 'search', clicked: true, before: report.defaultSpell.nodes + 2, after: report.defaultSpell.nodes + 1, searchRemains: false, spellNodes: report.defaultSpell.nodes + 1 });
     expect(menu.fit.clicked).toBe(true);
     expect(menu.fit.zoomAfter).not.toBeCloseTo(menu.fit.zoomBefore, 3);
     expect(menu.fit.zoomAfter).toBeCloseTo(menu.fit.expectedZoom, 4);
