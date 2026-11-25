@@ -5602,7 +5602,7 @@ fn crowded_bottles(args: &[String]) -> Result<serde_json::Value, String> {
                 let words: Vec<&(String, [f32; 4])> = lines.iter().filter(|(line, _)| line.parse::<usize>().is_err()).collect();
                 let badges: Vec<&(String, [f32; 4])> = lines.iter().filter(|(line, _)| line.parse::<usize>().is_ok()).collect();
                 for (line, rect) in &words {
-                    if rect[0] < frame[0] - 0.5 || rect[0] + rect[2] > frame[0] + frame[2] + 0.5 {
+                    if rect[0] < frame[0] - 0.5 || rect[0] + rect[2] > frame[0] + frame[2] + 0.5 || rect[1] < frame[1] - 0.5 || rect[1] + rect[3] > frame[1] + frame[3] + 0.5 {
                         spills.push(format!("{}: {line} leaves its card", card.id.0));
                     }
                     if badges.iter().any(|(_, badge)| rects_overlap(*badge, *rect)) {
