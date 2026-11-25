@@ -1733,3 +1733,8 @@ test('Grimoire room: the default Support and Parallel Research potions leave a w
     expect({ potion, twinsCut: room.twinsCut }).toEqual({ potion, twinsCut: [] });
   }
 });
+test('Log counts: a brew where one template feeds eight bottles counts each step once in the Cauldron Log, matching the ten steps on the cauldron', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['log-counts']);
+
+  expect(report).toEqual({ distinct: 10, saysSteps: true });
+});
