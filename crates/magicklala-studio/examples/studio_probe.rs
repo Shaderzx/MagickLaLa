@@ -2271,6 +2271,45 @@ fn twin_routes() -> Result<serde_json::Value, String> {
     let names: Vec<String> = ["refund_reply", "billing_copy", "other_reply"].iter().map(|id| rt.state.canvas.display_title(&NodeId::from(*id))).collect();
     Ok(json!({ "names": names }))
 }
+fn small_truths() -> Result<serde_json::Value, String> {
+    let mut search = runtime_for(tasting_spell());
+    search.update(|app, _| app.palette_query = rune::TextEdit::new("send"));
+    search.frame(1.0);
+    let clear = layout_rect(&search, "palette-inline-clear").map(|rect| [rect[2].round(), rect[3].round()]);
+
+    let mut clash = runtime_for(router_spell());
+    type_prompt(&mut clash, &NodeId::from("switch"), "refund, default")?;
+    clash.update(|app, _| app.sync_spell());
+    let clash_check = validation_of(&mut clash)?;
+
+    let cmd_z = |rt: &mut Runtime<StudioApp>| {
+        rt.key(rune::KeyEvent { key: rune::Key::Command('z'), mods: rune::Mods { cmd: true, ..Default::default() } });
+        rt.frame(0.0);
+    };
+    let mut moved = runtime_for(tasting_spell());
+    moved.on_key = Some(magicklala_studio::studio_key);
+    click(&mut moved, "mode-grimoire")?;
+    let before = moved.state.canvas.nodes.len();
+    moved.update(|app, _| {
+        let _ = app.spawn("text/template");
+        app.sync_edits();
+    });
+    let added = moved.state.canvas.nodes.len() == before + 1;
+    moved.frame(0.0);
+    let target = [900.0_f32, 420.0_f32];
+    moved.update(move |app, _| {
+        app.canvas.move_node(&NodeId::from("reply"), target);
+        app.sync_edits();
+    });
+    moved.frame(0.0);
+    cmd_z(&mut moved);
+    let reply_at = moved.state.canvas.card(&NodeId::from("reply")).map(|card| card.position);
+    Ok(json!({
+        "clear": clear,
+        "clash": { "check": clash_check["validation"], "errors": clash_check["errors"] },
+        "undoKeepsMove": { "added": added, "addUndone": moved.state.canvas.nodes.len() == before, "replyStays": reply_at == Some(target) },
+    }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8507,6 +8546,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("failed-stub") => failed_stub(),
         Some("bound-settings") => bound_settings(),
         Some("twin-routes") => twin_routes(),
+        Some("small-truths") => small_truths(),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("pot-rect") => pot_rect(),
         Some("gateway-hint") => gateway_hint(),

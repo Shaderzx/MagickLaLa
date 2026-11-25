@@ -1877,3 +1877,13 @@ test('Two bottles fed by the same route get their own numbered names while a lon
 
   expect(report.names).toEqual(['Send · billing 1', 'Send · billing 2', 'Send · default']);
 });
+
+test('Small things stay honest: the Pantry search Clear button is at least 24 by 24, a Switch case that reuses the name default is named by Check, and undoing an older add keeps a card you moved since where you put it', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['small-truths']);
+
+  expect(report.clear[0]).toBeGreaterThanOrEqual(24);
+  expect(report.clear[1]).toBeGreaterThanOrEqual(24);
+  expect(report.clash.check).toBe('invalid');
+  expect(report.clash.errors.join(' ')).toMatch(/default is already an output/);
+  expect(report.undoKeepsMove).toEqual({ added: true, addUndone: true, replyStays: true });
+});
