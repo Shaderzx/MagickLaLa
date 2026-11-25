@@ -1158,26 +1158,35 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     app.releases.iter().rev().fold(column, |list, release| {
         let is_active = app.active_release_version == Some(release.version);
         let is_pending = app.pending_restore_version == Some(release.version);
+        let is_live = app.last_published.as_ref().is_some_and(|live| live.version == release.version);
         let parts = app.release_graphs.get(&release.version).map_or(release.nodes, |graph| {
             let canvas = magicklala_canvas::CanvasState::from_graph(graph, &app.specs);
             magicklala_canvas::brew_plan(&canvas, app.canvas_size()).with_role(magicklala_canvas::BrewRole::Ingredient).count()
         });
         let p_word = if parts == 1 { "ingredient" } else { "ingredients" };
-        let stamp = el().size(28.0, 24.0).radius(8.0).continuous_corners().fill(if is_active { t.primary_bg } else { t.wash }).center().child(figure(
+        let stamp = el().size(28.0, 24.0).radius(8.0).continuous_corners().fill(if is_live { t.primary_bg } else { t.wash }).center().child(figure(
             format!("v{}", release.version),
             10.5,
             750.0,
-            if is_active { t.primary_ink } else { t.ink },
+            if is_live { t.primary_ink } else { t.ink },
         ));
         let version = release.version;
-        let right_action = if is_active {
-            row().px(7.0).py(2.5).radius(8.0).fill(t.primary_bg).child(label("Live", 9.8, 750.0, t.primary_ink))
-        } else {
-            row().px(6.5).py(2.5).radius(8.0).fill(Color::TRANSPARENT).border(1.0, t.rule_2).child(label("Restore", 9.8, 650.0, t.ink_2)).on_press(
-                move |app: &mut StudioApp| {
-                    app.request_restore_release(version);
-                },
-            )
+        let restore = row()
+            .key(format!("restore-v{version}"))
+            .px(6.5)
+            .py(2.5)
+            .radius(8.0)
+            .fill(Color::TRANSPARENT)
+            .border(1.0, t.rule_2)
+            .child(label("Restore", 9.8, 650.0, t.ink_2))
+            .on_press(move |app: &mut StudioApp| {
+                app.request_restore_release(version);
+            });
+        let live_pill = row().px(7.0).py(2.5).radius(8.0).fill(t.primary_bg).child(label("Live", 9.8, 750.0, t.primary_ink));
+        let right_action = match (is_live, is_active) {
+            (true, true) => row().child(live_pill),
+            (true, false) => row().gap(4.0).items_center().child(restore).child(live_pill),
+            (false, _) => row().child(restore),
         };
         let top_row = row()
             .w_full()
@@ -1196,6 +1205,7 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             )
             .child(right_action);
         let mut entry = col()
+            .key(format!("release-v{version}"))
             .w_full()
             .px(8.0)
             .py(9.0)
