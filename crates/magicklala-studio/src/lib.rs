@@ -642,6 +642,28 @@ pub fn editable_field(kind: &str) -> Option<&'static str> {
     }
 }
 
+fn card_note(kind: &str, config: &serde_json::Value) -> Option<String> {
+    let setting = |key: &str| {
+        config.get(key).and_then(|value| match value {
+            serde_json::Value::String(text) => Some(magicklala_graph::bound_variable(value).map_or_else(|| text.clone(), str::to_owned)),
+            serde_json::Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        })
+    };
+    let count =
+        |key: &str, one: &str, many: &str| config.get(key).and_then(serde_json::Value::as_array).map(|items| crate::view::plural(items.len(), one, many));
+    match kind {
+        "ai/generate_text" | "ai/stream_text" | "ai/structured_json" => setting("model").filter(|model| !model.is_empty()),
+        "memory/search" | "knowledge/search" => Some(format!("top {}", setting("limit").unwrap_or_else(|| "5".to_owned()))),
+        "flow/switch" => count("cases", "case", "cases"),
+        "flow/split" => count("outputs", "output", "outputs"),
+        "json/destructure" => count("keys", "key", "keys"),
+        "time/delay" => setting("ms").map(|ms| if ms.chars().all(|c| c.is_ascii_digit()) { format!("{ms} ms") } else { format!("wait {ms}") }),
+        "var/get" | "var/set" | "var/reset" => setting("name").filter(|name| !name.is_empty()),
+        _ => None,
+    }
+}
+
 pub fn listed_field(kind: &str) -> bool {
     matches!(kind, "flow/switch" | "flow/split" | "json/destructure")
 }
@@ -1087,6 +1109,7 @@ impl StudioApp {
         app.canvas.select(app.canvas.nodes.iter().find(|card| card.kind == "ai/generate_text").map(|card| card.id.clone()));
         app.last_synced = Some(Box::new(app.edit_snapshot(None)));
         app.seed_wire_ledger();
+        app.canvas.notes = app.card_notes();
         app
     }
 
@@ -1511,6 +1534,7 @@ impl StudioApp {
         self.canvas.select(self.canvas.nodes.iter().find(|card| card.kind == "ai/generate_text").map(|card| card.id.clone()));
         self.last_synced = Some(Box::new(self.edit_snapshot(None)));
         self.seed_wire_ledger();
+        self.canvas.notes = self.card_notes();
     }
 
     fn has_unsaved_work(&self) -> bool {
@@ -2382,6 +2406,10 @@ impl StudioApp {
         config
     }
 
+    fn card_notes(&self) -> BTreeMap<NodeId, String> {
+        self.canvas.nodes.iter().filter_map(|card| card_note(&card.kind, &self.node_config(&card.id, &card.kind)).map(|note| (card.id.clone(), note))).collect()
+    }
+
     fn sync_listed_outputs(&mut self) {
         let listed: Vec<(NodeId, Vec<String>, SocketType, Vec<String>)> = self
             .canvas
@@ -2462,6 +2490,7 @@ impl StudioApp {
         }
         self.sync_listed_outputs();
         self.order_wires();
+        self.canvas.notes = self.card_notes();
         let refusal = self.canvas.last_connect_error.take().map(|error| Self::wire_refusal(&error));
         if refusal.is_some() {
             self.wire_error = refusal.clone();
@@ -3492,6 +3521,7 @@ impl StudioApp {
         self.sync_var_edits_from_spell();
         self.last_synced = Some(Box::new(self.edit_snapshot(None)));
         self.seed_wire_ledger();
+        self.canvas.notes = self.card_notes();
     }
 
     pub fn quick_add_from_menu(&mut self) {

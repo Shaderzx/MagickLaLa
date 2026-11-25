@@ -1189,7 +1189,7 @@ test('What Studio shows, brews and publishes is the same recipe: a spare reply s
   }
 });
 
-test('Studio reads as one finished product: strands clear every card at 960, the empty ring sits below the mode switch, formulas show whole at 960, the log has one idle line, Publish is off mid-brew, messages are sentences about potions, Potions and release rows say each thing once, the theme button names the current theme, the card menu clears the plaque, and untaken Grimoire drops never cross', { timeout: 900_000 }, async () => {
+test('Studio reads as one finished product: strands clear every card at 960, the empty ring sits below the mode switch, card lines show whole at 960, the log has one idle line, Publish is off mid-brew, messages are sentences about potions, Potions and release rows say each thing once, the theme button names the current theme, the card menu clears the plaque, and untaken Grimoire drops never cross', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-finish-'));
   try {
     const report = await studioProbe(['fit-and-wording', join(dir, 'studio.sqlite')]);

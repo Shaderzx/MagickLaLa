@@ -357,7 +357,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         .iter()
         .filter(|placed| placed.role != crate::brew::BrewRole::Bottle)
         .filter_map(|placed| state.card(&placed.id))
-        .all(|other| other.kind.chars().count() as f32 * 0.62 * kind_size <= title_room_est + badge);
+        .all(|other| state.card_line(other).chars().count() as f32 * 0.62 * kind_size <= title_room_est + badge);
     let kind_fits = !dense && kinds_fit_across && (title_lines * title_size + kind_size) * 1.25 + 8.0 <= dims[1];
     let title_room = dims[0] - 24.0 - 6.0 - 30.0;
     let wraps = narrow && state.display_title(&card.id).chars().count() as f32 * 7.4 * title_size / 13.0 > title_room;
@@ -376,7 +376,9 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         p.mute
     };
 
-    let kind_line = kind_fits.then(|| text(&card.kind).font(TextStyle::new(kind_size, 500.0).mono()).color(sub_color).truncate());
+    let noted = state.notes.contains_key(&card.id);
+    let kind_style = if noted { TextStyle::new(kind_size, 600.0) } else { TextStyle::new(kind_size, 500.0).mono() };
+    let kind_line = kind_fits.then(|| text(state.card_line(card)).font(kind_style).color(sub_color).truncate());
     let side_by_side = |words: El, vial: El, gap: f32| {
         let pair = row().grow(1.0).min_w(0.0).gap(gap).items_center();
         if mirrored { pair.child(vial).child(words) } else { pair.child(words).child(vial) }

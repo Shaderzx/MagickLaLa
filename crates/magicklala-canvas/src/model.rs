@@ -249,6 +249,7 @@ pub struct CanvasState {
     pub mode: WorkbenchMode,
     pub spell_name: String,
     pub release_badge: Option<String>,
+    pub notes: std::collections::BTreeMap<NodeId, String>,
     pub brew_summary: Option<String>,
     pub validated: bool,
     pub invalid_brew: bool,
@@ -324,6 +325,10 @@ impl CanvasState {
             to_node: to.node.clone(),
             to_socket: to.socket.clone(),
         })
+    }
+
+    pub fn card_line<'a>(&'a self, card: &'a NodeCardModel) -> &'a str {
+        self.notes.get(&card.id).map_or(card.kind.as_str(), String::as_str)
     }
 
     pub fn display_title(&self, id: &NodeId) -> String {

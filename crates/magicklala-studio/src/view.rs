@@ -2383,7 +2383,7 @@ fn log_chips_by_count<'a>(lines: &[&'a TraceLine], compact: bool, room_for_dots:
     chips
 }
 
-fn plural(count: usize, one: &str, many: &str) -> String {
+pub(crate) fn plural(count: usize, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
 
