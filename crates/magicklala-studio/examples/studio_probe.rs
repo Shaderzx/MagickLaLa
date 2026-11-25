@@ -5241,14 +5241,33 @@ fn honest_dials(db_path: &Path) -> Result<serde_json::Value, String> {
     let mut parallel = open(example("parallel_research.json")?, (1280.0, 800.0));
     run_once(&mut parallel)?;
     parallel.frame(2.0);
-    let plan = magicklala_canvas::brew_plan(&parallel.state.canvas, parallel.state.canvas_size());
-    let badges: Vec<(usize, String)> = plan
-        .with_role(magicklala_canvas::BrewRole::Ingredient)
-        .filter_map(|card| card.recipe_step.map(|step| (step, card.id.clone())))
-        .filter_map(|(step, id)| parallel.presented(&format!("step-badge-{}", id.0)).map(|_| (step, words_of(&parallel, &format!("step-badge-{}", id.0)))))
-        .collect();
-    let badge_mismatch: Vec<String> =
-        badges.iter().filter(|(step, shown)| shown != &step.to_string()).map(|(step, shown)| format!("recipe {step} shows {shown}")).collect();
+    let mut shelves = vec![parallel];
+    for (spell, size) in [(many_bottle_spell(8), (1280.0, 800.0)), (example("webhook_router.json")?, (1280.0, 800.0)), (crowded_kitchen(), (1280.0, 800.0))] {
+        let mut shelf = open(spell, size);
+        click(&mut shelf, "run-spell")?;
+        live_finish(&mut shelf)?;
+        shelf.frame(2.0);
+        shelves.push(shelf);
+    }
+    let mut badges: Vec<(usize, String)> = Vec::new();
+    let mut badge_mismatch: Vec<String> = Vec::new();
+    for shelf in &shelves {
+        for card in &shelf.state.canvas.nodes {
+            let key = format!("step-badge-{}", card.id.0);
+            let shown = shelf.presented(&key).map(|_| words_of(shelf, &key));
+            match (card.step_order, shown) {
+                (Some(step), Some(shown)) => {
+                    if shown != step.to_string() {
+                        badge_mismatch.push(format!("{} {} ran {step} shows {shown}", shelf.state.spell.name, card.id.0));
+                    }
+                    badges.push((step, shown));
+                }
+                (None, Some(shown)) => badge_mismatch.push(format!("{} {} never ran shows {shown}", shelf.state.spell.name, card.id.0)),
+                _ => {}
+            }
+        }
+    }
+    let parallel = shelves.swap_remove(0);
 
     let mut lanes = open(example("webhook_router.json")?, (960.0, 640.0));
     run_once(&mut lanes)?;

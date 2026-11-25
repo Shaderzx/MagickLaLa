@@ -1448,7 +1448,7 @@ test('Studio keeps its promises: a prompt typed over a shelf shortcut stays type
   expect(report.ladleBrushes).toBe(false);
   expect(report.everydayLadle).toBe(true);
   expect(report.pulledWires).toBe(0);
-});test('Every dial tells the truth: a step with no temperature reads Auto and the first press writes one, the model tile names its provider properly, only real variable links are shown and a changed default changes the brew, the 960 Grimoire names every socket at fit or on hover, cards keep recipe numbers after a parallel brew, lane pours turn on wide curves, the first log chip keeps its name, the header counts bottles, big whole numbers keep their meaning, and a missing AI gateway says where to set one', { timeout: 900_000 }, async () => {
+});test('Every dial tells the truth: a step with no temperature reads Auto and the first press writes one, the model tile names its provider properly, only real variable links are shown and a changed default changes the brew, the 960 Grimoire names every socket at fit or on hover, after a brew every cauldron step badge shows the number the log gives that step, lane pours turn on wide curves, the first log chip keeps its name, the header counts bottles, big whole numbers keep their meaning, and a missing AI gateway says where to set one', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-dials-'));
   try {
     const report = await studioProbe(['honest-dials', join(dir, 'studio.sqlite')]);
