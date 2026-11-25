@@ -1559,7 +1559,7 @@ test('Crowded shelves stay untangled and readable: valid potions with four, eigh
     expect(shelf.smallestLabel).toBeGreaterThanOrEqual(12);
   }
 });
-test('Every edit agrees with Check: pulling a Grimoire wire off or onto a refused socket ends the pull and keeps or drops the wire honestly, Publish refuses a recipe Check would reject, undoing a deleted sub-spell call keeps its link and brews, adding a variable drops the old seal and brew marks, and the Grimoire names every socket at 45% without stacking', { timeout: 900_000 }, async () => {
+test('Every edit agrees with Check: pulling a Grimoire wire off or onto a refused socket ends the pull and keeps or drops the wire honestly, Publish refuses a recipe Check would reject, undoing a deleted sub-spell call keeps its link and brews, adding a variable drops the old seal and brew marks, the Grimoire names every socket at 45% without stacking, and every potion row shows a bottle', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-agreed-'));
   try {
     const report = await studioProbe(['agreed-edits', join(dir, 'studio.sqlite')]);
@@ -1571,6 +1571,7 @@ test('Every edit agrees with Check: pulling a Grimoire wire off or onto a refuse
     expect(report.variableMarks).toEqual({ liveBefore: 1, liveAfter: null, badge: null, lastBrew: null });
     expect(report.grimoire45.shown).toBe(report.grimoire45.expected);
     expect(report.grimoire45.stacked).toEqual([]);
+    expect(report.unbottledPotions).toEqual([]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

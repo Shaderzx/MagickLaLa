@@ -965,7 +965,21 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                     .min_w(0.0)
                     .gap(7.0)
                     .items_center()
-                    .child(canvas(mini_vial_icon(if active { "memory" } else { "knowledge" }, light, 22.0)).size(22.0, 22.0))
+                    .child(
+                        el().key(format!("potion-mark-{}", name.to_ascii_lowercase().replace(' ', "-"))).size(24.0, 30.0).child(
+                            canvas(magicklala_canvas::hearth::potion_bottle_shape(
+                                magicklala_canvas::CauldronMood::Brewed,
+                                light,
+                                56.0,
+                                70.0,
+                                active && published.is_some(),
+                                None,
+                            ))
+                            .size(56.0, 70.0)
+                            .absolute(-16.0, -20.0)
+                            .scale(0.43),
+                        ),
+                    )
                     .child(
                         col()
                             .grow(1.0)

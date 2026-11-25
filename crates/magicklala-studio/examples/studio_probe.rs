@@ -5742,7 +5742,17 @@ fn agreed_edits(db_path: &Path) -> Result<serde_json::Value, String> {
     }
     let expected: usize = zoomed.state.canvas.nodes.iter().map(|card| card.inputs.len() + card.outputs.len()).sum();
 
+    let mut shelf = runtime_for(StudioApp::from_registry().spell.clone());
+    click(&mut shelf, "tab-agents")?;
+    shelf.frame(1.0);
+    let unbottled: Vec<String> = ["Support Agent", "Research Agent"]
+        .iter()
+        .map(|name| name.to_ascii_lowercase().replace(' ', "-"))
+        .filter(|slug| shelf.find(&format!("spell-{slug}")).is_none() || shelf.find(&format!("potion-mark-{slug}")).is_none())
+        .collect();
+
     Ok(json!({
+        "unbottledPotions": unbottled,
         "pulledOff": pulled_off,
         "refusedDrop": refused_drop,
         "blankPublish": { "published": published, "releases": releases },
