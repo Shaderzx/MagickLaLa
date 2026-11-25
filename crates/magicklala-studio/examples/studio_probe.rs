@@ -2476,8 +2476,17 @@ fn brew_truth() -> Result<serde_json::Value, String> {
     let running = brew_state(&mut slow);
     click_at(&mut slow, "cancel-run", clock.tick())?;
     live_finish(&mut slow)?;
-    let cancelled = brew_state(&mut slow);
-    Ok(json!({ "succeeded": succeeded, "failed": failed, "running": running, "cancelled": cancelled }))
+    let mut cancelled = brew_state(&mut slow);
+    slow.update(|app, _| app.trace_expanded = true);
+    slow.frame(clock.tick());
+    cancelled["logWords"] = json!(all_texts(&slow).into_iter().filter(|line| ["Quenched", "Cancelled"].contains(&line.as_str())).collect::<Vec<_>>());
+    let mut timed = slow_runtime(5_000, Duration::from_millis(300));
+    click(&mut timed, "run-spell")?;
+    live_finish(&mut timed)?;
+    timed.update(|app, _| app.trace_expanded = true);
+    timed.frame(1.0);
+    let timed_words: Vec<String> = all_texts(&timed).into_iter().filter(|line| ["Boiled over", "Timed out"].contains(&line.as_str())).collect();
+    Ok(json!({ "succeeded": succeeded, "failed": failed, "running": running, "cancelled": cancelled, "timedWords": timed_words }))
 }
 
 fn switch_mid_brew() -> Result<serde_json::Value, String> {

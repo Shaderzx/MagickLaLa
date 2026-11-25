@@ -922,8 +922,8 @@ test('Every Studio panel names things in plain words: pantry shelves are Events,
   expect((texts as string[]).filter((line) => line !== 'Add On Message' && hints.test(line))).toEqual([]);
 });
 
-test('The toolbar pill and the cauldron plaque tell the truth about a brew: Brewing while it runs, Brewed only when the run succeeded, Failed when a step failed with the card, log and summary saying Failed too and never Hexed, Cancelled when it was stopped, and the pot stops simmering the moment a run ends', { timeout: 900_000 }, async () => {
-  const { succeeded, failed, running, cancelled } = await studioProbe(['brew-truth']);
+test('The toolbar pill and the cauldron plaque tell the truth about a brew: Brewing while it runs, Brewed only when the run succeeded, Failed when a step failed with the card, log and summary saying Failed too and never Hexed, Cancelled when it was stopped and Timed out when it ran too long in the log too, and the pot stops simmering the moment a run ends', { timeout: 900_000 }, async () => {
+  const { succeeded, failed, running, cancelled, timedWords } = await studioProbe(['brew-truth']);
 
   expect(running.pill).toBe('Brewing');
   expect(running.runningBrew).toBe(true);
@@ -939,6 +939,10 @@ test('The toolbar pill and the cauldron plaque tell the truth about a brew: Brew
   expect(cancelled.pill).toBe('Cancelled');
   expect(cancelled.plaque).not.toMatch(/^Brewed/);
   for (const ended of [succeeded, failed, cancelled]) expect(ended.runningBrew).toBe(false);
+  expect(cancelled.logWords).not.toContain('Quenched');
+  expect(cancelled.logWords).toContain('Cancelled');
+  expect(timedWords).toContain('Timed out');
+  expect(timedWords).not.toContain('Boiled over');
 });
 
 test('Opening another potion while one is still brewing stops the old brew: the new potion shows no running brew, no old chat, no old trace, no lit wires, and the old reply never arrives in it', { timeout: 900_000 }, async () => {
