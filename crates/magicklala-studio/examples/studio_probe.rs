@@ -3287,7 +3287,11 @@ fn gemini_pick() -> Result<serde_json::Value, String> {
         app.toggle_model_menu();
     });
     rt.frame(1.0);
-    let spot = text_lines_under(&rt, "model-dropdown").into_iter().find(|(line, _)| line == "gemini-2.5-pro").map(|(_, rect)| (rect[0] + rect[2] * 0.5, rect[1] + rect[3] * 0.5)).ok_or("no gemini choice")?;
+    let spot = text_lines_under(&rt, "model-dropdown")
+        .into_iter()
+        .find(|(line, _)| line == "gemini-2.5-pro")
+        .map(|(_, rect)| (rect[0] + rect[2] * 0.5, rect[1] + rect[3] * 0.5))
+        .ok_or("no gemini choice")?;
     rt.pointer_move(spot.0, spot.1);
     rt.pointer_down(spot.0, spot.1);
     rt.pointer_up(spot.0, spot.1);
@@ -3305,7 +3309,8 @@ fn gemini_pick() -> Result<serde_json::Value, String> {
     Ok(json!({ "provider": config.get("provider"), "model": config.get("model"), "allowed": providers }))
 }
 fn redo_then_undo() -> Result<serde_json::Value, String> {
-    let model_of = |app: &StudioApp| app.spell.nodes.iter().find(|node| node.id.0 == "llm").and_then(|node| node.config.get("model").cloned()).unwrap_or_default();
+    let model_of =
+        |app: &StudioApp| app.spell.nodes.iter().find(|node| node.id.0 == "llm").and_then(|node| node.config.get("model").cloned()).unwrap_or_default();
     let mut rt = runtime_for(StudioApp::from_registry().spell.clone());
     let original = model_of(&rt.state);
     for model in ["gpt-4o", "gpt-4.1"] {

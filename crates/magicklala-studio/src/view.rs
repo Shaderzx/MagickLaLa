@@ -2052,7 +2052,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             );
         column = column.child(meta);
         if app.model_menu_open {
-            let choices = [("openai", "gpt-4o-mini"), ("openai", "gpt-4o"), ("anthropic", "claude-sonnet-4"), ("google", "gemini-2.5-pro")];
+            let choices = [("openai", "gpt-4o-mini"), ("openai", "gpt-4o"), ("anthropic", "claude-sonnet-4"), ("gemini", "gemini-2.5-pro")];
             let menu = choices.into_iter().fold(
                 col().key("model-dropdown").w_full().padding(4.0).gap(2.0).radius(10.0).continuous_corners().fill(t.card).border(1.2, t.broth_mid),
                 |list, (provider, choice)| {

@@ -2669,7 +2669,7 @@ impl StudioApp {
         if recipe_changed && !self.restoring {
             self.redo_stack.clear();
         }
-        if recipe_changed && self.undo_stack.len() == self.undo_seen {
+        if recipe_changed && !self.restoring && self.undo_stack.len() == self.undo_seen {
             let typing = if discrete {
                 None
             } else {
@@ -3829,7 +3829,8 @@ impl StudioApp {
         self.prompts = prompts;
         self.versions = versions;
         self.spell.subgraphs = subgraphs;
-        self.canvas.select(None);
+        let kept = self.canvas.selection.clone().filter(|id| self.canvas.card(id).is_some());
+        self.canvas.select(kept);
         self.validation = ValidationState::Unchecked;
         self.canvas.validated = false;
         self.dirty = true;
