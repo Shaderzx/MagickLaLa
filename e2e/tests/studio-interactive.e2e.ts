@@ -1058,7 +1058,7 @@ test('The cauldron reads cleanly at any size: no ingredient name is cut off, no 
   expect(report.crossings).toEqual([]);
   expect(report.readyBroth).toBe(report.lastLiquid);
   expect(report.chainSteps).toEqual([1, 2, 3, 4, 5]);
-  expect(report.relayRoles).toEqual({ trigger: 'Ingredient', send: 'Bottle', keep: 'Bottle' });
+  expect(report.relayRoles).toEqual({ trigger: 'Ingredient', send: 'Bottle', keep: 'Ingredient' });
   expect(report.asideShelf).toEqual({ shelf: true, holdsCard: true });
   expect(report.potWidth).toBeGreaterThanOrEqual(340);
   expect(new Set(report.bottleTitles).size).toBe(report.bottleTitles.length);

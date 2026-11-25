@@ -10,8 +10,9 @@ pub const SINGLE_BOTTLE_SIZE: [f32; 2] = [148.0, 196.0];
 pub const MULTI_BOTTLE_SIZE: [f32; 2] = [150.0, 148.0];
 pub const RACK_BOTTLE_SIZE: [f32; 2] = [112.0, 104.0];
 pub const RACK_FROM: usize = 4;
-pub const RACK_PIPE_ROOM: f32 = 30.0;
+pub const RACK_PIPE_ROOM: f32 = 36.0;
 const RACK_GAP_X: f32 = 14.0;
+const RACK_TRUNK_ROOM: f32 = 52.0;
 pub const POT_RIM_TOP: f32 = 0.34;
 pub const POT_STEAM_TOP: f32 = 0.08;
 const ROW_GAP: f32 = 22.0;
@@ -233,14 +234,14 @@ fn rack_block(count: usize, per_row: usize) -> [f32; 2] {
     let cols = count.min(per_row).max(1);
     let rows = count.div_ceil(per_row.max(1)).max(1);
     [
-        cols as f32 * RACK_BOTTLE_SIZE[0] + (cols - 1) as f32 * RACK_GAP_X,
+        RACK_TRUNK_ROOM + cols as f32 * RACK_BOTTLE_SIZE[0] + (cols - 1) as f32 * RACK_GAP_X,
         RACK_PIPE_ROOM + rows as f32 * RACK_BOTTLE_SIZE[1] + (rows - 1) as f32 * RACK_PIPE_ROOM,
     ]
 }
 
 fn rack_spot(index: usize, per_row: usize) -> [f32; 2] {
     let (row, col) = (index / per_row.max(1), index % per_row.max(1));
-    [col as f32 * (RACK_BOTTLE_SIZE[0] + RACK_GAP_X), RACK_PIPE_ROOM + row as f32 * (RACK_BOTTLE_SIZE[1] + RACK_PIPE_ROOM)]
+    [RACK_TRUNK_ROOM + col as f32 * (RACK_BOTTLE_SIZE[0] + RACK_GAP_X), RACK_PIPE_ROOM + row as f32 * (RACK_BOTTLE_SIZE[1] + RACK_PIPE_ROOM)]
 }
 
 fn bottle_gap_x(bottles: usize, gap: f32) -> f32 {
@@ -337,7 +338,7 @@ fn with_whole_titles(state: &CanvasState, size: (f32, f32), m: Metrics, plan: Pl
     let mut made = with_visible_pot(state, size, metrics, plan);
     for _ in 0..4 {
         let shown = metrics.vial[0] * made.0;
-        let wraps_instead = made.0 * state.brew_camera.zoom >= crate::view::LEGIBLE_PX / 13.0;
+        let wraps_instead = made.0 >= crate::view::LEGIBLE_PX / 13.0;
         if wraps_instead || shown >= need - 0.5 || metrics.vial[0] >= m.vial[0] * 2.2 {
             break;
         }

@@ -242,22 +242,16 @@ fn rack_ribbons(plan: &BrewPlan, bottles: &[&BrewCard]) -> Option<Vec<Vec<[f32; 
     let tap = spout_point(plan);
     let trunk_x = rack_trunk(plan, bottles)?;
     let left = bottles.iter().map(|card| card.rect[0]).fold(f32::MAX, f32::min);
-    let radius = 18.0 * s;
+    let radius = 24.0 * s;
     let trunk_room = (trunk_x - tap[0]).min(left - trunk_x - 4.0 * s).max(2.0 * s);
-    let drip = 14.0 * s;
+    let drip = 28.0 * s;
     let routes = bottles
         .iter()
         .map(|card| {
             let neck = bottle_neck(card, bottles.len());
             let pipe = pipe_height(plan, card);
-            if (pipe - tap[1]).abs() < radius.min(trunk_room) * 2.0 {
-                let reach = (left - trunk_x - 4.0 * s).max(8.0 * s);
-                let mut bend = vec![tap];
-                bend.extend(s_bend([trunk_x - radius.min(trunk_room), tap[1]], [trunk_x + reach, pipe]));
-                bend.extend([[neck[0], pipe], neck]);
-                let mut radii = vec![0.0; bend.len().saturating_sub(3)];
-                radii.push(drip);
-                rounded_route(&bend, &radii, 4.0 * s)
+            if (pipe - tap[1]).abs() < 6.0 * s {
+                rounded_route(&[tap, [neck[0], tap[1]], neck], &[drip], 4.0 * s)
             } else {
                 rounded_route(&[tap, [trunk_x, tap[1]], [trunk_x, pipe], [neck[0], pipe], neck], &[radius.min(trunk_room), radius, drip], 4.0 * s)
             }
@@ -276,6 +270,7 @@ pub fn rack_glass(plan: &BrewPlan) -> Vec<Vec<[f32; 2]>> {
     let mut rows: Vec<(f32, f32)> = Vec::new();
     for card in &bottles {
         let pipe = pipe_height(plan, card);
+        let pipe = if (pipe - tap[1]).abs() < 6.0 * plan.scale.max(0.2) { tap[1] } else { pipe };
         let neck = bottle_neck(card, bottles.len());
         match rows.iter_mut().find(|(y, _)| (*y - pipe).abs() < 1.0) {
             Some(row) => row.1 = row.1.max(neck[0]),
@@ -306,96 +301,8 @@ pub fn rack_planks(plan: &BrewPlan) -> Option<([f32; 4], Vec<f32>)> {
 }
 
 fn grid_ribbons(plan: &BrewPlan, bottles: &[&BrewCard]) -> Option<Vec<Vec<[f32; 2]>>> {
-    if bottles.len() >= RACK_FROM {
-        return rack_ribbons(plan, bottles);
-    }
-    if bottles.len() < 4 {
-        return None;
-    }
-    let s = plan.scale.max(0.2);
-    let tap = spout_point(plan);
-    let mut by_x: Vec<usize> = (0..bottles.len()).collect();
-    by_x.sort_by(|a, b| bottles[*a].rect[0].total_cmp(&bottles[*b].rect[0]));
-    let mut columns: Vec<Vec<usize>> = Vec::new();
-    for index in by_x {
-        match columns.last_mut() {
-            Some(column) if (bottles[column[0]].rect[0] - bottles[index].rect[0]).abs() < 4.0 * s => column.push(index),
-            _ => columns.push(vec![index]),
-        }
-    }
-    for column in &mut columns {
-        column.sort_by(|a, b| bottles[*a].rect[1].total_cmp(&bottles[*b].rect[1]));
-    }
-    let rect = |index: usize| bottles[index].rect;
-    let left = |column: usize| rect(columns[column][0])[0];
-    let right = |column: usize| columns[column].iter().map(|index| rect(*index)[0] + rect(*index)[2]).fold(f32::MIN, f32::max);
-    if left(0) < tap[0] + 16.0 * s {
-        return None;
-    }
-    let trunk_x = (tap[0] + left(0)) * 0.5;
-    let top = bottles.iter().map(|card| card.rect[1]).fold(f32::MAX, f32::min);
-    let ceiling = top - 12.0 * s;
-    let lanes_floor = plan.lanes.map_or(f32::MIN, |[shelf_bottom, band]| shelf_bottom + band + 2.0 * s);
-    if columns.len() > 1 && ceiling < lanes_floor {
-        return None;
-    }
-    let turn_y = |column: usize, row: usize| -> f32 {
-        let below = rect(columns[column][row]);
-        if row == 0 {
-            below[1] - 8.0 * s
-        } else {
-            let above = rect(columns[column][row - 1]);
-            (above[1] + above[3] + below[1]) * 0.5
-        }
-    };
-    let radius = 22.0 * s;
-    let routes = (0..bottles.len())
-        .map(|index| {
-            let neck = bottle_neck(bottles[index], bottles.len());
-            let column = columns.iter().position(|column| column.contains(&index)).unwrap_or(0);
-            let row = columns[column].iter().position(|other| *other == index).unwrap_or(0);
-            let turn = turn_y(column, row);
-            let trunk_room = (trunk_x - tap[0]).min(left(0) - trunk_x - 4.0 * s).max(2.0 * s);
-            let (corners, radii) = if column == 0 && (turn - tap[1]).abs() < radius.min(trunk_room) * 2.0 {
-                let reach = (left(0) - trunk_x - 4.0 * s).max(8.0 * s);
-                let mut bend = vec![tap];
-                bend.extend(s_bend([trunk_x - radius.min(trunk_room), tap[1]], [trunk_x + reach, turn]));
-                bend.extend([[neck[0], turn], neck]);
-                let radii = vec![0.0; bend.len().saturating_sub(2)];
-                (bend, radii)
-            } else if column == 0 {
-                (vec![tap, [trunk_x, tap[1]], [trunk_x, turn], [neck[0], turn], neck], vec![radius.min(trunk_room); 3])
-            } else if row == 0 && turn - ceiling < radius * 2.0 {
-                (vec![tap, [trunk_x, tap[1]], [trunk_x, ceiling], [neck[0], ceiling], neck], vec![radius.min(trunk_room), radius, radius])
-            } else {
-                let lane = (right(column - 1) + left(column)) * 0.5;
-                let gap_x = left(column) - right(column - 1);
-                let snug = radius.min((gap_x * 0.5 - 2.0 * s).max(2.0 * s));
-                (
-                    vec![tap, [trunk_x, tap[1]], [trunk_x, ceiling], [lane, ceiling], [lane, turn], [neck[0], turn], neck],
-                    vec![radius.min(trunk_room), radius, snug, snug, snug],
-                )
-            };
-            rounded_route(&corners, &radii, 4.0 * s)
-        })
-        .collect();
-    Some(routes)
+    if bottles.len() >= RACK_FROM { rack_ribbons(plan, bottles) } else { None }
 }
-fn s_bend(from: [f32; 2], to: [f32; 2]) -> Vec<[f32; 2]> {
-    let middle = (from[0] + to[0]) * 0.5;
-    (0..=8)
-        .map(|step| {
-            let t = step as f32 / 8.0;
-            let mt = 1.0 - t;
-            let (c1, c2) = ([middle, from[1]], [middle, to[1]]);
-            [
-                mt * mt * mt * from[0] + 3.0 * mt * mt * t * c1[0] + 3.0 * mt * t * t * c2[0] + t * t * t * to[0],
-                mt * mt * mt * from[1] + 3.0 * mt * mt * t * c1[1] + 3.0 * mt * t * t * c2[1] + t * t * t * to[1],
-            ]
-        })
-        .collect()
-}
-
 fn rounded_route(corners: &[[f32; 2]], radii: &[f32], spacing: f32) -> Vec<[f32; 2]> {
     let mut bent = vec![corners[0]];
     let last = corners.len().saturating_sub(1);
@@ -1100,7 +1007,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         let step = if placed.role == BrewRole::Aside {
             None
         } else if has_run {
-            card.step_order
+            card.step_order.and(placed.recipe_step)
         } else {
             placed.recipe_step
         };
@@ -1125,7 +1032,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
     for placed in &bottles {
         let Some(card) = state.card(&placed.id) else { continue };
         let step = if has_run {
-            card.step_order
+            card.step_order.and(placed.recipe_step)
         } else if multi {
             None
         } else {

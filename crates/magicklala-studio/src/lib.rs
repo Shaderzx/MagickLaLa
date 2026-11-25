@@ -2696,7 +2696,7 @@ impl StudioApp {
 
     fn show_findings(&mut self, findings: Vec<HexFinding>) -> &ValidationState {
         let old_run = self.canvas.last_brew.is_some() || self.trace.iter().any(|line| line.kind != "RunRejected");
-        if old_run && findings.is_empty() {
+        if old_run && findings.is_empty() && self.canvas.last_brew == Some(RunStatus::Succeeded) {
             self.hex_findings.clear();
             self.trace.retain(|line| line.kind != "RunRejected");
             self.validation = ValidationState::Valid;
