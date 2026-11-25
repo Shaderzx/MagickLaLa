@@ -140,6 +140,27 @@ fn socket_pairs(wires: &[Wire]) -> Vec<(SocketRef, SocketRef)> {
         .collect()
 }
 
+/// Whether a Set step for `name` runs before `node`: some step upstream of it, through any wire, sets that variable.
+fn set_earlier_on_route(graph: &SpellGraph, node: &NodeId, name: &str) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut queue = vec![node.clone()];
+    while let Some(current) = queue.pop() {
+        for wire in graph.wires.iter().filter(|wire| wire.to_node == current) {
+            if !seen.insert(wire.from_node.clone()) {
+                continue;
+            }
+            if graph
+                .node(&wire.from_node)
+                .is_some_and(|step| step.kind == "var/set" && step.config.get("name").and_then(|value| value.as_str()).map(str::trim) == Some(name))
+            {
+                return true;
+            }
+            queue.push(wire.from_node.clone());
+        }
+    }
+    false
+}
+
 fn same_recipe(a: &SpellGraph, b: &SpellGraph) -> bool {
     let steps = |graph: &SpellGraph| {
         let mut steps: Vec<(String, String, String)> = graph.nodes.iter().map(|node| (node.id.0.clone(), node.kind.clone(), node.config.to_string())).collect();
@@ -3160,7 +3181,7 @@ impl StudioApp {
                 };
                 let problem = match &value {
                     _ if !type_fits => Some(format!("holds {}", type_words(variable.ty))),
-                    None if matches!(field.kind, FieldKind::Number { .. }) => Some("has no value".to_owned()),
+                    None if matches!(field.kind, FieldKind::Number { .. }) && !set_earlier_on_route(&graph, &node.id, name) => Some("has no value".to_owned()),
                     None => None,
                     Some(value) if !value_fits(value) => Some(match value.as_f64().filter(|number| value.is_f64() && number.fract() == 0.0) {
                         Some(whole) => format!("is {whole}"),
