@@ -2856,6 +2856,85 @@ fn rack_pipes() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn long_route_spell(cases: &[&str]) -> SpellGraph {
+    let mut spell = SpellGraph::new("Long Routes");
+    let place = |id: &str, kind: &str, x: f32, y: f32, config: serde_json::Value| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position: [x, y], config };
+    spell.nodes = vec![
+        place("trigger", "event/on_message", 0.0, 0.0, serde_json::Value::Null),
+        place("route", "flow/switch", 260.0, 0.0, json!({ "cases": cases })),
+    ];
+    let wire = |id: String, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id.as_str()),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    spell.wires = vec![wire("w0".to_owned(), ("trigger", "out"), ("route", "in")), wire("w1".to_owned(), ("trigger", "content"), ("route", "value"))];
+    for (index, case) in cases.iter().enumerate() {
+        let id = format!("send_{index}");
+        spell.nodes.push(place(&id, "io/send_message", 560.0, index as f32 * 120.0, serde_json::Value::Null));
+        spell.wires.push(wire(format!("f{index}"), ("route", case), (&id, "in")));
+        spell.wires.push(wire(format!("c{index}"), ("trigger", "content"), (&id, "content")));
+    }
+    spell
+}
+
+fn long_routes() -> Result<serde_json::Value, String> {
+    let three = ["customer_refund_requests_priority", "customer_refund_requests_standard", "customer_refund_requests_archive"];
+    let eight = [
+        "customer_refund_requests_priority",
+        "customer_refund_requests_standard",
+        "customer_refund_requests_archive",
+        "customer_refund_requests_billing",
+        "customer_refund_requests_shipping",
+        "customer_refund_requests_damaged",
+        "customer_refund_requests_missing",
+        "customer_refund_requests_other",
+    ];
+    let mut report = serde_json::Map::new();
+    for (name, cases) in [("three", &three[..]), ("eight", &eight[..])] {
+        if let Ok(dir) = std::env::var("LONG_ROUTES_DUMP") {
+            let text = serde_json::to_string(&long_route_spell(cases)).map_err(|error| error.to_string())?;
+            std::fs::write(Path::new(&dir).join(format!("{name}.json")), text).map_err(|error| error.to_string())?;
+        }
+        for size in [(1280.0_f32, 800.0_f32), (960.0, 640.0)] {
+            let mut app = StudioApp::with_spell(long_route_spell(cases), registry_specs());
+            app.size = size;
+            let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+            rt.frame(0.0);
+            rt.frame(3.0);
+            let canvas = layout_rect(&rt, "canvas").ok_or("no canvas")?;
+            let kind = layout_rect(&rt, "rack-kind");
+            let floor = canvas[1] + canvas[3];
+            let kind_past = kind.is_some_and(|kind| kind[1] + kind[3] > floor + 0.5);
+            let mut hidden = Vec::new();
+            let mut low = Vec::new();
+            for (index, case) in cases.iter().enumerate() {
+                let key = format!("node-send_{index}-header");
+                let lines = text_lines_under(&rt, &key);
+                let shown: String = lines.iter().map(|(line, _)| line.replace('\u{a0}', " ")).collect::<Vec<_>>().join("");
+                let tail = case.rsplit('_').next().unwrap_or(case);
+                let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+                let mut measure = studio_text_system();
+                let cut = lines.iter().filter(|(line, _)| line.starts_with("Send")).any(|(line, rect)| {
+                    let line = line.replace('\u{a0}', " ");
+                    let (natural, line_h) = measure.measure(&line, rune::TextStyle::new(12.5_f32.max(10.5 / plan.scale), 750.0), 1.0);
+                    let rows = (rect[3] / (line_h * plan.scale)).round().max(1.0);
+                    natural * plan.scale > rect[2] * rows + 3.0
+                });
+                if !shown.replace(' ', "").contains(tail) || cut {
+                    hidden.push(format!("{case}: {shown}"));
+                }
+                if lines.iter().any(|(_, rect)| rect[1] + rect[3] > floor + 0.5) {
+                    low.push(case.to_string());
+                }
+            }
+            report.insert(format!("{name}@{}", size.0), json!({ "kindPastEdge": kind_past, "hidden": hidden, "belowCanvas": low }));
+        }
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9126,6 +9205,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("pantry-filtered") => pantry_filtered(),
         Some("stand-badge") => stand_badge(),
         Some("rack-pipes") => rack_pipes(),
+        Some("long-routes") => long_routes(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),

@@ -2028,3 +2028,11 @@ test('Rack glass carries the potion the whole way: every stream runs inside the 
     expect({ key, leaks: report[key].leaks, dry: report[key].dry, overGold: report[key].overGold }).toEqual({ key, leaks: 0, dry: 0, overGold: 0 });
   }
 });
+
+test('Long bottle names never break the rack: three long route names wrap whole and the shared kind label stays on the canvas, and in an eight-bottle rack every tag keeps the part of its name that differs instead of cutting it off', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['long-routes']);
+
+  for (const key of ['three@1280', 'three@960', 'eight@1280', 'eight@960']) {
+    expect({ key, ...report[key] }).toEqual({ key, kindPastEdge: false, hidden: [], belowCanvas: [] });
+  }
+});
