@@ -275,21 +275,38 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
             )
     });
 
-    let status_pill = if hexed {
+    let pill_reason = card.inputs.iter().find(|socket| socket.flagged).map_or_else(
+        || (if card.status == ExecutionStatus::Failed { "Failed" } else { "Hexed" }).to_owned(),
+        |socket| format!("{} \"{}\"", if socket.mistyped { "Wrong type" } else { "Missing" }, socket.name),
+    );
+    let hex_label_for = |pill_room: f32| {
         let flagged: Vec<&SocketModel> = card.inputs.iter().filter(|s| s.flagged).collect();
         let more = if flagged.len() > 1 { format!(" +{}", flagged.len() - 1) } else { String::new() };
-        let pill_clear = if step_num.is_some() { legible(11.0) * 1.8 + 2.0 } else { 10.0 };
-        let pill_icon = if dense || crammed { 10.0 + badge + 6.0 } else { 10.0 };
-        let pill_room = dims[0] - pill_clear - pill_icon - 12.0;
         let fits = |label: &String| crate::measure::text_width(label, legible(11.0), 750.0) <= pill_room;
-        let missing_label = match flagged.first() {
+        match flagged.first() {
             Some(s) => {
                 let (verb, short) = if s.mistyped { ("Wrong type", "Wrong") } else { ("Missing", "No") };
                 let options = [format!("{verb} \"{}\"{more}", s.name), format!("{verb} {}{more}", s.name), format!("{short} {}{more}", s.name)];
                 options.iter().find(|label| fits(label)).cloned().unwrap_or_else(|| options[2].clone())
             }
             None => (if card.status == ExecutionStatus::Failed { "Failed" } else { "Hexed" }).to_owned(),
-        };
+        }
+    };
+    let hex_chip = |label: String| {
+        row()
+            .px(6.0)
+            .py(1.5)
+            .radius(7.0)
+            .fill(p.card)
+            .border(1.2, p.hex)
+            .shadow(2.0, 6.0, p.shadow_card)
+            .min_w(0.0)
+            .child(text(label).font(TextStyle::new(legible(11.0), 750.0)).color(p.hex).truncate())
+    };
+    let status_pill = if hexed {
+        let pill_clear = if step_num.is_some() { legible(11.0) * 1.8 + 2.0 } else { 10.0 };
+        let pill_icon = if dense || crammed { 10.0 + badge + 6.0 } else { 10.0 };
+        let missing_label = hex_label_for(dims[0] - pill_clear - pill_icon - 12.0);
         Some(
             row()
                 .px(6.0)
@@ -380,6 +397,15 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     let title_ink = if dimmed { untaken_title } else { p.ink };
     let chip_font = legible(11.0);
     let stacked_cards: Vec<&crate::brew::BrewCard> = plan.cards.iter().filter(|placed| placed.role == crate::brew::BrewRole::Ingredient).collect();
+    let air_above = plan.card(&card.id).map_or(f32::MAX, |placed| {
+        stacked_cards
+            .iter()
+            .filter(|other| other.id != card.id && other.rect[0] < placed.rect[0] + placed.rect[2] && placed.rect[0] < other.rect[0] + other.rect[2])
+            .map(|other| placed.rect[1] - (other.rect[1] + other.rect[3]))
+            .filter(|gap| *gap >= 0.0)
+            .fold(f32::MAX, f32::min)
+            / plan.scale.max(0.05)
+    });
     let rows_too_tight_for_chips = stacked_cards.iter().any(|upper| {
         stacked_cards.iter().any(|lower| {
             let gap = lower.rect[1] - (upper.rect[1] + upper.rect[3]);
@@ -387,11 +413,20 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
             side_by_side && gap >= 0.0 && gap < 13.0 * plan.scale
         })
     });
-    let top_row = col().w_full().min_w(0.0).child(if crammed {
+    let early_icon_side = if dense || crammed { 10.0 + badge + 6.0 } else { 10.0 };
+    let early_words_high = title_size * 1.25 * title_lines + if kind_fits { kind_size * 1.25 + 2.0 } else { 0.0 };
+    let early_title_top = ((dims[1] - early_words_high) * 0.5).max(0.0);
+    let early_title_right = step_pad + crate::measure::text_width(&state.display_title(&card.id), title_size, 750.0);
+    let perched_label = status_pill.as_ref().map(|_| hex_label_for(dims[0] - early_icon_side - step_pad - 12.0)).unwrap_or_default();
+    let early_chip_left =
+        dims[0] - early_icon_side - if hexed { crate::measure::text_width(&perched_label, chip_font, 750.0) + 14.0 } else { chip_font + 11.0 };
+    let chip_rides_title = hexed && -12.0 + chip_font * 1.25 + 3.0 > early_title_top && (mirrored || early_title_right > early_chip_left);
+    let title_el = if crammed {
         twin_title(&state.display_title(&card.id), TextStyle::new(title_size, 750.0), title_ink, title_room_est)
     } else {
         text(state.display_title(&card.id).replace(" · ", "\u{a0}·\u{a0}")).font(TextStyle::new(title_size, 750.0)).color(title_ink).wrap()
-    });
+    };
+    let top_row = col().w_full().min_w(0.0).child(title_el);
 
     let sub_color = if hexed {
         p.hex
@@ -497,18 +532,47 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     let clear = if step_num.is_some() { badge_side + 2.0 } else { 10.0 };
     let icon_side = if dense || crammed { 10.0 + badge + 6.0 } else { 10.0 };
     let chip_bottom = -12.0 + chip_font * 1.25 + 3.0;
-    let title_top = (dims[1] - title_size * 1.25) * 0.5;
+    let words_high = title_size * 1.25 * title_lines + if kind_fits { kind_size * 1.25 + 2.0 } else { 0.0 };
+    let title_top = ((dims[1] - words_high) * 0.5).max(0.0);
     let title_right = step_pad + crate::measure::text_width(&state.display_title(&card.id), title_size, 750.0);
     let chip_left = dims[0] - icon_side - (chip_font + 11.0);
     let chip_on_name = (dense || crammed) && card.status == ExecutionStatus::Succeeded && chip_bottom > title_top && (mirrored || title_right > chip_left);
     let chip_on_card_above = rows_too_tight_for_chips && card.status == ExecutionStatus::Succeeded;
-    if let Some(pill) = status_pill.filter(|_| !chip_on_name && !chip_on_card_above) {
-        let lane = row().w(dims[0]).pl(if mirrored { icon_side } else { clear }).pr(if mirrored { clear } else { icon_side }).absolute(0.0, -12.0);
+    let lifted_rides = (title_top - 1.0 - (chip_font * 1.25 + 4.0)).min(-12.0);
+    if chip_rides_title && -lifted_rides > air_above - 2.0 {
+        let corner = if mirrored { 3.0 } else { dims[0] - chip_font * 1.4 - 3.0 };
+        shell = shell.child(el().key(format!("status-pill-{}", card.id.0)).absolute(corner, 2.0).child(compact_hex_mark(&pill_reason, chip_font, p)));
+    } else if let Some(pill) = status_pill.filter(|_| !chip_on_name && !chip_on_card_above) {
+        let chip_height = chip_font * 1.25 + 4.0;
+        let covers_name = chip_bottom > title_top && (mirrored || title_right > chip_left);
+        let lifted = (title_top - 1.0 - chip_height).min(-12.0);
+        let lift_fits = -lifted <= air_above - 2.0;
+        let pill = if covers_name && !lift_fits { compact_hex_mark(&pill_reason, chip_font, p) } else { pill };
+        let perch = if covers_name && lift_fits {
+            lifted
+        } else if covers_name {
+            -chip_height * 0.5
+        } else {
+            -12.0
+        };
+        let lane = row().w(dims[0]).pl(if mirrored { icon_side } else { clear }).pr(if mirrored { clear } else { icon_side }).absolute(0.0, perch);
         let lane = if mirrored { lane.justify_start() } else { lane.justify_end() };
         let room = dims[0] - clear - icon_side;
         shell = shell.child(lane.child(el().key(format!("status-pill-{}", card.id.0)).max_w(room).min_w(0.0).child(pill.max_w(room))));
     }
     shell
+}
+
+fn compact_hex_mark(reason: &str, font_size: f32, p: &HearthPalette) -> El {
+    row()
+        .label(reason.to_owned())
+        .px(6.0)
+        .py(1.5)
+        .radius(7.0)
+        .fill(p.hex)
+        .border(1.2, p.hex)
+        .shadow(2.0, 6.0, p.shadow_card)
+        .child(text("!").font(TextStyle::new(font_size, 800.0)).color(p.primary_ink))
 }
 
 #[allow(clippy::too_many_arguments)]
