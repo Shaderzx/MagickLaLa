@@ -270,6 +270,7 @@ enum Arrangement {
 }
 
 const MIN_POT_PX: f32 = 140.0;
+const BACK_ROW_PENALTY: f32 = 0.8;
 
 type Planner = fn(&CanvasState, (f32, f32), Metrics) -> (f32, BrewPlan);
 
@@ -577,7 +578,7 @@ fn plan_with(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, BrewPla
 
     let fit = ((size.0 - 2.0 * SIDE_ROOM) / design_w).min(usable_h / design_h).clamp(0.05, 1.25);
     let scale = fit * state.brew_camera.zoom;
-    let readable_fit = fit;
+    let readable_fit = if cols >= 2 { fit * BACK_ROW_PENALTY } else { fit };
     let anchor = [size.0 * 0.5 + state.brew_camera.pan_x, TOP_ROOM + usable_h * 0.5 + state.brew_camera.pan_y];
     let to_screen = |x: f32, y: f32, w: f32, h: f32| -> [f32; 4] {
         [anchor[0] + (x - design_w * 0.5) * scale, anchor[1] + (y - design_h * 0.5) * scale, w * scale, h * scale]

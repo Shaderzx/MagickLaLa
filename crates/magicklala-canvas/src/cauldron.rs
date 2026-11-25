@@ -534,6 +534,23 @@ fn vial_mouth(placed: &BrewCard, plan: &BrewPlan) -> [f32; 2] {
     [center[0] + badge * 0.22 * scale, center[1] - badge * 0.36 * scale]
 }
 
+fn column_clearance(plan: &BrewPlan, placed: &BrewCard, from: [f32; 2]) -> Option<f32> {
+    if plan.lanes.is_some() {
+        return None;
+    }
+    let column: Vec<&BrewCard> =
+        plan.with_role(BrewRole::Ingredient).filter(|other| (other.rect[0] - placed.rect[0]).abs() < 1.0 && other.mirrored == placed.mirrored).collect();
+    let rim = rim_point(plan, 0.5)[1];
+    let above = column.iter().any(|other| other.rect[1] < placed.rect[1] - 0.5 && other.rect[0] <= from[0] && from[0] <= other.rect[0] + other.rect[2]);
+    (above && from[1] > rim).then(|| {
+        if placed.mirrored {
+            column.iter().map(|other| other.rect[0]).fold(f32::MAX, f32::min) - 14.0 * plan.scale
+        } else {
+            column.iter().map(|other| other.rect[0] + other.rect[2]).fold(f32::MIN, f32::max) + 14.0 * plan.scale
+        }
+    })
+}
+
 pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32; 2]>)> {
     let ingredients: Vec<&BrewCard> = plan.with_role(BrewRole::Ingredient).filter(|placed| state.card(&placed.id).is_some()).collect();
     let spread = ingredients.len().max(2) as f32 - 1.0;
@@ -604,7 +621,21 @@ pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32
                 }
                 None => {
                     let (to, lift) = landing(plan, placed, index, spread);
-                    (0..=40).map(|step| pour_point(from, to, lift, step as f32 / 40.0)).collect()
+                    match column_clearance(plan, placed, from) {
+                        Some(clear_x) => {
+                            let lifted = [clear_x, from[1] - 6.0 * plan.scale];
+                            let mut points: Vec<[f32; 2]> = (0..=8)
+                                .map(|step| {
+                                    let t = step as f32 / 8.0;
+                                    let u = 1.0 - t;
+                                    [u * u * from[0] + 2.0 * u * t * clear_x + t * t * clear_x, u * u * from[1] + 2.0 * u * t * from[1] + t * t * lifted[1]]
+                                })
+                                .collect();
+                            points.extend((1..=32).map(|step| pour_point(lifted, to, lift, step as f32 / 32.0)));
+                            points
+                        }
+                        None => (0..=40).map(|step| pour_point(from, to, lift, step as f32 / 40.0)).collect(),
+                    }
                 }
             };
             (placed.id.clone(), points)
@@ -656,8 +687,9 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
         let Some(card) = state.card(&placed.id) else { continue };
         let (to, lift) = landing(plan, placed, index, spread);
         let style = stream_for(state, card, mood, p, lift);
-        shape = match (plan.lanes, paths.iter().find(|(id, _)| id == &placed.id)) {
-            (Some(_), Some((_, points))) => lane_stream(shape, points, style, p),
+        let bowed = column_clearance(plan, placed, vial_mouth(placed, plan)).is_some();
+        shape = match (plan.lanes.is_some() || bowed, paths.iter().find(|(id, _)| id == &placed.id)) {
+            (true, Some((_, points))) => lane_stream(shape, points, style, p),
             _ => pouring_stream_shape(shape, vial_mouth(placed, plan), to, style),
         };
     }
