@@ -6434,6 +6434,74 @@ fn clear_sight() -> Result<serde_json::Value, String> {
     crowded.dedup();
     Ok(json!({ "menuCovers": covered, "headerSpills": crowded.into_iter().take(8).collect::<Vec<_>>() }))
 }
+fn mixed_spell(ingredients: usize, bottles: usize) -> SpellGraph {
+    let mut spell = SpellGraph::new(format!("{ingredients} steps {bottles} bottles"));
+    spell.nodes.push(studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null));
+    let mut previous = "trigger".to_owned();
+    for index in 1..ingredients {
+        let id = format!("wait_{index}");
+        spell.nodes.push(studio_node(&id, "time/delay", 200.0 * index as f32, json!({ "ms": 0 })));
+        spell.wires.push(studio_wire(&format!("chain_{index}"), (&previous, "out"), (&id, "in")));
+        previous = id;
+    }
+    for index in 0..bottles {
+        let id = format!("reply_{index}");
+        spell.nodes.push(studio_node(&id, "io/send_message", 2000.0, serde_json::Value::Null));
+        spell.wires.push(studio_wire(&format!("pour_{index}"), (&previous, "out"), (&id, "in")));
+        spell.wires.push(studio_wire(&format!("words_{index}"), ("trigger", "content"), (&id, "content")));
+    }
+    spell
+}
+
+fn mixed_shelves(args: &[String]) -> Result<serde_json::Value, String> {
+    let mut report = Vec::new();
+    for ingredients in [6usize, 8] {
+        for bottles in [2usize, 3, 4, 6] {
+            for size in [(1280.0_f32, 800.0_f32), (960.0, 640.0)] {
+                let mut app = StudioApp::with_spell(mixed_spell(ingredients, bottles), registry_specs());
+                app.size = size;
+                let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+                rt.frame(1.0);
+                let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+                let s = plan.scale;
+                let mut through = Vec::new();
+                for (id, points) in magicklala_canvas::cauldron::pour_paths(&rt.state.canvas, &plan) {
+                    let body = &points[points.len().min(3)..points.len().saturating_sub(3)];
+                    for card in plan.cards.iter().filter(|card| card.id != id) {
+                        let r = card.rect;
+                        let halo = 3.0 * s;
+                        if body.iter().any(|p| p[0] > r[0] - halo && p[0] < r[0] + r[2] + halo && p[1] > r[1] - halo && p[1] < r[1] + r[3] + halo) {
+                            through.push(format!("{}>{}", id.0, card.id.0));
+                        }
+                    }
+                }
+                let case = format!("{ingredients}+{bottles}@{}", size.0);
+                if let Some(dir) = args.get(1) {
+                    let app = std::mem::replace(&mut rt.state, StudioApp::from_registry());
+                    render_headless_snapshot_state(&PathBuf::from(dir).join(format!("mixed_{ingredients}_{bottles}_{}.png", size.0)), app)
+                        .map_err(|error| error.to_string())?;
+                }
+                let columns = {
+                    let mut xs: Vec<f32> =
+                        plan.with_role(magicklala_canvas::BrewRole::Ingredient).filter(|card| !card.mirrored).map(|card| card.rect[0]).collect();
+                    xs.sort_by(f32::total_cmp);
+                    xs.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+                    xs.len()
+                };
+                let shape = if plan.lanes.is_some() {
+                    "lanes"
+                } else if columns > 1 {
+                    "back-row ring"
+                } else {
+                    "ring"
+                };
+                let free_arcs_through = if plan.lanes.is_some() { Vec::new() } else { through };
+                report.push(json!({ "case": case, "shape": shape, "through": free_arcs_through }));
+            }
+        }
+    }
+    Ok(json!(report))
+}
 fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
@@ -7348,6 +7416,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("last-mile") => last_mile(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("legible-shelves") => legible_shelves(),
         Some("clear-sight") => clear_sight(),
+        Some("mixed-shelves") => mixed_shelves(args),
         Some("honest-edits") => honest_edits(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),

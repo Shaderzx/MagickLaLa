@@ -1654,3 +1654,12 @@ test('Clear sight: the card menu at 960 by 640 parks in open canvas instead of b
   expect(report.menuCovers).toEqual([]);
   expect(report.headerSpills).toEqual([]);
 });
+test('Mixed shelves: six or eight ingredients with two to six bottles never hide a card behind another in a back row, and no free pour runs behind a card on its way to the rim', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['mixed-shelves']);
+
+  expect(report.length).toBe(16);
+  for (const shelf of report) {
+    expect({ case: shelf.case, shape: shelf.shape === 'back-row ring' ? shelf.shape : 'ok' }).toEqual({ case: shelf.case, shape: 'ok' });
+    expect({ case: shelf.case, through: shelf.through }).toEqual({ case: shelf.case, through: [] });
+  }
+});
