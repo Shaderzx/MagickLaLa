@@ -5761,6 +5761,161 @@ fn agreed_edits(db_path: &Path) -> Result<serde_json::Value, String> {
         "grimoire45": { "shown": names.len(), "expected": expected, "stacked": stacked },
     }))
 }
+fn steady_hands() -> Result<serde_json::Value, String> {
+    let press = |rt: &mut Runtime<StudioApp>, key: rune::Key, cmd: bool| {
+        rt.key(rune::KeyEvent { key, mods: rune::Mods { cmd, ..Default::default() } });
+        rt.frame(1.0);
+    };
+    let near = |a: f32, b: f32| (a - b).abs() <= 3.0;
+    let menu_case = |spell: SpellGraph, size: (f32, f32), aside: Option<&str>, target: &str| -> Result<serde_json::Value, String> {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        if let Some(id) = aside {
+            let parked = NodeId::from(id);
+            rt.update(move |app, _| app.toss(magicklala_canvas::Toss::Aside(parked.clone())));
+            rt.frame(1.0);
+        }
+        let card = layout_rect(&rt, &format!("node-{target}")).ok_or("no card")?;
+        right_click(&mut rt, (card[0] + card[2] * 0.5, card[1] + card[3] * 0.5));
+        rt.frame(1.0);
+        let card = layout_rect(&rt, &format!("node-{target}")).ok_or("no card")?;
+        let panel = layout_rect(&rt, "context-menu").ok_or("no menu")?;
+        let pot = layout_rect(&rt, "hero-cauldron");
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let hides: Vec<String> = plan
+            .cards
+            .iter()
+            .filter(|other| other.id.0 != target)
+            .filter_map(|other| layout_rect(&rt, &format!("node-{}", other.id.0)).filter(|rect| rects_overlap(panel, *rect)).map(|_| other.id.0.clone()))
+            .collect();
+        let tether = layout_rect(&rt, "context-tether");
+        let attached = tether.is_some_and(|t| {
+            let below = panel[1] >= card[1] + card[3] - 1.0;
+            let above = panel[1] + panel[3] <= card[1] + 1.0;
+            let right = panel[0] >= card[0] + card[2] - 1.0;
+            let left = panel[0] + panel[2] <= card[0] + 1.0;
+            if below {
+                near(t[1] + 4.0, card[1] + card[3]) && near(t[1] + t[3] - 4.0, panel[1])
+            } else if above {
+                near(t[1] + 4.0, panel[1] + panel[3]) && near(t[1] + t[3] - 4.0, card[1])
+            } else if right {
+                near(t[0] + 4.0, card[0] + card[2]) && near(t[0] + t[2] - 4.0, panel[0])
+            } else if left {
+                near(t[0] + 4.0, panel[0] + panel[2]) && near(t[0] + t[2] - 4.0, card[0])
+            } else {
+                false
+            }
+        });
+        Ok(json!({ "coversPot": pot.is_some_and(|pot| rects_overlap(panel, pot)), "hides": hides, "attached": attached }))
+    };
+    let support = || StudioApp::from_registry().spell.clone();
+    let menus = json!({
+        "wide": menu_case(support(), (1280.0, 800.0), None, "llm")?,
+        "aside": menu_case(support(), (1280.0, 800.0), Some("search"), "search")?,
+        "compact": menu_case(support(), (960.0, 640.0), None, "llm")?,
+    });
+
+    let keyed = || {
+        let mut rt = runtime_for(tasting_spell());
+        rt.on_key = Some(magicklala_studio::studio_key);
+        rt.update(|app, _| app.canvas.select(Some(NodeId::from("echo"))));
+        rt.frame(1.0);
+        rt
+    };
+    let mut model_menu = keyed();
+    model_menu.update(|app, _| app.model_menu_open = true);
+    press(&mut model_menu, rune::Key::Escape, false);
+    let mut type_menu = keyed();
+    type_menu.update(|app, _| {
+        app.add_variable();
+        app.open_var_type = Some(0);
+    });
+    press(&mut type_menu, rune::Key::Escape, false);
+    let mut other_tab = keyed();
+    other_tab.update(|app, _| app.right_tab = RightTab::Variables);
+    press(&mut other_tab, rune::Key::Delete, false);
+    let mut typing = keyed();
+    typing.update(|app, _| app.right_tab = RightTab::Inspector);
+    typing.frame(1.0);
+    click(&mut typing, "prompt-field")?;
+    let before_text = typing.state.prompts.get(&NodeId::from("echo")).map(|edit| edit.text.clone()).unwrap_or_default();
+    press(&mut typing, rune::Key::Backspace, false);
+    press(&mut typing, rune::Key::Command('z'), true);
+    let keys = json!({
+        "escapeClosesModelMenu": !model_menu.state.model_menu_open && model_menu.state.canvas.selection.is_some(),
+        "escapeClosesTypeMenu": type_menu.state.open_var_type.is_none() && type_menu.state.canvas.selection.is_some(),
+        "deleteOnVariablesKeepsStep": other_tab.state.canvas.card(&NodeId::from("echo")).is_some(),
+        "typingKeepsStep": typing.state.canvas.card(&NodeId::from("echo")).is_some() && !before_text.is_empty(),
+    });
+
+    let mut both = runtime_for(tasting_spell());
+    both.update(|app, _| {
+        app.add_variable();
+        if let Some(edit) = app.var_name_edits.get_mut(0) {
+            *edit = rune::TextEdit::new("");
+        }
+        app.canvas.wires.retain(|wire| !(wire.to_node.0 == "reply" && wire.to_socket == "content"));
+        app.sync_spell();
+    });
+    click(&mut both, "validate")?;
+    let flagged =
+        both.state.canvas.card(&NodeId::from("reply")).is_some_and(|card| card.inputs.iter().any(|socket| socket.flagged && socket.name == "content"));
+    let errors = match &both.state.validation {
+        ValidationState::Invalid(errors) => errors.clone(),
+        _ => Vec::new(),
+    };
+    let findings = json!({ "variableNamed": errors.iter().any(|error| error.contains("needs a name")), "replyFlagged": flagged });
+
+    let mut binding = SpellGraph::new("Bound");
+    binding.nodes =
+        vec![studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null), studio_node("read", "var/get", 280.0, json!({ "name": "greeting" }))];
+    binding.variables = vec![magicklala_graph::VariableDef {
+        name: "greeting".to_owned(),
+        ty: SocketType::String,
+        default: Some(magicklala_graph::Value::String("hi".to_owned())),
+        exposed: true,
+    }];
+    let mut bound = runtime_for(binding);
+    click(&mut bound, "tab-variables")?;
+    bound.frame(1.0);
+    let hint_before = bound.state.variable_binding_hint("greeting").0;
+    bound.update(|app, _| {
+        if let Some(edit) = app.var_name_edits.get_mut(0) {
+            *edit = rune::TextEdit::new("");
+        }
+        app.sync_spell();
+    });
+    bound.frame(1.0);
+    let stale_hint = all_texts(&bound).iter().any(|line| line == &hint_before);
+
+    let mut orphans = Vec::new();
+    let mut measurer = magicklala_studio::studio_text_system();
+    for size in [(1280.0_f32, 800.0_f32), (960.0, 640.0)] {
+        let mut app = StudioApp::with_spell(example("parallel_research.json")?, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        for card in rt.state.canvas.nodes.clone() {
+            let Some(frame) = layout_rect(&rt, &format!("node-{}-header", card.id.0)) else { continue };
+            let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+            for (line, rect) in text_lines_under(&rt, &format!("node-{}-header", card.id.0)) {
+                let (natural, _) = measurer.measure(&line, rune::TextStyle::new(13.0, 750.0), 1.0);
+                let wraps = natural * plan.scale > rect[2] + 1.0;
+                let tail = line.rsplit(' ').next().unwrap_or_default();
+                if wraps && (tail.chars().all(|c| c.is_ascii_digit()) || tail == "·") {
+                    orphans.push(format!("{}@{}: lone \"{tail}\" under \"{line}\"", card.id.0, size.0));
+                }
+                if rect[1] + rect[3] > frame[1] + frame[3] - 3.0 {
+                    orphans.push(format!("{}@{}: \"{line}\" touches the bottom", card.id.0, size.0));
+                }
+            }
+        }
+    }
+
+    Ok(json!({ "menus": menus, "keys": keys, "findings": findings, "staleHint": stale_hint, "hintBefore": hint_before, "orphans": orphans }))
+}
 fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
@@ -6668,6 +6823,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("hands-on") => hands_on(),
         Some("crowded-bottles") => crowded_bottles(args),
         Some("agreed-edits") => agreed_edits(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("steady-hands") => steady_hands(),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("drawn-truths") => drawn_truths(),

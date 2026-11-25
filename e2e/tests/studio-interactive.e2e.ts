@@ -1576,3 +1576,16 @@ test('Every edit agrees with Check: pulling a Grimoire wire off or onto a refuse
     await rm(dir, { recursive: true, force: true });
   }
 });
+test('Steady hands: a card menu opens beside its card clear of the pot and other cards, its thread meets the facing edges at 1280, 960 and from the shelf, Escape closes the open menu first, Delete only acts on the workbench tabs, typing keeps its keys, Check lists every problem at once, a cleared variable name drops its old link, and twin titles never strand their number', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['steady-hands']);
+
+  expect(report.menus.wide).toEqual({ coversPot: false, hides: [], attached: true });
+  expect(report.menus.aside).toEqual({ coversPot: false, hides: [], attached: true });
+  expect(report.menus.compact.coversPot).toBe(false);
+  expect(report.menus.compact.attached).toBe(true);
+  expect(report.keys).toEqual({ escapeClosesModelMenu: true, escapeClosesTypeMenu: true, deleteOnVariablesKeepsStep: true, typingKeepsStep: true });
+  expect(report.findings).toEqual({ variableNamed: true, replyFlagged: true });
+  expect(report.hintBefore).toBe('→ Get Variable');
+  expect(report.staleHint).toBe(false);
+  expect(report.orphans).toEqual([]);
+});
