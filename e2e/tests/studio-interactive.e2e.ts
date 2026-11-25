@@ -1663,3 +1663,12 @@ test('Mixed shelves: six or eight ingredients with two to six bottles never hide
     expect({ case: shelf.case, through: shelf.through }).toEqual({ case: shelf.case, through: [] });
   }
 });
+test('Undo keeps time in order: after a newer untracked edit such as a new wire or a typed prompt, Cmd or Ctrl Z no longer reaches back to an older removal or variable, so the newer work survives, while undo right after a removal still brings the step back', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['undo-order']);
+
+  expect(report.removed).toBe(true);
+  expect(report.newWireKept).toBe(true);
+  expect(report.olderStepRestored).toBe(false);
+  expect(report.undoAfterTracked).toBe(true);
+  expect(report.typedThenUndo).toEqual({ variables: 1, undoLeft: 0 });
+});

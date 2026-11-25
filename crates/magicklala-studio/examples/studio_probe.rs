@@ -6502,7 +6502,58 @@ fn mixed_shelves(args: &[String]) -> Result<serde_json::Value, String> {
     }
     Ok(json!(report))
 }
-fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
+fn undo_order() -> Result<serde_json::Value, String> {
+    let cmd_z = |rt: &mut Runtime<StudioApp>| {
+        rt.key(rune::KeyEvent { key: rune::Key::Command('z'), mods: rune::Mods { cmd: true, ..Default::default() } });
+        rt.frame(0.0);
+    };
+    let remove_echo = |rt: &mut Runtime<StudioApp>| {
+        rt.update(|app, _| {
+            app.canvas.select(Some(NodeId::from("echo")));
+            app.delete_selected_node();
+            app.sync_edits();
+        });
+        rt.frame(0.0);
+    };
+    let fed_by_trigger =
+        |app: &StudioApp| app.canvas.wires.iter().any(|wire| wire.from_node.0 == "trigger" && wire.from_socket == "content" && wire.to_node.0 == "reply" && wire.to_socket == "content");
+    let mut later = runtime_for(tasting_spell());
+    later.on_key = Some(magicklala_studio::studio_key);
+    remove_echo(&mut later);
+    let removed = later.state.canvas.card(&NodeId::from("echo")).is_none();
+    later.update(|app, _| {
+        let _ = app.canvas.connect_sockets(&SocketRef::new(NodeId::from("trigger"), "content".to_owned()), &SocketRef::new(NodeId::from("reply"), "content".to_owned()));
+        app.sync_edits();
+    });
+    later.frame(0.0);
+    cmd_z(&mut later);
+    let new_wire_kept = fed_by_trigger(&later.state);
+    let older_step_restored = later.state.canvas.card(&NodeId::from("echo")).is_some();
+
+    let mut tracked = runtime_for(tasting_spell());
+    tracked.on_key = Some(magicklala_studio::studio_key);
+    remove_echo(&mut tracked);
+    cmd_z(&mut tracked);
+    let undo_after_tracked = tracked.state.canvas.card(&NodeId::from("echo")).is_some();
+
+    let mut typed = runtime_for(tasting_spell());
+    typed.on_key = Some(magicklala_studio::studio_key);
+    typed.update(|app, _| app.add_variable());
+    typed.update(|app, _| {
+        app.prompts.insert(NodeId::from("echo"), rune::TextEdit::new("Changed: {{content}}"));
+        app.sync_edits();
+    });
+    cmd_z(&mut typed);
+    let typed_then_undo = json!({ "variables": typed.state.spell.variables.len(), "undoLeft": typed.state.undo_stack.len() });
+
+    Ok(json!({
+        "removed": removed,
+        "newWireKept": new_wire_kept,
+        "olderStepRestored": older_step_restored,
+        "undoAfterTracked": undo_after_tracked,
+        "typedThenUndo": typed_then_undo,
+    }))
+}fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),
@@ -7417,6 +7468,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("legible-shelves") => legible_shelves(),
         Some("clear-sight") => clear_sight(),
         Some("mixed-shelves") => mixed_shelves(args),
+        Some("undo-order") => undo_order(),
         Some("honest-edits") => honest_edits(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
