@@ -1012,6 +1012,8 @@ pub struct StudioApp {
     pub draft_status: Option<String>,
     pub publish_status: Option<String>,
     pub active_release_version: Option<u32>,
+    /// The Recipe input whose Plug in list is open: the selected step and the socket name.
+    pub plug_menu: Option<(NodeId, String)>,
     pub run_timeout: Duration,
     run_started: Option<Instant>,
     active: Option<ActiveRun>,
@@ -1147,6 +1149,7 @@ impl StudioApp {
             draft_status: None,
             publish_status: None,
             active_release_version: None,
+            plug_menu: None,
             run_timeout: DEFAULT_RUN_TIMEOUT,
             run_started: None,
             active: None,
@@ -1864,6 +1867,59 @@ impl StudioApp {
     pub fn spawn_at(&mut self, kind: &str, screen: [f32; 2]) -> Option<NodeId> {
         let wire_in = self.canvas.mode == WorkbenchMode::Cauldron;
         self.place_ingredient(kind, screen, wire_in)
+    }
+
+    /// The outputs that can feed `node`'s `socket` from the Recipe: every non-flow output the socket accepts, on a step that does not itself
+    /// run after `node` (that would loop).
+    pub fn plug_sources(&self, node: &NodeId, socket: &str) -> Vec<SocketRef> {
+        let Some(to_ty) = self.canvas.card(node).and_then(|card| card.inputs.iter().find(|input| input.name == socket)).map(|input| input.ty) else {
+            return Vec::new();
+        };
+        if to_ty.is_flow() {
+            return Vec::new();
+        }
+        let mut downstream: Vec<NodeId> = vec![node.clone()];
+        let mut index = 0;
+        while index < downstream.len() {
+            let at = downstream[index].clone();
+            for wire in self.canvas.wires.iter().filter(|wire| wire.from_node == at) {
+                if !downstream.contains(&wire.to_node) {
+                    downstream.push(wire.to_node.clone());
+                }
+            }
+            index += 1;
+        }
+        self.canvas
+            .nodes
+            .iter()
+            .filter(|card| !downstream.contains(&card.id))
+            .flat_map(|card| {
+                card.outputs
+                    .iter()
+                    .filter(|output| !output.ty.is_flow() && to_ty.accepts(output.ty))
+                    .map(|output| SocketRef::new(card.id.clone(), output.name.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    pub fn toggle_plug_menu(&mut self, node: &NodeId, socket: &str) {
+        let pick = (node.clone(), socket.to_owned());
+        self.plug_menu = if self.plug_menu.as_ref() == Some(&pick) { None } else { Some(pick) };
+    }
+
+    pub fn plug_input(&mut self, from: &SocketRef, to: &SocketRef) {
+        if self.is_running() {
+            return;
+        }
+        self.plug_menu = None;
+        match self.canvas.connect_sockets(from, to) {
+            Ok(_) => {
+                self.wire_error = None;
+                self.sync_spell();
+            }
+            Err(error) => self.wire_error = Some(error.to_string()),
+        }
     }
 
     pub fn unplug_wire(&mut self, wire: &magicklala_graph::WireId) {

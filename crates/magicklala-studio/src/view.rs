@@ -1840,6 +1840,31 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                 t.hex,
             )));
         }
+        if is_input && !socket.ty.is_flow() && !supplied && !app.is_running() {
+            let name = socket.name.clone();
+            let node = card.id.clone();
+            let wire_id = app.canvas.wires.iter().find(|w| w.to_node == card.id && w.to_socket == socket.name).map(|w| w.id.clone());
+            let action = match wire_id {
+                Some(wire) => row()
+                    .key(format!("unplug-{name}"))
+                    .px(6.0)
+                    .py(1.5)
+                    .radius(6.0)
+                    .border(1.0, t.rule_2)
+                    .child(label("Unplug", 9.8, 650.0, t.ink_2))
+                    .on_press(move |app: &mut StudioApp| app.unplug_wire(&wire)),
+                None => row()
+                    .key(format!("plug-{name}"))
+                    .px(6.0)
+                    .py(1.5)
+                    .radius(6.0)
+                    .fill(if flagged { t.hex_tint } else { Color::TRANSPARENT })
+                    .border(1.0, if flagged { t.hex } else { t.rule_2 })
+                    .child(label("Plug in", 9.8, 700.0, if flagged { t.hex } else { t.ink_2 }))
+                    .on_press(move |app: &mut StudioApp| app.toggle_plug_menu(&node, &name)),
+            };
+            right_meta = right_meta.child(action);
+        }
         right_meta = right_meta.child(label(format!("{:?}", socket.ty), if compact { 10.5 } else { 11.0 }, 550.0, if flagged { t.hex } else { t.mute }));
         row()
             .w_full()
@@ -1864,10 +1889,38 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             )
             .child(right_meta)
     };
+    let plug_menu_el = |socket: &magicklala_canvas::SocketModel| -> Option<El> {
+        let (node, name) = app.plug_menu.as_ref()?;
+        if node != &card.id || name != &socket.name {
+            return None;
+        }
+        let sources = app.plug_sources(&card.id, &socket.name);
+        let mut menu =
+            col().key(format!("plug-menu-{}", socket.name)).w_full().mt(4.0).mb(4.0).padding(6.0).gap(3.0).radius(10.0).fill(t.card).border(1.0, t.rule_2);
+        if sources.is_empty() {
+            menu = menu.child(label(format!("No earlier step makes {}", crate::type_words(socket.ty)), 11.0, 550.0, t.mute).wrap());
+        }
+        for source in sources {
+            let to = magicklala_canvas::SocketRef::new(card.id.clone(), socket.name.clone());
+            let caption = format!("{} · {}", app.canvas.display_title(&source.node), source.socket);
+            menu = menu.child(
+                row()
+                    .key(format!("plug-{}-{}-{}", socket.name, source.node.0, source.socket))
+                    .w_full()
+                    .px(8.0)
+                    .py(5.0)
+                    .radius(7.0)
+                    .fill(t.wash)
+                    .child(label(caption, 11.0, 600.0, t.ink).wrap_anywhere().grow(1.0).min_w(0.0))
+                    .on_press(move |app: &mut StudioApp| app.plug_input(&source, &to)),
+            );
+        }
+        Some(menu)
+    };
     let mut sockets = col().gap(0.0);
     if !card.inputs.is_empty() {
         sockets = sockets.child(row().w_full().pt(2.0).pb(2.0).child(label("Inputs", 10.5, 650.0, t.mute)));
-        sockets = card.inputs.iter().fold(sockets, |list, socket| list.child(socket_row_el(socket, true)));
+        sockets = card.inputs.iter().fold(sockets, |list, socket| list.child(socket_row_el(socket, true)).children(plug_menu_el(socket)));
     }
     if !card.outputs.is_empty() {
         sockets = sockets.child(row().w_full().pt(if compact { 4.0 } else { 6.0 }).pb(2.0).child(label("Outputs", 10.5, 650.0, t.mute)));
