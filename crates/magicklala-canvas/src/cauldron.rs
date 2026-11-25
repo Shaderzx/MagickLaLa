@@ -499,6 +499,9 @@ pub fn above_broth(points: &[[f32; 2]], surface: f32) -> Vec<[f32; 2]> {
 }
 
 pub fn ladle_stir(state: &CanvasState, plan: &BrewPlan) -> Option<f32> {
+    if rim_crowded(state, plan) {
+        return None;
+    }
     let pours = pour_paths(state, plan);
     let start = state.toss_count as usize % STIRS.len();
     let leanings = STIRS
@@ -518,6 +521,16 @@ pub fn ladle_stir(state: &CanvasState, plan: &BrewPlan) -> Option<f32> {
     let u = (plan.pot[2].min(plan.pot[3]) / 240.0).clamp(0.55, 1.35);
     let air = 4.5 * u + 3.4 + 1.0;
     leanings.into_iter().find(|stir| clearance(*stir) >= air)
+}
+
+/// Whether eight or more pours come in on lanes: their bundle covers the rim, so the ladle and the froth stay out of its way.
+fn rim_crowded(state: &CanvasState, plan: &BrewPlan) -> bool {
+    plan.lanes.is_some() && plan.with_role(BrewRole::Ingredient).filter(|placed| state.card(&placed.id).is_some()).count() >= 8
+}
+
+/// Whether the big froth bubbles hang over the rim: while the broth is lively, unless a crowded pour bundle comes in over them.
+pub fn rim_froth(state: &CanvasState, plan: &BrewPlan) -> bool {
+    matches!(crate::view::cauldron_mood(state), CauldronMood::Simmering | CauldronMood::Brewed) && !rim_crowded(state, plan)
 }
 
 pub fn ladle_line(state: &CanvasState, plan: &BrewPlan) -> Option<([f32; 2], [f32; 2])> {
@@ -694,8 +707,9 @@ pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32
                     let lane_x = placed.rect[0] + placed.rect[2] + channel * 0.5 + offset * strand;
                     let share = column as f32 / (columns.len().max(2) - 1) as f32;
                     let to = rim_point(plan, (share + offset * 0.035).clamp(0.0, 1.0));
-                    let floor = (shelf_bottom + gap).min(ribbon_top - 8.0 * plan.scale).max(shelf_bottom + 2.0 * plan.scale);
-                    let step = ((floor - shelf_bottom - 4.0 * plan.scale) / ingredients.len().max(1) as f32).clamp(0.0, 6.0 * plan.scale);
+                    let air = 10.0 * plan.scale;
+                    let floor = (shelf_bottom + gap).min(ribbon_top - 8.0 * plan.scale).max(shelf_bottom + air);
+                    let step = ((floor - shelf_bottom - air) / ingredients.len().max(1) as f32).clamp(0.0, 6.0 * plan.scale);
                     let turn = [lane_x, floor - (ingredients.len() as f32 - 1.0 - lane_rank) * step];
                     let clear_x = lane_x.min(spout_point(plan)[0] - 10.0 * plan.scale).max(to[0] + 26.0 * plan.scale).min(lane_x);
                     let run = lane_x - clear_x;
@@ -860,7 +874,7 @@ pub(crate) fn route_label(state: &CanvasState, bottle: &NodeId) -> Option<String
         .filter(|socket| socket != "out")
 }
 
-fn bubbles(mood: CauldronMood, plan: &BrewPlan, p: &HearthPalette, tint: Option<Color>) -> Vec<El> {
+fn bubbles(mood: CauldronMood, plan: &BrewPlan, p: &HearthPalette, tint: Option<Color>, landings: &[f32]) -> Vec<El> {
     let froth = tint.map_or(p.broth_foam, |t| crate::hearth::mix(t, crate::hearth::hex(0xFFFFFF), 0.5));
     let edge = tint.unwrap_or(p.broth_mid);
     if matches!(mood, CauldronMood::Empty | CauldronMood::Hexed) {
@@ -871,10 +885,13 @@ fn bubbles(mood: CauldronMood, plan: &BrewPlan, p: &HearthPalette, tint: Option<
     let rise = (if lively { 88.0 } else { 52.0 }) * plan.scale;
     let rim = rim_point(plan, 0.5);
     (0..count)
-        .map(|index| {
+        .filter_map(|index| {
             let share = (index as f32 + 0.5) / count as f32;
             let radius = (3.0 + (index % 3) as f32 * 1.8) * plan.scale.max(0.5);
             let x = plan.pot[0] + plan.pot[2] * (0.30 + 0.40 * share) - radius;
+            if landings.iter().any(|landing| (x + radius - landing).abs() < 16.0 * plan.scale + 4.0) {
+                return None;
+            }
             let period = if lively { 1.6 + (index % 4) as f64 * 0.35 } else { 3.2 + (index % 3) as f64 * 0.6 };
             let mut spec = LoopSpec::slide(period, [0.0, 0.0], [((index % 2) as f32 - 0.5) * 6.0, -rise]);
             spec.delay = index as f64 * 0.27;
@@ -884,7 +901,7 @@ fn bubbles(mood: CauldronMood, plan: &BrewPlan, p: &HearthPalette, tint: Option<
                 .fill(with_alpha(froth, if lively { 0.88 } else { 0.55 }))
                 .border(1.0, with_alpha(edge, 0.6))
                 .looping(LoopSpec::opacity(period, spec.delay, 0.0, 1.0));
-            el().key(format!("pot-bubble-{index}")).absolute(x, rim[1] - radius * 2.0).child(dot).looping(spec)
+            Some(el().key(format!("pot-bubble-{index}")).absolute(x, rim[1] - radius * 2.0).child(dot).looping(spec))
         })
         .collect()
 }
@@ -1114,7 +1131,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         .size(pot[2], pot[3])
         .absolute(pot[0], pot[1])
         .child(
-            canvas(hero_cauldron_shape(mood, state.light, pot[2], pot[3], potion_tint(state, &plan), ladle_stir(state, &plan)))
+            canvas(hero_cauldron_shape(mood, state.light, pot[2], pot[3], potion_tint(state, &plan), ladle_stir(state, &plan), rim_froth(state, &plan)))
                 .key("hero-cauldron")
                 .size(pot[2], pot[3]),
         )
@@ -1159,7 +1176,8 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
     for drip in drips(state, &plan, mood, &p) {
         board = board.child(drip);
     }
-    for bubble in bubbles(mood, &plan, &p, potion_tint(state, &plan)) {
+    let landings: Vec<f32> = pour_paths(state, &plan).iter().filter_map(|(_, points)| points.last().map(|point| point[0])).collect();
+    for bubble in bubbles(mood, &plan, &p, potion_tint(state, &plan), &landings) {
         board = board.child(bubble);
     }
     let lifted = match &state.drag {
