@@ -3761,7 +3761,11 @@ fn perched_clear() -> Result<serde_json::Value, String> {
 }
 fn icon_size() -> Result<serde_json::Value, String> {
     let mut report = serde_json::Map::new();
-    for (name, spell, size) in [("kitchen@960", crowded_kitchen(), (960.0_f32, 640.0_f32)), ("dozen@960", dozen_ingredient_spell(), (960.0, 640.0)), ("support@1280", StudioApp::from_registry().spell.clone(), (1280.0, 800.0))] {
+    for (name, spell, size) in [
+        ("kitchen@960", crowded_kitchen(), (960.0_f32, 640.0_f32)),
+        ("dozen@960", dozen_ingredient_spell(), (960.0, 640.0)),
+        ("support@1280", StudioApp::from_registry().spell.clone(), (1280.0, 800.0)),
+    ] {
         let mut app = StudioApp::with_spell(spell, registry_specs());
         app.size = size;
         let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));

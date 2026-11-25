@@ -220,13 +220,14 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     let dense = dims[1] < 50.0;
     let narrow = dims[0] < 170.0;
     let crammed = legible(13.0) > 13.0;
-    let badge = if crammed {
+    let badge: f32 = if crammed {
         24.0
     } else if dense || narrow {
         30.0
     } else {
         38.0
     };
+    let badge = badge.max(14.5 / 0.76 / plan.scale.max(0.05)).min(dims[1] - 4.0);
     let vial_badge = el()
         .key(format!("vial-{}", card.id.0))
         .size(badge, badge)
@@ -304,10 +305,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
             Some(ms) => format!("{ms}ms"),
             None => String::new(),
         };
-        let title_reach = state.display_title(&card.id).chars().count() as f32 * 0.6 * legible(13.0) + 12.0;
-        let chip_reach = ms_text.chars().count() as f32 * 0.62 * legible(11.0) + 26.0;
-        let icon_reach = if dense || crammed { badge + 16.0 } else { 10.0 };
-        let ms_text = if (dense || crammed) && title_reach + chip_reach + icon_reach > dims[0] { String::new() } else { ms_text };
+        let ms_text = if dense || crammed { String::new() } else { ms_text };
         Some(row().px(5.5).py(1.5).radius(7.0).fill(p.card).border(1.0, p.broth_mid).shadow(2.0, 6.0, p.shadow_card).child(
             row().gap(3.0).items_center().child(crate::hearth::check_mark(if state.light { p.broth_deep } else { p.broth_foam }, 10.0)).child(
                 text(ms_text).font(TextStyle::new(legible(11.0), 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam }),
