@@ -1836,15 +1836,16 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             right_meta = right_meta
                 .child(label(if socket.mistyped { "Wrong type" } else { "Missing" }, 10.5, 700.0, t.hex).key(format!("socket-missing-{}", socket.name)));
         }
-        if is_input && !socket.ty.is_flow() && !supplied && !app.is_running() {
+        let has_plug_button = is_input && !socket.ty.is_flow() && !supplied && !app.is_running();
+        if has_plug_button {
             let name = socket.name.clone();
             let node = card.id.clone();
             let wire_id = app.canvas.wires.iter().find(|w| w.to_node == card.id && w.to_socket == socket.name).map(|w| w.id.clone());
             let action = match wire_id {
                 Some(wire) => row()
                     .key(format!("unplug-{name}"))
-                    .min_h(26.0)
-                    .min_w(26.0)
+                    .min_h(24.0)
+                    .min_w(24.0)
                     .px(10.0)
                     .radius(8.0)
                     .continuous_corners()
@@ -1857,8 +1858,8 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                     .on_press(move |app: &mut StudioApp| app.unplug_wire(&wire)),
                 None => row()
                     .key(format!("plug-{name}"))
-                    .min_h(26.0)
-                    .min_w(26.0)
+                    .min_h(24.0)
+                    .min_w(24.0)
                     .px(10.0)
                     .radius(8.0)
                     .continuous_corners()
@@ -1876,7 +1877,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         row()
             .w_full()
             .min_h(socket_h)
-            .py(2.0)
+            .py(if has_plug_button { 0.0 } else { 2.0 })
             .gap(8.0)
             .items_center()
             .justify_between()
