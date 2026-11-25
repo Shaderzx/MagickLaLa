@@ -2557,6 +2557,42 @@ fn picker_undo() -> Result<serde_json::Value, String> {
     }
     Ok(json!({ "original": original, "models": models, "temperatures": temperatures }))
 }
+fn split_cleared() -> Result<serde_json::Value, String> {
+    let mut spell = SpellGraph::new("Cleared Split");
+    spell.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("fork", "flow/split", 260.0, json!({ "outputs": ["left", "right"] })),
+        studio_node("first", "time/delay", 520.0, json!({ "ms": 10 })),
+        studio_node("reply", "io/send_message", 780.0, serde_json::Value::Null),
+    ];
+    let link = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    spell.wires = vec![
+        link("c1", ("trigger", "out"), ("fork", "in")),
+        link("c2", ("fork", "left"), ("first", "in")),
+        link("c3", ("first", "out"), ("reply", "in")),
+        link("c4", ("trigger", "content"), ("reply", "content")),
+    ];
+    let mut rt = runtime_for(spell);
+    let before = validation_of(&mut rt)?;
+    rt.update(|app, _| {
+        app.prompts.insert(NodeId::from("fork"), rune::TextEdit::new(""));
+        app.sync_edits();
+    });
+    rt.frame(0.0);
+    let outputs = rt.state.spell.nodes.iter().find(|node| node.id.0 == "fork").and_then(|node| node.config.get("outputs").cloned());
+    let after = validation_of(&mut rt)?;
+    let errors = match &rt.state.validation {
+        ValidationState::Invalid(errors) => errors.clone(),
+        _ => Vec::new(),
+    };
+    Ok(json!({ "before": before["validation"], "outputs": outputs, "after": after["validation"], "errors": errors }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8819,6 +8855,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("var-undo") => var_undo(),
         Some("aside-undo-pour") => aside_undo_pour(),
         Some("picker-undo") => picker_undo(),
+        Some("split-cleared") => split_cleared(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),

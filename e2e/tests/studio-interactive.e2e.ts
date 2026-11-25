@@ -1946,3 +1946,13 @@ test('Each picker click and dial press is its own undo step: two model picks und
   expect(report.models).toEqual(['gpt-4.1', 'gpt-4o', report.original]);
   expect(report.temperatures).toEqual(['Float(0.6)', 'Float(0.5)', 'Float(0.4)']);
 });
+
+test('A Split whose Outputs are cleared stays cleared: the saved list is empty instead of falling back to out_0 and out_1, and Check flags both the empty list and the wire still leaving the old left output', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['split-cleared']);
+
+  expect(report.before).toBe('valid');
+  expect(report.outputs).toEqual([]);
+  expect(report.after).toBe('invalid');
+  expect(report.errors).toContain('Split: needs outputs');
+  expect(report.errors).toContain('Split: left is no longer listed but still has a wire');
+});
