@@ -8,8 +8,6 @@ pub const VIAL_SIZE: [f32; 2] = [196.0, 58.0];
 pub const POT_SIZE: [f32; 2] = [300.0, 290.0];
 pub const SINGLE_BOTTLE_SIZE: [f32; 2] = [148.0, 196.0];
 pub const MULTI_BOTTLE_SIZE: [f32; 2] = [150.0, 148.0];
-/// Room between a rack bottle's glass and its tag: the plank (from [`crate::cauldron::RACK_LEDGE`] down) and its brackets sit in it, and a
-/// status chip perched on the tag's top edge starts below them.
 pub const RACK_TAG_GAP: f32 = 18.0;
 pub const RACK_BOTTLE_SIZE: [f32; 2] = [112.0, 116.0];
 pub const RACK_FROM: usize = 2;
@@ -249,11 +247,8 @@ pub(crate) fn rack_title_lines(title: &str, bottles: usize, scale: f32) -> f32 {
     (title.chars().count() as f32 * 0.56 * size / (RACK_BOTTLE_SIZE[0] - 10.0)).ceil().clamp(1.0, 4.0)
 }
 
-/// The extra height the tallest bottle tag needs below its first line, in plan units, at the scale the rack is drawn: small screens draw bigger
-/// text in plan units, so a tag wraps sooner and the next row must sit lower.
 fn rack_tag_room(state: &CanvasState, bottles: &[NodeId], scale: f32) -> f32 {
     let line = crate::view::legible_size(12.5, scale) * 1.35;
-    // Half the growth: the pipe gap above the next row absorbs the rest.
     let grown = 0.5 * ((line - 12.5 * 1.35) + (crate::view::legible_size(11.0, scale) - 11.0) * 0.9);
     grown + bottles.iter().map(|id| (rack_title_lines(&state.display_title(id), bottles.len(), scale) - 1.0) * line).fold(0.0, f32::max)
 }
@@ -341,8 +336,6 @@ const BACK_ROW_PENALTY: f32 = 0.8;
 
 type Planner = fn(&CanvasState, (f32, f32), Metrics) -> (f32, BrewPlan);
 
-/// Plans again at the scale the first pass found, so bottle tags get the room their text needs at that scale (text grows in plan units as the
-/// plan shrinks).
 fn with_tag_room(state: &CanvasState, size: (f32, f32), m: Metrics, plan: Planner) -> (f32, BrewPlan) {
     let mut metrics = m;
     let mut made = plan(state, size, metrics);

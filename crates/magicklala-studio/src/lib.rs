@@ -140,7 +140,6 @@ fn socket_pairs(wires: &[Wire]) -> Vec<(SocketRef, SocketRef)> {
         .collect()
 }
 
-/// Whether a Set step for `name` runs before `node`: some step upstream of it, through any wire, sets that variable.
 fn set_earlier_on_route(graph: &SpellGraph, node: &NodeId, name: &str) -> bool {
     let mut seen = std::collections::HashSet::new();
     let mut queue = vec![node.clone()];
@@ -1012,7 +1011,6 @@ pub struct StudioApp {
     pub draft_status: Option<String>,
     pub publish_status: Option<String>,
     pub active_release_version: Option<u32>,
-    /// The Recipe input whose Plug in list is open: the selected step and the socket name.
     pub plug_menu: Option<(NodeId, String)>,
     pub run_timeout: Duration,
     run_started: Option<Instant>,
@@ -1869,8 +1867,6 @@ impl StudioApp {
         self.place_ingredient(kind, screen, wire_in)
     }
 
-    /// The outputs that can feed `node`'s `socket` from the Recipe: every non-flow output the socket accepts, on a step that does not itself
-    /// run after `node` (that would loop).
     pub fn plug_sources(&self, node: &NodeId, socket: &str) -> Vec<SocketRef> {
         let Some(to_ty) = self.canvas.card(node).and_then(|card| card.inputs.iter().find(|input| input.name == socket)).map(|input| input.ty) else {
             return Vec::new();

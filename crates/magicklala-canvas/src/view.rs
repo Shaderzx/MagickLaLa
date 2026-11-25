@@ -488,7 +488,6 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     }
     let clear = if step_num.is_some() { badge_side + 2.0 } else { 10.0 };
     let icon_side = if dense || crammed { 10.0 + badge + 6.0 } else { 10.0 };
-    // A squeezed card's check chip would sit on its name: the step number and green rim already say it ran, so the chip goes.
     let chip_bottom = -12.0 + chip_font * 1.25 + 3.0;
     let title_top = (dims[1] - title_size * 1.25) * 0.5;
     let title_right = step_pad + state.display_title(&card.id).chars().count() as f32 * 0.56 * title_size;
@@ -663,7 +662,6 @@ pub fn branch_bottle_mood(state: &CanvasState, card: &NodeCardModel) -> Cauldron
     }
 }
 
-/// Whether a lone potion bottle wears the release seal's fill: only before any brew, so a test brew's result never hides under it.
 pub fn solo_bottle_sealed(state: &CanvasState) -> bool {
     state.release_badge.is_some() && !state.has_run()
 }

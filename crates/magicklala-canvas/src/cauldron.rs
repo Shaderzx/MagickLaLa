@@ -523,12 +523,10 @@ pub fn ladle_stir(state: &CanvasState, plan: &BrewPlan) -> Option<f32> {
     leanings.into_iter().find(|stir| clearance(*stir) >= air)
 }
 
-/// Whether eight or more pours come in on lanes: their bundle covers the rim, so the ladle and the froth stay out of its way.
 fn rim_crowded(state: &CanvasState, plan: &BrewPlan) -> bool {
     plan.lanes.is_some() && plan.with_role(BrewRole::Ingredient).filter(|placed| state.card(&placed.id).is_some()).count() >= 8
 }
 
-/// Whether the big froth bubbles hang over the rim: while the broth is lively, unless a crowded pour bundle comes in over them.
 pub fn rim_froth(state: &CanvasState, plan: &BrewPlan) -> bool {
     matches!(crate::view::cauldron_mood(state), CauldronMood::Simmering | CauldronMood::Brewed) && !rim_crowded(state, plan)
 }
@@ -1038,9 +1036,7 @@ fn extra_title_lines(state: &CanvasState, plan: &BrewPlan, bottles: &[&BrewCard]
     (title_lines(state, plan, bottles.len(), id) - 1.0) * crate::view::legible_size(12.5, plan.scale) * 1.35
 }
 
-/// How far a rack plank's iron brackets reach below the board, in plan units.
 pub const RACK_BRACKET_DROP: f32 = 7.0;
-/// Where a rack plank's top sits below a bottle's top, in plan units: just under the glass's shadow, so the bottle stands on it.
 pub const RACK_LEDGE: f32 = 64.0;
 
 fn rack_plank_shape(size: [f32; 2], rows: &[[f32; 3]], s: f32, p: &HearthPalette) -> Shape {
