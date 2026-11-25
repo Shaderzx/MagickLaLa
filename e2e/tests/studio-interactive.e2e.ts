@@ -1612,3 +1612,29 @@ test('The last mile: a refused Publish lists every problem Check lists, adding a
     await rm(dir, { recursive: true, force: true });
   }
 });
+test('Honest edits: a second bottle on a Branch takes the free way, a cut shortcut stays cut, the layout follows a resized window, a refused wire drop changes nothing, a refused Publish marks the steps Check marks, setting aside the last step clears old brew marks, a variable type change is undoable and unseals Check, the Research sample checks clean, each potion shows its own mood, Tasting explains a hexed brew, Cmd or Ctrl Z works on the Variables tab, and Check names an undeclared variable', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-honest-edits-'));
+  try {
+    const report = await studioProbe(['honest-edits', join(dir, 'studio.sqlite')]);
+
+    expect(report.branchOuts).toEqual(['false', 'true']);
+    expect(report.cut).toEqual({ bridged: true, cameBack: false });
+    expect(report.resize).toEqual({ size: [960, 640], compact: true });
+    expect(report.refusedDrop.sameOrder).toBe(true);
+    expect(report.refusedDrop.dirtyAfter).toBe(report.refusedDrop.dirtyBefore);
+    expect(report.refusedDrop.brewKept).toBe(true);
+    expect(report.refusedDrop.storeError).toBeNull();
+    expect(report.refusedDrop.wireError).toBe(true);
+    expect(report.refusedDrop.wireErrorShown).toBe(true);
+    expect(report.publishMarks).toEqual({ failed: ['echo'], sameAsCheck: true, rejected: 1, debugIds: false });
+    expect(report.loneAside).toEqual({ brewed: true, marksAfterAside: false });
+    expect(report.variableType).toEqual({ checked: 'valid', afterType: 'unchecked', type: 'Int', undone: 'String' });
+    expect(report.research.validation).toBe('valid');
+    expect(report.moods).toEqual({ hexed: 'Hexed', other: 'Ready' });
+    expect(report.tastingReason).toBe(true);
+    expect(report.undoOnVariables).toBe(1);
+    expect(report.undeclaredNamed).toBe(true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

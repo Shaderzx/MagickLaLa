@@ -6128,7 +6128,201 @@ fn last_mile(db_path: &Path) -> Result<serde_json::Value, String> {
 
     Ok(json!({ "publish": publish, "variableUndo": variable_undo, "undoDuringBrewKept": kept, "emptyPot": empty_pot }))
 }
-fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
+fn honest_edits(db_path: &Path) -> Result<serde_json::Value, String> {
+    let chain = |ids: &[(&str, &str)]| -> SpellGraph {
+        let mut spell = SpellGraph::new("Chain Agent");
+        for (index, (id, kind)) in ids.iter().enumerate() {
+            spell.nodes.push(studio_node(id, kind, 240.0 * index as f32, serde_json::Value::Null));
+        }
+        spell
+    };
+    let mut branch_spell = chain(&[("trigger", "event/on_message"), ("fork", "flow/branch")]);
+    branch_spell.wires = vec![studio_wire("w1", ("trigger", "out"), ("fork", "in"))];
+    let mut branch = runtime_for(branch_spell);
+    branch.update(|app, _| {
+        app.spawn("io/send_message");
+        app.spawn("io/send_message");
+        app.sync_edits();
+    });
+    let mut branch_outs: Vec<String> = branch
+        .state
+        .canvas
+        .wires
+        .iter()
+        .filter(|wire| wire.from_node.0 == "fork" && branch.state.canvas.card(&wire.to_node).is_some_and(|card| card.kind == "io/send_message"))
+        .map(|wire| wire.from_socket.clone())
+        .collect();
+    branch_outs.sort();
+
+    let mut cut_spell = chain(&[("trigger", "event/on_message"), ("a", "time/delay"), ("b", "time/delay"), ("c", "time/delay"), ("d", "time/delay"), ("reply", "io/send_message")]);
+    cut_spell.wires = vec![
+        studio_wire("w1", ("trigger", "out"), ("a", "in")),
+        studio_wire("w2", ("a", "out"), ("b", "in")),
+        studio_wire("w3", ("b", "out"), ("c", "in")),
+        studio_wire("w4", ("c", "out"), ("d", "in")),
+        studio_wire("w5", ("d", "out"), ("reply", "in")),
+        studio_wire("w6", ("trigger", "content"), ("reply", "content")),
+    ];
+    let mut cut = runtime_for(cut_spell);
+    let shortcut = |app: &StudioApp| app.canvas.wires.iter().any(|wire| wire.from_node.0 == "trigger" && wire.to_node.0 == "c" && wire.from_socket == "out");
+    cut.update(|app, _| {
+        app.toss(magicklala_canvas::Toss::Aside(NodeId::from("a")));
+        app.sync_edits();
+        app.toss(magicklala_canvas::Toss::Aside(NodeId::from("b")));
+        app.sync_edits();
+    });
+    let bridged = shortcut(&cut.state);
+    cut.update(|app, _| {
+        app.canvas.wires.retain(|wire| !(wire.from_node.0 == "trigger" && wire.to_node.0 == "c" && wire.from_socket == "out"));
+        app.sync_edits();
+        app.toss(magicklala_canvas::Toss::Aside(NodeId::from("d")));
+        app.sync_edits();
+        app.sync_edits();
+    });
+    let cut_report = json!({ "bridged": bridged, "cameBack": shortcut(&cut.state) });
+
+    let mut resized = runtime_for(tasting_spell());
+    resized.set_viewport((960.0, 640.0), 1.0);
+    resized.frame(0.0);
+    resized.frame(0.0);
+    let resize = json!({ "size": [resized.state.size.0, resized.state.size.1], "compact": resized.state.compact_toolbar() });
+
+    let mut drop = runtime_for(tasting_spell());
+    click(&mut drop, "run-spell")?;
+    live_finish(&mut drop)?;
+    click(&mut drop, "mode-grimoire")?;
+    drop.update(|app, _| {
+        app.canvas.camera.zoom = 1.0;
+        app.canvas.camera.pan_x = 40.0;
+        app.canvas.camera.pan_y = 40.0;
+    });
+    drop.frame(1.0);
+    let order = |app: &StudioApp| app.spell.wires.iter().map(|wire| wire.id.0.clone()).collect::<Vec<_>>();
+    let before = (order(&drop.state), drop.state.dirty, drop.state.canvas.last_brew.is_some());
+    let from = drop.find("socket-echo-in-content").ok_or("no echo content socket")?;
+    let onto = drop.find("socket-reply-in-in").ok_or("no reply flow socket")?;
+    drag(&mut drop, "socket-echo-in-content", (onto.0 - from.0, onto.1 - from.1))?;
+    drop.update(|app, _| {
+        app.sync_edits();
+    });
+    drop.frame(0.0);
+    let refused_drop = json!({
+        "sameOrder": order(&drop.state) == before.0,
+        "dirtyBefore": before.1,
+        "dirtyAfter": drop.state.dirty,
+        "brewKept": before.2 && drop.state.canvas.last_brew.is_some(),
+        "storeError": drop.state.store_error,
+        "wireError": drop.state.wire_error.is_some(),
+        "wireErrorShown": texts_under(&mut drop, "trace-strip").contains("Wire refused"),
+    });
+
+    let mut both = studio_at(db_path)?;
+    both.update(|app, _| {
+        app.new_empty_spell();
+        app.load_graph(tasting_spell());
+        app.prompts.insert(NodeId::from("echo"), rune::TextEdit::new(""));
+        app.sync_spell();
+    });
+    let marks = |app: &StudioApp| {
+        let failed: Vec<String> = app.canvas.nodes.iter().filter(|card| card.status == ExecutionStatus::Failed).map(|card| card.id.0.clone()).collect();
+        let rejected: Vec<String> = app.trace.iter().filter(|line| line.kind == "RunRejected").map(|line| line.detail.clone()).collect();
+        (failed, rejected)
+    };
+    let refusal = both.state.publish().err().map(|error| error.to_string()).unwrap_or_default();
+    let after_publish = marks(&both.state);
+    click(&mut both, "validate")?;
+    let after_check = marks(&both.state);
+    let publish_marks = json!({
+        "failed": after_publish.0,
+        "sameAsCheck": after_publish == after_check,
+        "rejected": after_publish.1.len(),
+        "debugIds": refusal.contains("node \""),
+    });
+
+    let mut lone = runtime_for(chain(&[("trigger", "event/on_message")]));
+    click(&mut lone, "run-spell")?;
+    live_finish(&mut lone)?;
+    let brewed = lone.state.canvas.last_brew.is_some();
+    lone.update(|app, _| {
+        app.toss(magicklala_canvas::Toss::Aside(NodeId::from("trigger")));
+        app.sync_edits();
+    });
+    let lone_report = json!({ "brewed": brewed, "marksAfterAside": lone.state.canvas.last_brew.is_some() });
+
+    let mut typed = runtime_for(tasting_spell());
+    typed.update(|app, _| app.add_variable());
+    click(&mut typed, "validate")?;
+    let checked = typed.state.validation.label().to_owned();
+    typed.update(|app, _| {
+        app.set_variable_type_at(0, SocketType::Int);
+        app.sync_edits();
+    });
+    let after_type = typed.state.validation.label().to_owned();
+    let new_type = typed.state.spell.variables.first().map(|var| format!("{:?}", var.ty));
+    typed.update(|app, _| app.undo());
+    let variable_type = json!({ "checked": checked, "afterType": after_type, "type": new_type, "undone": typed.state.spell.variables.first().map(|var| format!("{:?}", var.ty)) });
+
+    let mut research = runtime_for(tasting_spell());
+    research.update(|app, _| app.open_sample_spell("Research Agent"));
+    let into_prompt: Vec<magicklala_graph::WireId> =
+        research.state.canvas.wires.iter().filter(|wire| wire.to_node.0 == "llm" && wire.to_socket == "prompt").map(|wire| wire.id.clone()).collect();
+    research.update(move |app, _| {
+        for wire in &into_prompt {
+            app.unplug_wire(wire);
+        }
+    });
+    click(&mut research, "validate")?;
+    let research_report = json!({ "validation": research.state.validation.label(), "errors": match &research.state.validation {
+        ValidationState::Invalid(errors) => errors.clone(),
+        _ => Vec::new(),
+    } });
+
+    let mut hexed = runtime_for(tasting_spell());
+    hexed.update(|app, _| {
+        app.prompts.insert(NodeId::from("echo"), rune::TextEdit::new(""));
+    });
+    click(&mut hexed, "validate")?;
+    let hexed_mood = format!("{:?}", magicklala_studio::potion_mood(&hexed.state, "Tasting Agent"));
+    let other_mood = format!("{:?}", magicklala_studio::potion_mood(&hexed.state, "Research Agent"));
+    click(&mut hexed, "run-spell")?;
+    click(&mut hexed, "tab-playground")?;
+    let reason = hexed.state.canvas.brew_summary.clone().unwrap_or_default();
+    let tasting_reason = !reason.is_empty() && texts_under(&mut hexed, "playground-panel").contains(&reason);
+    let moods = json!({ "hexed": hexed_mood, "other": other_mood });
+
+    let mut keyed = runtime_for(tasting_spell());
+    keyed.on_key = Some(magicklala_studio::studio_key);
+    keyed.update(|app, _| app.add_variable());
+    click(&mut keyed, "tab-variables")?;
+    keyed.update(|app, _| app.remove_variable_at(0));
+    keyed.key(rune::KeyEvent { key: rune::Key::Command('z'), mods: rune::Mods { cmd: true, ..Default::default() } });
+    keyed.frame(0.0);
+    let undo_on_variables = keyed.state.spell.variables.len();
+
+    let mut undeclared_spell = tasting_spell();
+    undeclared_spell.nodes.push(studio_node("peek", "var/get", 280.0, json!({ "name": "mood" })));
+    let mut undeclared = runtime_for(undeclared_spell);
+    click(&mut undeclared, "validate")?;
+    let undeclared_named = match &undeclared.state.validation {
+        ValidationState::Invalid(errors) => errors.iter().any(|error| error.contains("mood")),
+        _ => false,
+    };
+
+    Ok(json!({
+        "branchOuts": branch_outs,
+        "cut": cut_report,
+        "resize": resize,
+        "refusedDrop": refused_drop,
+        "publishMarks": publish_marks,
+        "loneAside": lone_report,
+        "variableType": variable_type,
+        "research": research_report,
+        "moods": moods,
+        "tastingReason": tasting_reason,
+        "undoOnVariables": undo_on_variables,
+        "undeclaredNamed": undeclared_named,
+    }))
+}fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),
@@ -7040,6 +7234,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("steady-hands") => steady_hands(),
         Some("fair-shelves") => fair_shelves(),
         Some("last-mile") => last_mile(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("honest-edits") => honest_edits(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("drawn-truths") => drawn_truths(),

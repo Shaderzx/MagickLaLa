@@ -831,6 +831,7 @@ pub struct StudioApp {
     pub aside_wires: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
     pub aside_bridges: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
     pub aside_refused: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
+    pub wire_error: Option<String>,
     var_problems: Vec<String>,
     pub saved_potions: Vec<(String, String)>,
     pub pantry_drag: Option<PantryDrag>,
@@ -955,6 +956,7 @@ impl StudioApp {
             aside_wires: HashMap::new(),
             aside_bridges: HashMap::new(),
             aside_refused: HashMap::new(),
+            wire_error: None,
             var_problems: Vec::new(),
             saved_potions: Vec::new(),
             pantry_drag: None,
@@ -3476,7 +3478,7 @@ fn remember_run_timeout(timeout: Duration) {
 }
 
 mod view;
-pub use view::{prompt_editor_height, prompt_font, studio_status, studio_view};
+pub use view::{potion_mood, prompt_editor_height, prompt_font, studio_status, studio_view};
 
 fn trace_line(event: &TraceEvent, at_ms: u64, canvas: &CanvasState) -> TraceLine {
     let path = event.subgraph_path();

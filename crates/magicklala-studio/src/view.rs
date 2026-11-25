@@ -2184,6 +2184,10 @@ fn playground_panel(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     panel.child(col().key("inspector-scroll").w_full().grow(1.0).min_h(0.0).px(14.0).scroll(ScrollSpec { stick_bottom: true }).child(body)).child(composer_dock)
 }
 
+pub fn potion_mood(_app: &StudioApp, _name: &str) -> magicklala_canvas::CauldronMood {
+    magicklala_canvas::CauldronMood::Brewed
+}
+
 pub fn studio_status(app: &StudioApp) -> Option<(&str, bool)> {
     match (&app.store_error, &app.draft_status, &app.publish_status) {
         (Some(error), _, _) => Some((error, true)),
