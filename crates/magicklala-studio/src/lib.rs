@@ -140,24 +140,27 @@ fn socket_pairs(wires: &[Wire]) -> Vec<(SocketRef, SocketRef)> {
         .collect()
 }
 
-fn set_earlier_on_route(graph: &SpellGraph, node: &NodeId, name: &str) -> bool {
+fn set_earlier_on_route(graph: &SpellGraph, node: &NodeId, name: &str, is_flow: impl Fn(&magicklala_graph::Wire) -> bool) -> bool {
+    let sets_it = |id: &NodeId| {
+        graph.node(id).is_some_and(|step| step.kind == "var/set" && step.config.get("name").and_then(|value| value.as_str()).map(str::trim) == Some(name))
+    };
     let mut seen = std::collections::HashSet::new();
-    let mut queue = vec![node.clone()];
-    while let Some(current) = queue.pop() {
-        for wire in graph.wires.iter().filter(|wire| wire.to_node == current) {
-            if !seen.insert(wire.from_node.clone()) {
-                continue;
+    let mut frontier = vec![node.clone()];
+    let mut met_a_set = false;
+    while let Some(current) = frontier.pop() {
+        let feeders: Vec<&NodeId> = graph.wires.iter().filter(|wire| wire.to_node == current && is_flow(wire)).map(|wire| &wire.from_node).collect();
+        if feeders.is_empty() && &current != node {
+            return false;
+        }
+        for from in feeders {
+            if sets_it(from) {
+                met_a_set = true;
+            } else if seen.insert(from.clone()) {
+                frontier.push(from.clone());
             }
-            if graph
-                .node(&wire.from_node)
-                .is_some_and(|step| step.kind == "var/set" && step.config.get("name").and_then(|value| value.as_str()).map(str::trim) == Some(name))
-            {
-                return true;
-            }
-            queue.push(wire.from_node.clone());
         }
     }
-    false
+    met_a_set
 }
 
 fn same_recipe(a: &SpellGraph, b: &SpellGraph) -> bool {
@@ -3232,7 +3235,13 @@ impl StudioApp {
                 };
                 let problem = match &value {
                     _ if !type_fits => Some(format!("holds {}", type_words(variable.ty))),
-                    None if matches!(field.kind, FieldKind::Number { .. }) && !set_earlier_on_route(&graph, &node.id, name) => Some("has no value".to_owned()),
+                    None if matches!(field.kind, FieldKind::Number { .. })
+                        && !set_earlier_on_route(&graph, &node.id, name, |wire| {
+                            self.input_type(&SocketRef::new(wire.to_node.clone(), wire.to_socket.clone())).is_some_and(|ty| ty.is_flow())
+                        }) =>
+                    {
+                        Some("has no value".to_owned())
+                    }
                     None => None,
                     Some(value) if !value_fits(value) => Some(match value.as_f64().filter(|number| value.is_f64() && number.fract() == 0.0) {
                         Some(whole) => format!("is {whole}"),
