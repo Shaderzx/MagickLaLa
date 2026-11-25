@@ -2005,6 +2005,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             )
             .child(
                 col()
+                    .key("temperature-tile")
                     .grow(1.0)
                     .min_w(0.0)
                     .px(if narrow_inspector { 6.0 } else { 8.0 })

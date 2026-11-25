@@ -3571,6 +3571,26 @@ fn kitchen_brewed_tidy() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn tile_align() -> Result<serde_json::Value, String> {
+    let mut report = serde_json::Map::new();
+    for size in [(1280.0_f32, 800.0_f32), (960.0, 640.0)] {
+        let mut app = StudioApp::with_spell(StudioApp::from_registry().spell.clone(), registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.update(|app, _| {
+            app.canvas.select(Some(NodeId::from("llm")));
+            app.right_tab = RightTab::Inspector;
+        });
+        rt.frame(1.0);
+        rt.frame(3.0);
+        let dial = layout_rect(&rt, "temp-dec").ok_or("no dial")?;
+        let picker = text_lines_under(&rt, "model-picker").into_iter().find(|(line, _)| line == "gpt-4o-mini").map(|(_, rect)| rect).ok_or("no model")?;
+        let centre = |rect: [f32; 4]| rect[1] + rect[3] * 0.5;
+        let words: Vec<String> = text_lines_under(&rt, "temperature-tile").into_iter().map(|(line, _)| line).collect();
+        report.insert(format!("{}", size.0), json!({ "offset": (centre(dial) - centre(picker)).abs().round(), "label": words.first() }));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9860,6 +9880,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),
         Some("kitchen-brewed-tidy") => kitchen_brewed_tidy(),
+        Some("tile-align") => tile_align(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),

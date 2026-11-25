@@ -1910,12 +1910,13 @@ test('Variable edits undo and rename cleanly: a bound temperature press, a typed
   expect(report.rename.undone).toEqual({ name: 'max_memories', limit: '{{max_memories}}' });
 });
 
-test('Bound settings say where they come from: the temperature tile names its variable, a card bound to a variable shows its value and the variable, and an open published potion says Live once with its version on the pill', { timeout: 900_000 }, async () => {
+test('Bound settings say where they come from: the temperature tile shows its bound look without repeating a variable named like the field, a card bound to a variable shows its value and the variable, and an open published potion says Live once with its version on the pill', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-bound-looks-'));
   try {
     const report = await studioProbe(['bound-looks', join(dir, 'studio.sqlite')]);
 
-    expect(report.tile).toContain('Temperature · temperature');
+    expect(report.tile).toContain('Temperature');
+    expect(report.tile).not.toContain('Temperature · temperature');
     expect(report.tileCut).toEqual([]);
     expect(report.recall).toBe('top 5 · max_memories');
     expect(report.activeRow).toContain('v1 Live');
@@ -2172,5 +2173,14 @@ test('A brewed crowded kitchen stays tidy at both sizes: no time chip covers a b
 
   for (const width of ['960', '1280']) {
     expect({ width, ...report[width] }).toEqual({ width, coveredNames: [], looseBadges: [], coveredIcons: [] });
+  }
+});
+
+test('The Model and Temperature tiles line up: at both sizes the temperature dial sits level with the model name, and a temperature bound to a variable named temperature reads Temperature once', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['tile-align']);
+
+  for (const width of ['1280', '960']) {
+    expect({ width, offset: report[width].offset <= 1 }).toEqual({ width, offset: true });
+    expect(report[width].label).toBe('Temperature');
   }
 });
