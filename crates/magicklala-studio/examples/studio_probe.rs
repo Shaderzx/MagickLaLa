@@ -3503,6 +3503,38 @@ fn long_route_row() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn twin_tails() -> Result<serde_json::Value, String> {
+    let routes = [
+        "alpha_customer_reconciliation_notification",
+        "bravo_customer_reconciliation_notification",
+        "charlie_customer_reconciliation_notification",
+        "delta_customer_reconciliation_notification",
+    ];
+    let mut report = serde_json::Map::new();
+    for size in [(960.0_f32, 640.0_f32), (1280.0, 800.0)] {
+        let mut spell = SpellGraph::new("Twin Tails");
+        spell.nodes = vec![
+            studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+            studio_node("switch", "flow/switch", 280.0, json!({ "cases": routes })),
+        ];
+        spell.wires = vec![studio_wire("w0", ("trigger", "out"), ("switch", "in")), studio_wire("wv", ("trigger", "content"), ("switch", "value"))];
+        for (index, route) in routes.iter().enumerate() {
+            let id = format!("reply_{index}");
+            spell.nodes.push(studio_node(&id, "io/send_message", 560.0, serde_json::Value::Null));
+            spell.wires.push(studio_wire(&format!("r{index}"), ("switch", route), (&id, "in")));
+            spell.wires.push(studio_wire(&format!("c{index}"), ("trigger", "content"), (&id, "content")));
+        }
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.frame(1.0);
+        let tags: Vec<String> = (0..routes.len()).map(|index| texts_under(&mut rt, &format!("bottle-tag-reply_{index}"))).collect();
+        let distinct: std::collections::BTreeSet<&String> = tags.iter().collect();
+        report.insert(format!("{}", size.0), json!({ "tags": tags, "distinct": distinct.len() }));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -10176,6 +10208,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("live-mark-kept") => live_mark_kept(),
         Some("set-before-read") => set_before_read(),
         Some("long-route-row") => long_route_row(),
+        Some("twin-tails") => twin_tails(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

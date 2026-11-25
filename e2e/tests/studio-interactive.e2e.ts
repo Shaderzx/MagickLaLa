@@ -2259,3 +2259,12 @@ test('A long route name fits its Recipe socket row at both window sizes: urgent_
     expect(report[size].nameWhole).toBe(true);
   }
 });
+
+test('Bottles whose long route names differ only at the start still get different tags: four Send bottles on alpha_, bravo_, charlie_ and delta_customer_reconciliation_notification show four different names at both window sizes', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['twin-tails']);
+
+  for (const size of ['960', '1280']) {
+    expect(report[size].tags.every((tag: string) => tag.length > 0)).toBe(true);
+    expect(report[size].distinct).toBe(4);
+  }
+});
