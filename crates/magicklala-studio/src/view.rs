@@ -2284,6 +2284,18 @@ fn chip_width(line: &TraceLine, shape: &ChipShape) -> f32 {
     }
 }
 
+fn first_finishes<'a>(lines: impl Iterator<Item = &'a TraceLine>) -> Vec<&'a TraceLine> {
+    let mut seen: Vec<Option<&'a magicklala_graph::NodeId>> = Vec::new();
+    lines
+        .filter(|line| {
+            let node = line.node.as_ref();
+            let first = node.is_none() || !seen.contains(&node);
+            seen.push(node);
+            first
+        })
+        .collect()
+}
+
 fn log_chips<'a>(lines: &[&'a TraceLine], compact: bool, room_for_dots: usize, budget: f32) -> Vec<(&'a TraceLine, ChipShape)> {
     let mut chips = log_chips_by_count(lines, compact, room_for_dots);
     if !compact {
@@ -2422,7 +2434,7 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
         }
         return bar;
     }
-    let finished_steps = app.trace.iter().filter(|line| line.kind == "NodeFinished" || line.kind == "NodeFailed").count();
+    let finished_steps = first_finishes(app.trace.iter().filter(|line| line.kind == "NodeFinished" || line.kind == "NodeFailed")).len();
     let blocked_pre_run = !app.is_running() && finished_steps == 0 && app.trace.iter().all(|line| line.kind == "RunRejected");
     let show_expand_chip = !app.is_running() && finished_steps > 0 && count > 1;
     let step_word = if finished_steps == 1 { "step" } else { "steps" };
@@ -2486,7 +2498,7 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
     let pinned_room = pinned.as_ref().map_or(0.0, |(_, width)| *width + 16.0);
     let budget = (app.size.0 - 32.0 - pinned_room).max(120.0);
     let shown: Vec<&TraceLine> =
-        if pinned.is_some() { milestones.iter().copied().filter(|line| line.kind == "NodeFinished").collect() } else { milestones.clone() };
+        if pinned.is_some() { first_finishes(milestones.iter().copied().filter(|line| line.kind == "NodeFinished")) } else { milestones.clone() };
     let chips = log_chips(&shown, !app.trace_expanded, ((app.size.0 - 420.0) / 32.0).max(0.0) as usize, budget);
     let total = chips.len();
     let mut step_num = 0usize;

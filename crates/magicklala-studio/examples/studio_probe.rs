@@ -6909,13 +6909,15 @@ fn log_counts() -> Result<serde_json::Value, String> {
     rt.frame(1.0);
     let strip = texts_under(&mut rt, "trace-strip");
     let distinct = {
-        let mut ran: Vec<String> = rt.state.trace.iter().filter(|line| line.kind == "NodeFinished").filter_map(|line| line.node.as_ref().map(|node| node.0.clone())).collect();
+        let mut ran: Vec<String> =
+            rt.state.trace.iter().filter(|line| line.kind == "NodeFinished").filter_map(|line| line.node.as_ref().map(|node| node.0.clone())).collect();
         ran.sort();
         ran.dedup();
         ran.len()
     };
     Ok(json!({ "distinct": distinct, "saysSteps": strip.contains(&format!("{distinct} steps")) }))
-}fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
+}
+fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),
