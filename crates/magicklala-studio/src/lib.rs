@@ -2580,9 +2580,15 @@ impl StudioApp {
         let renamed = format!("{{{{{new}}}}}");
         let fed: std::collections::HashSet<NodeId> =
             self.canvas.wires.iter().filter(|wire| wire.to_socket == old && !wire.ty.is_flow()).map(|wire| wire.to_node.clone()).collect();
-        for (_, config) in self.configs.iter_mut().filter(|(id, _)| !fed.contains(*id)) {
-            for value in config.as_object_mut().into_iter().flat_map(|settings| settings.values_mut()) {
-                if magicklala_graph::bound_variable(value) == Some(old) {
+        for (id, config) in self.configs.iter_mut() {
+            let reads_wire = fed.contains(id);
+            for (key, value) in config.as_object_mut().into_iter().flat_map(|settings| settings.iter_mut()) {
+                let template_text = magicklala_graph::UNBOUND_SETTINGS.contains(&key.as_str());
+                if !template_text && magicklala_graph::bound_variable(value) == Some(old) {
+                    *value = serde_json::Value::String(renamed.clone());
+                } else if reads_wire {
+                    continue;
+                } else if magicklala_graph::bound_variable(value) == Some(old) {
                     *value = serde_json::Value::String(renamed.clone());
                 } else if let Some(text) = value.as_str().filter(|text| template_roots(text).iter().any(|root| root == old)) {
                     *value = serde_json::Value::String(magicklala_nodes::rename_template_root(text, old, new));
