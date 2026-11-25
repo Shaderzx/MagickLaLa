@@ -1894,7 +1894,7 @@ test('Cauldron cards say what they are set to instead of their code name: Genera
 
   expect(report.llm).toContain('gpt-4o-mini');
   expect(report.llm).not.toContain('ai/generate_text');
-  expect(report.recall).toContain('top max_memories');
+  expect(report.recall).toContain('top 5 · max_memories');
   expect(report.switch).toContain('2 cases');
   expect(report.grimoireShowsNote).toBe(false);
 });
@@ -1915,6 +1915,7 @@ test('Bound settings say where they come from: the temperature tile names its va
     const report = await studioProbe(['bound-looks', join(dir, 'studio.sqlite')]);
 
     expect(report.tile).toContain('Temperature · temperature');
+    expect(report.tileCut).toEqual([]);
     expect(report.recall).toBe('top 5 · max_memories');
     expect(report.activeRow).toContain('v1 Live');
     expect(report.activeRow.filter((line: string) => /live/i.test(line))).toEqual(['v1 Live']);

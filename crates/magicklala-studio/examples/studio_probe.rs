@@ -2334,7 +2334,9 @@ fn var_undo() -> Result<serde_json::Value, String> {
         rt.key(rune::KeyEvent { key: rune::Key::Command('z'), mods: rune::Mods { cmd: true, ..Default::default() } });
         rt.frame(0.0);
     };
-    let default_of = |app: &StudioApp, name: &str| app.spell.variables.iter().find(|variable| variable.name == name).and_then(|variable| variable.default.clone()).map(|value| format!("{value:?}"));
+    let default_of = |app: &StudioApp, name: &str| {
+        app.spell.variables.iter().find(|variable| variable.name == name).and_then(|variable| variable.default.clone()).map(|value| format!("{value:?}"))
+    };
     let recall_limit = |app: &StudioApp| app.spell.nodes.iter().find(|node| node.id.0 == "recall").and_then(|node| node.config.get("limit").cloned());
 
     let mut dial = runtime_for(StudioApp::from_registry().spell.clone());
@@ -2396,6 +2398,16 @@ fn bound_looks(db_path: &Path) -> Result<serde_json::Value, String> {
     });
     demo.frame(1.0);
     let tile = all_texts(&demo).into_iter().filter(|line| line.starts_with("Temperature")).collect::<Vec<_>>();
+    let mut measure = studio_text_system();
+    let tile_cut: Vec<String> = text_lines_under(&demo, "inspector")
+        .into_iter()
+        .filter(|(line, _)| line.starts_with("Temperature"))
+        .filter(|(line, rect)| {
+            let (natural, line_h) = measure.measure(line, rune::TextStyle::new(10.5, 650.0), 1.0);
+            natural > rect[2] * (rect[3] / line_h).round().max(1.0) + 2.0
+        })
+        .map(|(line, _)| line)
+        .collect();
     let recall_line = demo.state.canvas.card(&NodeId::from("recall")).map(|card| demo.state.canvas.card_line(card).to_owned());
 
     let config = StudioConfig { db_path: Some(db_path.to_path_buf()), ..StudioConfig::default() };
@@ -2407,7 +2419,7 @@ fn bound_looks(db_path: &Path) -> Result<serde_json::Value, String> {
     rt.update(|app, _| app.left_tab = LeftTab::Agents);
     rt.frame(1.0);
     let row: Vec<String> = text_lines_under(&rt, "spell-tasting-agent").into_iter().map(|(line, _)| line).collect();
-    Ok(json!({ "tile": tile, "recall": recall_line, "activeRow": row }))
+    Ok(json!({ "tile": tile, "tileCut": tile_cut, "recall": recall_line, "activeRow": row }))
 }
 fn redo_order() -> Result<serde_json::Value, String> {
     let press = |rt: &mut Runtime<StudioApp>, shift: bool| {
@@ -2437,7 +2449,9 @@ fn redo_order() -> Result<serde_json::Value, String> {
     rt.frame(0.0);
     press(&mut rt, true);
     let fresh_kept = rt.state.prompts.get(&NodeId::from("echo")).map(|edit| edit.text.clone());
-    Ok(json!({ "removed": removed, "undone": undone, "redone": redone, "undoneAgain": undone_again, "freshKept": fresh_kept, "echoAfterStaleRedo": has_echo(&rt) }))
+    Ok(
+        json!({ "removed": removed, "undone": undone, "redone": redone, "undoneAgain": undone_again, "freshKept": fresh_kept, "echoAfterStaleRedo": has_echo(&rt) }),
+    )
 }
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
@@ -3738,7 +3752,12 @@ fn fit_and_wording(db_path: &Path) -> Result<serde_json::Value, String> {
         .canvas
         .nodes
         .iter()
-        .filter(|card| !text_lines_under(&compact, &format!("node-{}", card.id.0)).iter().any(|(line, _)| line == compact.state.canvas.card_line(card)))
+        .filter(|card| {
+            let full = compact.state.canvas.card_line(card);
+            !text_lines_under(&compact, &format!("node-{}", card.id.0))
+                .iter()
+                .any(|(line, _)| line == full || line == magicklala_canvas::view::short_line(full))
+        })
         .map(|card| compact.state.canvas.card_line(card).to_owned())
         .collect();
     let mut measure = magicklala_studio::studio_text_system();
@@ -3747,8 +3766,13 @@ fn fit_and_wording(db_path: &Path) -> Result<serde_json::Value, String> {
         let rt = sized(spell, (960.0, 640.0));
         let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
         for card in rt.state.canvas.nodes.iter().filter(|card| plan.card(&card.id).is_some_and(|placed| placed.role != magicklala_canvas::BrewRole::Bottle)) {
-            let shown = rt.state.canvas.card_line(card).to_owned();
-            let Some((_, rect)) = text_lines_under(&rt, &format!("node-{}", card.id.0)).into_iter().find(|(line, _)| *line == shown) else { continue };
+            let full = rt.state.canvas.card_line(card).to_owned();
+            let Some((shown, rect)) = text_lines_under(&rt, &format!("node-{}", card.id.0))
+                .into_iter()
+                .find(|(line, _)| *line == full || line == magicklala_canvas::view::short_line(&full))
+            else {
+                continue;
+            };
             let size = (11.2 / plan.scale).clamp(11.5, 13.0);
             let style = if rt.state.canvas.notes.contains_key(&card.id) { rune::TextStyle::new(size, 600.0) } else { rune::TextStyle::new(size, 500.0).mono() };
             let (natural, _) = measure.measure(&shown, style, 1.0);
