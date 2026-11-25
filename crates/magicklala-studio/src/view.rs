@@ -841,7 +841,7 @@ fn left_rail(app: &StudioApp, t: &HearthPalette) -> El {
                             }
                             pieces
                         } else {
-                            label(&spec.title, 12.0, 550.0, t.ink).wrap().max_lines(2)
+                            label(&spec.title, 12.0, 550.0, t.ink).wrap().max_lines(2).shrink().min_w(0.0)
                         };
                         let starter = spec.is_trigger && app.canvas.nodes.is_empty();
                         let item = row()
