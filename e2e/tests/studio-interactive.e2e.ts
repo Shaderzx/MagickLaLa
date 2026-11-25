@@ -2141,3 +2141,13 @@ test('A step that finishes a pass and then fails shows its failure in the log: a
 
   expect(report.log).toBe('1 On Message · 1ms 2 While Loop: while loop exceeded max_iterations 1');
 });
+
+test('A step that was only cut short is Stopped, not Failed: when one branch fails, the Delay still running on the other branch turns grey and reads Stopped with no error mark, while the step that failed stays red with its number', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['stopped-not-failed']);
+
+  expect(report.broken).toBe('failed');
+  expect(report.brokenWords).toContain('!');
+  expect(report.slow).toBe('idle');
+  expect(report.slowWords).toContain('Stopped');
+  expect(report.slowWords).not.toContain('!');
+});

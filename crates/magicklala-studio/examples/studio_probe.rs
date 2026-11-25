@@ -3409,6 +3409,55 @@ fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     rt.frame(1.0);
     Ok(json!({ "log": texts_under(&mut rt, "trace-scroll") }))
 }
+fn stopped_not_failed() -> Result<serde_json::Value, String> {
+    let link = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let mut spell = SpellGraph::new("Fork Stop");
+    spell.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("fork", "flow/split", 260.0, serde_json::Value::Null),
+        studio_node("broken", "code/rhai_script", 520.0, json!({ "script": "x" })),
+        studio_node("slow", "time/delay", 520.0, json!({ "ms": 900 })),
+    ];
+    spell.wires = vec![link("a", ("trigger", "out"), ("fork", "in")), link("b", ("fork", "out_0"), ("broken", "in")), link("c", ("fork", "out_1"), ("slow", "in"))];
+    let run = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4d41";
+    let at = "2026-11-25T10:00:00Z";
+    let spell_id = spell.id.0.to_string();
+    let summary = json!({ "run_id": run, "spell_id": spell_id, "started_at": at, "finished_at": at, "status": "failed", "nodes_executed": 3, "outputs": {}, "error": "boom" });
+    let events: Vec<magicklala_graph::TraceEvent> = [
+        json!({ "event": "run_started", "run_id": run, "spell_id": spell_id, "at": at }),
+        json!({ "event": "node_finished", "run_id": run, "node_id": "trigger", "at": at, "duration_ms": 1 }),
+        json!({ "event": "wire_activated", "run_id": run, "wire_id": "a", "at": at }),
+        json!({ "event": "node_finished", "run_id": run, "node_id": "fork", "at": at, "duration_ms": 1 }),
+        json!({ "event": "wire_activated", "run_id": run, "wire_id": "b", "at": at }),
+        json!({ "event": "wire_activated", "run_id": run, "wire_id": "c", "at": at }),
+        json!({ "event": "node_started", "run_id": run, "node_id": "slow", "at": at }),
+        json!({ "event": "node_started", "run_id": run, "node_id": "broken", "at": at }),
+        json!({ "event": "node_failed", "run_id": run, "node_id": "broken", "at": at, "error": "boom" }),
+        json!({ "event": "run_finished", "run_id": run, "at": at, "summary": summary }),
+    ]
+    .into_iter()
+    .map(|event| serde_json::from_value(event).map_err(|error| error.to_string()))
+    .collect::<Result<_, _>>()?;
+    let mut rt = runtime_for(spell);
+    rt.update(move |app, _| {
+        app.pending_trace.extend(events.clone());
+        while app.step_trace() {}
+    });
+    rt.frame(1.0);
+    let status = |id: &str| rt.state.canvas.card(&NodeId::from(id)).map(|card| card.status.label());
+    Ok(json!({
+        "broken": status("broken"),
+        "slow": status("slow"),
+        "slowWords": texts_under(&mut rt, "node-slow"),
+        "brokenWords": texts_under(&mut rt, "node-broken"),
+    }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9694,6 +9743,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("redo-then-undo") => redo_then_undo(),
         Some("bound-unset") => bound_unset(),
         Some("finish-then-fail-log") => finish_then_fail_log(),
+        Some("stopped-not-failed") => stopped_not_failed(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
