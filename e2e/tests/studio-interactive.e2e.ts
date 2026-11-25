@@ -1857,3 +1857,13 @@ test('A failed pour aims at the pot: the broken stub of a failed step runs on un
   expect(report.upward).toEqual([]);
   expect(report.crowding).toEqual([]);
 });
+
+test('Variables can drive step settings: a setting written as {{name}} brews with that variable, Check names one that no variable fills, the Support sample binds Search Memory and Generate Text to its variables so none reads Unused, and the temperature dial on a bound step edits the variable', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['bound-settings']);
+
+  expect(report.quick).toEqual({ check: 'valid', outcome: 'Succeeded', waitedForVariable: true });
+  expect(report.unknown.check).toBe('invalid');
+  expect(report.unknown.errors.join(' ')).toMatch(/no variable is named nope/);
+  expect(report.hints).toEqual([['max_memories', '→ Search Memory'], ['temperature', '→ Generate Text']]);
+  expect(report.dial).toEqual({ shown: 0.4, variable: 'Float(0.5)', config: '{{temperature}}' });
+});

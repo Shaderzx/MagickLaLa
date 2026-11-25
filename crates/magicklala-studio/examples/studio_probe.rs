@@ -2205,6 +2205,52 @@ fn failed_stub() -> Result<serde_json::Value, String> {
     }
     Ok(json!({ "upward": upward, "crowding": crowding }))
 }
+fn bound_settings() -> Result<serde_json::Value, String> {
+    use magicklala_graph::{Value, VariableDef};
+    let bound_delay = |pause: &str| {
+        let mut spell = delay_spell(0);
+        if let Some(node) = spell.nodes.iter_mut().find(|node| node.id.0 == "wait") {
+            node.config = json!({ "ms": format!("{{{{{pause}}}}}") });
+        }
+        spell.variables = vec![VariableDef { name: "pause".to_owned(), ty: SocketType::Int, default: Some(Value::Int(4000)), exposed: true }];
+        spell
+    };
+    let mut quick = runtime_for(bound_delay("pause"));
+    quick.update(|app, _| {
+        if let Some(edit) = app.var_default_edits.first_mut() {
+            *edit = rune::TextEdit::new("1800");
+        }
+        app.sync_spell();
+    });
+    let check = validation_of(&mut quick)?;
+    let started = Instant::now();
+    click(&mut quick, "run-spell")?;
+    live_finish(&mut quick)?;
+    let quick_ms = started.elapsed().as_millis() as u64;
+    let quick_outcome = quick.state.last_run.as_ref().map(|report| report.outcome.label());
+
+    let mut unknown = runtime_for(bound_delay("nope"));
+    let unknown_check = validation_of(&mut unknown)?;
+
+    let demo = runtime_for(StudioApp::from_registry().spell.clone());
+    let hints: Vec<(String, String)> =
+        demo.state.spell.variables.iter().map(|variable| (variable.name.clone(), demo.state.variable_binding_hint(&variable.name).0)).collect();
+
+    let mut dial = runtime_for(StudioApp::from_registry().spell.clone());
+    let llm = dial.state.canvas.nodes.iter().find(|card| card.kind == "ai/generate_text").map(|card| card.id.clone()).ok_or("no llm")?;
+    let picked = llm.clone();
+    dial.update(move |app, _| app.canvas.select(Some(picked.clone())));
+    let shown = dial.state.selected_temperature();
+    dial.update(|app, _| app.adjust_temperature(0.1));
+    let after_variable = dial.state.spell.variables.iter().find(|variable| variable.name == "temperature").and_then(|variable| variable.default.clone()).map(|value| format!("{value:?}"));
+    let after_config = dial.state.spell.nodes.iter().find(|node| node.id == llm).and_then(|node| node.config.get("temperature").cloned());
+    Ok(json!({
+        "quick": { "check": check["validation"], "outcome": quick_outcome, "waitedForVariable": quick_ms >= 1700 },
+        "unknown": { "check": unknown_check["validation"], "errors": unknown_check["errors"] },
+        "hints": hints,
+        "dial": { "shown": shown, "variable": after_variable, "config": after_config },
+    }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8424,6 +8470,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("empty-start") => empty_start(),
         Some("downhill") => downhill(),
         Some("failed-stub") => failed_stub(),
+        Some("bound-settings") => bound_settings(),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("pot-rect") => pot_rect(),
         Some("gateway-hint") => gateway_hint(),
