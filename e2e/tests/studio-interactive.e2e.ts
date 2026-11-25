@@ -2082,3 +2082,10 @@ test('A Split fresh from the Pantry shows the two outlets it will really fire, o
 
   expect(report.outlets).toEqual(['out_0', 'out_1']);
 });
+
+test('Check judges bound settings the way the brew does: a template that is just {{count}} prints the number and passes, while a loop limit variable of 1.5 is flagged because the loop needs a whole number', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['check-matches-brew']);
+
+  expect(report.printed).toEqual({ check: 'valid', errors: [] });
+  expect(report.halfLoop).toContain('While Loop: max iterations needs a whole number of at least 1, but the variable limit is 1.5');
+});

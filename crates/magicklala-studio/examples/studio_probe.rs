@@ -3132,6 +3132,39 @@ fn fresh_split() -> Result<serde_json::Value, String> {
     let outlets: Vec<String> = rt.state.canvas.card(&id).map(|card| card.outputs.iter().map(|socket| socket.name.clone()).collect()).unwrap_or_default();
     Ok(json!({ "outlets": outlets }))
 }
+fn check_matches_brew() -> Result<serde_json::Value, String> {
+    use magicklala_graph::{Value, VariableDef};
+    let link = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let mut printed = SpellGraph::new("Printed Count");
+    printed.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("words", "text/template", 260.0, json!({ "template": "{{count}}" })),
+        studio_node("reply", "io/send_message", 520.0, serde_json::Value::Null),
+    ];
+    printed.wires = vec![link("p1", ("trigger", "out"), ("reply", "in")), link("p2", ("words", "text"), ("reply", "content"))];
+    printed.variables = vec![VariableDef { name: "count".to_owned(), ty: SocketType::Int, default: Some(Value::Int(3)), exposed: true }];
+    let mut print_rt = runtime_for(printed);
+    let print_check = validation_of(&mut print_rt)?;
+
+    let mut looped = SpellGraph::new("Half Loop");
+    looped.nodes = vec![
+        studio_node("start", "event/on_start", 0.0, serde_json::Value::Null),
+        studio_node("always", "logic/regex_match", 0.0, json!({ "text": "go", "pattern": "go" })),
+        studio_node("loop", "flow/while_loop", 260.0, json!({ "max_iterations": "{{limit}}" })),
+        studio_node("tick", "var/set", 520.0, json!({ "name": "limit", "value": 1 })),
+    ];
+    looped.wires = vec![link("l1", ("start", "out"), ("loop", "in")), link("l2", ("always", "matched"), ("loop", "condition")), link("l3", ("loop", "body"), ("tick", "in"))];
+    looped.variables = vec![VariableDef { name: "limit".to_owned(), ty: SocketType::Float, default: Some(Value::Float(1.5)), exposed: true }];
+    let mut loop_rt = runtime_for(looped);
+    let loop_check = validation_of(&mut loop_rt)?;
+    Ok(json!({ "printed": { "check": print_check["validation"], "errors": print_check["errors"] }, "halfLoop": loop_check["errors"] }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9409,6 +9442,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("lone-trigger-ships") => lone_trigger_ships(),
         Some("rename-safe") => rename_safe(),
         Some("fresh-split") => fresh_split(),
+        Some("check-matches-brew") => check_matches_brew(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
