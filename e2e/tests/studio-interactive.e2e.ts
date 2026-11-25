@@ -2140,10 +2140,12 @@ test('Check judges a bound loop limit even without a value to read: a Float vari
   expect(report.flag).toEqual(['While Loop: max iterations needs a whole number of at least 1, but the variable limit holds true or false']);
 });
 
-test('A step that finishes a pass and then fails shows its failure in the log: a While Loop that hits its limit reads as a red failed step 2 with the limit message, not as a green finish', { timeout: 900_000 }, async () => {
+test('A step that finishes a pass and then fails shows its failure in the log: a While Loop that hits its limit reads as a red failed step 2 with the limit message, not as a green finish, and the expanded log ends on Failed rather than Brewed', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['finish-then-fail-log']);
 
   expect(report.log).toBe('1 On Message · 1ms 2 While Loop: while loop exceeded max_iterations 1');
+  expect(report.finalRow).toMatch(/Failed/);
+  expect(report.finalRow).not.toMatch(/Brewed/);
 });
 
 test('A step that was only cut short is Stopped, not Failed: when one branch fails, the Delay still running on the other branch turns grey and reads Stopped with no error mark, while the step that failed stays red with its number', { timeout: 900_000 }, async () => {

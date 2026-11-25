@@ -3434,7 +3434,11 @@ fn finish_then_fail_log() -> Result<serde_json::Value, String> {
         while app.step_trace() {}
     });
     rt.frame(1.0);
-    Ok(json!({ "log": texts_under(&mut rt, "trace-scroll") }))
+    let log = texts_under(&mut rt, "trace-scroll");
+    rt.update(|app, _| app.trace_expanded = true);
+    rt.frame(2.0);
+    let last = (0..64).map(|index| format!("log-line-{index}")).take_while(|key| layout_rect(&rt, key).is_some()).last().map(|key| texts_under(&mut rt, &key)).unwrap_or_default();
+    Ok(json!({ "log": log, "finalRow": last }))
 }
 fn stopped_not_failed() -> Result<serde_json::Value, String> {
     let link = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
