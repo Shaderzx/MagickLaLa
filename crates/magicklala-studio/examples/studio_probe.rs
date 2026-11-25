@@ -3633,6 +3633,51 @@ fn tile_align() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn rename_keystrokes() -> Result<serde_json::Value, String> {
+    use magicklala_graph::{Value, VariableDef};
+    let link = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let mut spell = SpellGraph::new("Typed Rename");
+    spell.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("words", "text/template", 260.0, json!({ "template": "Need {{query}} now" })),
+        studio_node("wait", "time/delay", 520.0, json!({ "ms": "{{lim}}" })),
+        studio_node("reply", "io/send_message", 780.0, serde_json::Value::Null),
+    ];
+    spell.wires = vec![
+        link("k1", ("trigger", "out"), ("wait", "in")),
+        link("k2", ("wait", "out"), ("reply", "in")),
+        link("k3", ("trigger", "content"), ("words", "query")),
+        link("k4", ("words", "text"), ("reply", "content")),
+    ];
+    spell.variables = vec![VariableDef { name: "lim".to_owned(), ty: SocketType::Int, default: Some(Value::Int(5)), exposed: true }];
+    let mut rt = runtime_for(spell);
+    let target = "query_limit";
+    for end in 1..=target.len() {
+        let typed = target[..end].to_owned();
+        rt.update(move |app, _| {
+            if let Some(edit) = app.var_name_edits.first_mut() {
+                *edit = rune::TextEdit::new(typed.clone());
+            }
+            app.sync_edits();
+        });
+        rt.frame(0.0);
+    }
+    let check = validation_of(&mut rt)?;
+    let setting = |app: &StudioApp, id: &str, key: &str| app.spell.nodes.iter().find(|node| node.id.0 == id).and_then(|node| node.config.get(key).cloned()).unwrap_or_default();
+    Ok(json!({
+        "name": rt.state.spell.variables.first().map(|variable| variable.name.clone()),
+        "template": setting(&rt.state, "words", "template"),
+        "ms": setting(&rt.state, "wait", "ms"),
+        "queryWired": rt.state.spell.wires.iter().any(|wire| wire.to_node.0 == "words" && wire.to_socket == "query"),
+        "check": check["validation"],
+    }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9923,6 +9968,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("stub-clear") => stub_clear(),
         Some("kitchen-brewed-tidy") => kitchen_brewed_tidy(),
         Some("tile-align") => tile_align(),
+        Some("rename-keystrokes") => rename_keystrokes(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),

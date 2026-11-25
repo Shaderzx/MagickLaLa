@@ -2188,3 +2188,9 @@ test('The Model and Temperature tiles line up: at both sizes the temperature dia
     expect(report[width].label).toBe('Temperature');
   }
 });
+
+test('Typing a variable rename one key at a time never takes over a step input: renaming lim to query_limit passes through query, yet the Template that reads its wired query input keeps {{query}}, and only the Delay bound to the variable follows the new name', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['rename-keystrokes']);
+
+  expect(report).toEqual({ name: 'query_limit', template: 'Need {{query}} now', ms: '{{query_limit}}', queryWired: true, check: 'valid' });
+});
