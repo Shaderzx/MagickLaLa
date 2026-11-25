@@ -2341,18 +2341,6 @@ fn chip_width(line: &TraceLine, shape: &ChipShape) -> f32 {
     }
 }
 
-fn first_finishes<'a>(lines: impl Iterator<Item = &'a TraceLine>) -> Vec<&'a TraceLine> {
-    let mut seen: Vec<Option<&'a magicklala_graph::NodeId>> = Vec::new();
-    lines
-        .filter(|line| {
-            let node = line.node.as_ref();
-            let first = node.is_none() || !seen.contains(&node);
-            seen.push(node);
-            first
-        })
-        .collect()
-}
-
 fn log_chips<'a>(lines: &[&'a TraceLine], compact: bool, room_for_dots: usize, budget: f32) -> Vec<(&'a TraceLine, ChipShape)> {
     let mut chips = log_chips_by_count(lines, compact, room_for_dots);
     if !compact {
@@ -2554,8 +2542,23 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
     let pinned = (!app.trace_expanded && run_done && !blocked_pre_run).then(|| log_result(app, t)).flatten();
     let pinned_room = pinned.as_ref().map_or(0.0, |(_, width)| *width + 16.0);
     let budget = (app.size.0 - 32.0 - pinned_room).max(120.0);
-    let shown: Vec<&TraceLine> =
-        if pinned.is_some() { first_finishes(milestones.iter().copied().filter(|line| line.kind == "NodeFinished")) } else { milestones.clone() };
+    let numbers = crate::numbered_steps(&app.trace);
+    let number_of = |line: &TraceLine| numbers.iter().find(|(_, known)| std::ptr::eq(*known, line)).map(|(number, _)| number.clone());
+    let shown: Vec<&TraceLine> = if pinned.is_some() {
+        let mut seen: Vec<&str> = Vec::new();
+        numbers
+            .iter()
+            .filter(|(number, _)| !number.contains('.'))
+            .filter(|(number, _)| {
+                let fresh = !seen.contains(&number.as_str());
+                seen.push(number.as_str());
+                fresh
+            })
+            .map(|(_, line)| *line)
+            .collect()
+    } else {
+        milestones.clone()
+    };
     let chips = log_chips(&shown, !app.trace_expanded, ((app.size.0 - 420.0) / 32.0).max(0.0) as usize, budget);
     let total = chips.len();
     let mut step_num = 0usize;
@@ -2571,24 +2574,29 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
         match shape {
             ChipShape::Dot => {
                 step_num += 1;
+                let number = number_of(line).unwrap_or_else(|| step_num.to_string());
                 let mut dot = row()
                     .key(format!("log-step-{step_num}"))
                     .label(line.detail.clone())
-                    .size(22.0, 22.0)
+                    .min_w(22.0)
+                    .h(22.0)
+                    .px(if number.len() > 1 { 4.0 } else { 0.0 })
                     .radius(7.5)
                     .continuous_corners()
                     .items_center()
                     .justify_center()
-                    .fill(t.primary_bg)
-                    .child(figure(step_num.to_string(), 9.5, 750.0, t.primary_ink));
+                    .fill(if line.status == ExecutionStatus::Failed { t.hex } else { t.primary_bg })
+                    .child(figure(number, 9.5, 750.0, t.primary_ink));
                 if let Some(target_node) = line.node.clone() {
                     dot = dot.on_press(move |app: &mut StudioApp| app.canvas.select(Some(target_node.clone())));
                 }
                 return list.child(link(dot));
             }
             ChipShape::Span(count) => {
-                let first = step_num + 1;
+                let at = shown.iter().position(|known| std::ptr::eq(*known, line)).unwrap_or(0);
+                let first = number_of(line).unwrap_or_else(|| (step_num + 1).to_string());
                 step_num += count;
+                let step_num = shown.get(at + count - 1).and_then(|last| number_of(last)).unwrap_or_else(|| step_num.to_string());
                 let span = row()
                     .key("log-step-span")
                     .label(format!("Steps {first} to {step_num}"))
@@ -2634,16 +2642,22 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
             .items_center()
             .fill(if line.status == ExecutionStatus::Failed { t.hex_tint } else { t.card })
             .border(1.0, if line.status == ExecutionStatus::Failed { t.hex } else { t.rule_2 });
-        if line.kind == "NodeFinished" {
+        if let Some(number) = number_of(line).filter(|_| matches!(line.kind, "NodeFinished" | "NodeFailed")) {
             step_num += 1;
+            let failed = line.kind == "NodeFailed";
             entry = entry
-                .child(row().size(17.0, 17.0).radius(6.0).fill(t.primary_bg).items_center().justify_center().child(figure(
-                    step_num.to_string(),
-                    9.5,
-                    750.0,
-                    t.primary_ink,
-                )))
-                .child(label(&line.detail, 11.5, 600.0, t.ink));
+                .child(
+                    row()
+                        .min_w(17.0)
+                        .h(17.0)
+                        .px(if number.len() > 1 { 4.0 } else { 0.0 })
+                        .radius(6.0)
+                        .fill(if failed { t.hex } else { t.primary_bg })
+                        .items_center()
+                        .justify_center()
+                        .child(figure(number, 9.5, 750.0, t.primary_ink)),
+                )
+                .child(label(&line.detail, 11.5, 600.0, if failed { t.hex } else { t.ink }));
         } else if line.kind == "RunFinished" {
             let outcome = if line.detail == "Succeeded" || line.detail.is_empty() {
                 if app.active_release_version.is_some() { "Draft brewed" } else { "Brewed" }
