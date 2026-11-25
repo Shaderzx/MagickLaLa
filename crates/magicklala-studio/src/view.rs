@@ -1894,7 +1894,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         if node != &card.id || name != &socket.name {
             return None;
         }
-        let sources = app.plug_sources(&card.id, &socket.name);
+        let sources = app.earlier_fitting_outputs(&card.id, &socket.name);
         let mut menu =
             col().key(format!("plug-menu-{}", socket.name)).w_full().mt(4.0).mb(4.0).padding(6.0).gap(3.0).radius(10.0).fill(t.card).border(1.0, t.rule_2);
         if sources.is_empty() {

@@ -1867,28 +1867,27 @@ impl StudioApp {
         self.place_ingredient(kind, screen, wire_in)
     }
 
-    pub fn plug_sources(&self, node: &NodeId, socket: &str) -> Vec<SocketRef> {
+    pub fn earlier_fitting_outputs(&self, node: &NodeId, socket: &str) -> Vec<SocketRef> {
         let Some(to_ty) = self.canvas.card(node).and_then(|card| card.inputs.iter().find(|input| input.name == socket)).map(|input| input.ty) else {
             return Vec::new();
         };
         if to_ty.is_flow() {
             return Vec::new();
         }
-        let mut downstream: Vec<NodeId> = vec![node.clone()];
-        let mut index = 0;
-        while index < downstream.len() {
-            let at = downstream[index].clone();
-            for wire in self.canvas.wires.iter().filter(|wire| wire.from_node == at) {
-                if !downstream.contains(&wire.to_node) {
-                    downstream.push(wire.to_node.clone());
+        let mut earlier: Vec<NodeId> = Vec::new();
+        let mut frontier = vec![node.clone()];
+        while let Some(at) = frontier.pop() {
+            for wire in self.canvas.wires.iter().filter(|wire| wire.to_node == at) {
+                if &wire.from_node != node && !earlier.contains(&wire.from_node) {
+                    earlier.push(wire.from_node.clone());
+                    frontier.push(wire.from_node.clone());
                 }
             }
-            index += 1;
         }
         self.canvas
             .nodes
             .iter()
-            .filter(|card| !downstream.contains(&card.id))
+            .filter(|card| earlier.contains(&card.id) && !self.canvas.shelved.contains(&card.id))
             .flat_map(|card| {
                 card.outputs
                     .iter()
