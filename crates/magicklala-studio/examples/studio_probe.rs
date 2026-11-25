@@ -2723,6 +2723,44 @@ fn spawned_notes() -> Result<serde_json::Value, String> {
         spawned.into_iter().map(|(kind, id)| (kind, json!(id.and_then(|id| rt.state.canvas.notes.get(&id).cloned())))).collect();
     Ok(serde_json::Value::Object(notes))
 }
+fn pantry_filtered() -> Result<serde_json::Value, String> {
+    let mut report = serde_json::Map::new();
+    for size in [(960.0_f32, 640.0_f32), (1280.0, 800.0)] {
+        for query in ["on", "var"] {
+            let mut app = StudioApp::with_spell(crowded_kitchen(), registry_specs());
+            app.size = size;
+            app.left_rail_pinned = true;
+            app.palette_query = rune::TextEdit::new(query);
+            let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+            rt.frame(0.0);
+            rt.frame(3.0);
+            rt.frame(6.0);
+            let mut measure = studio_text_system();
+            let mut cut: Vec<String> = Vec::new();
+            let mut seen = 0;
+            for spec in rt.state.specs.clone().iter().filter(|spec| spec.title.to_ascii_lowercase().contains(query)) {
+                let key = format!("palette-{}", spec.kind.replace('/', "-"));
+                if layout_rect(&rt, &key).is_none() {
+                    continue;
+                }
+                seen += 1;
+                let lines = text_lines_under(&rt, &key);
+                let whole = lines.iter().map(|(line, _)| line.replace('\u{a0}', " ")).collect::<Vec<_>>().join(" ");
+                let Some((_, rect)) = lines.iter().find(|(line, _)| spec.title.starts_with(line.replace('\u{a0}', " ").as_str())) else {
+                    cut.push(spec.title.clone());
+                    continue;
+                };
+                let (natural, line_h) = measure.measure(&spec.title, rune::TextStyle::new(12.0, 550.0), 1.0);
+                let rows = (rect[3] / line_h).round().max(1.0);
+                if !whole.contains(spec.title.as_str()) || natural > rect[2] * rows + 2.0 || whole.contains('…') {
+                    cut.push(spec.title.clone());
+                }
+            }
+            report.insert(format!("{}-{query}", size.0), json!({ "seen": seen, "cut": cut }));
+        }
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8990,6 +9028,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("live-after-draft") => live_after_draft(),
         Some("bound-checks") => bound_checks(),
         Some("spawned-notes") => spawned_notes(),
+        Some("pantry-filtered") => pantry_filtered(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),

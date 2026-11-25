@@ -2000,3 +2000,12 @@ test('A step fresh from the Pantry shows the settings it will really use: model 
     'flow/switch': null,
   });
 });
+
+test('Filtering the Pantry never cuts a name: with "on" or "var" typed at both sizes every matching row shows its whole name as one wrapped title with the match picked out, and no row ends in an ellipsis', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['pantry-filtered']);
+
+  for (const [key, least] of [['960-on', 8], ['1280-on', 8], ['960-var', 4], ['1280-var', 4]] as const) {
+    expect(report[key].seen).toBeGreaterThanOrEqual(least);
+    expect({ key, cut: report[key].cut }).toEqual({ key, cut: [] });
+  }
+});
