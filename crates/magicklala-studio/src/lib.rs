@@ -1281,6 +1281,9 @@ impl StudioApp {
             let in_config = self.configs.get(&card.id).is_some_and(|cfg| {
                 cfg.as_object().is_some_and(|map| {
                     (renders && map.values().any(|v| v.as_str().is_some_and(|s| s.contains(&template_token))))
+                        || map.iter().any(|(key, value)| {
+                            !magicklala_graph::UNBOUND_SETTINGS.contains(&key.as_str()) && magicklala_graph::bound_variable(value) == Some(name)
+                        })
                         || (card.kind.starts_with("var/") && map.get("name").and_then(serde_json::Value::as_str) == Some(name))
                 })
             });
@@ -1715,7 +1718,16 @@ impl StudioApp {
 
     pub fn selected_temperature(&self) -> Option<f64> {
         let id = self.canvas.selection.as_ref()?;
-        self.configs.get(id).and_then(|c| c.get("temperature")).and_then(serde_json::Value::as_f64)
+        let setting = self.configs.get(id).and_then(|c| c.get("temperature"))?;
+        match self.temperature_variable(setting) {
+            Some(index) => self.var_default_edits.get(index).and_then(|edit| edit.text.trim().parse::<f64>().ok()),
+            None => setting.as_f64(),
+        }
+    }
+
+    fn temperature_variable(&self, setting: &serde_json::Value) -> Option<usize> {
+        let name = magicklala_graph::bound_variable(setting)?;
+        self.spell.variables.iter().position(|variable| variable.name == name)
     }
 
     pub fn selected_provider(&self) -> String {
@@ -1729,6 +1741,20 @@ impl StudioApp {
         }
         let current = self.selected_temperature().unwrap_or(0.7);
         let next = ((current + delta).clamp(0.0, 2.0) * 10.0).round() / 10.0;
+        let bound = self
+            .canvas
+            .selection
+            .as_ref()
+            .and_then(|id| self.configs.get(id))
+            .and_then(|c| c.get("temperature"))
+            .and_then(|setting| self.temperature_variable(setting));
+        if let Some(index) = bound {
+            if let Some(edit) = self.var_default_edits.get_mut(index) {
+                *edit = TextEdit::new(next.to_string());
+            }
+            self.sync_spell();
+            return;
+        }
         if let Some(id) = self.canvas.selection.clone() {
             let entry = self.configs.entry(id).or_insert_with(|| json!({}));
             if !entry.is_object() {
@@ -2920,6 +2946,26 @@ impl StudioApp {
     }
 
     fn undeclared_variable_findings(&self) -> Vec<HexFinding> {
+        let graph = self.brew_graph();
+        let bound = graph.nodes.iter().flat_map(|node| {
+            node.config
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(key, _)| !magicklala_graph::UNBOUND_SETTINGS.contains(&key.as_str()))
+                .filter_map(|(_, value)| magicklala_graph::bound_variable(value))
+                .filter(|name| !self.spell.variables.iter().any(|variable| variable.name == *name))
+                .map(move |name| {
+                    let readable = format!("{}: no variable is named {name}, add it on the Variables tab", self.canvas.display_title(&node.id));
+                    HexFinding { node: Some(node.id.clone()), socket: None, readable: readable.clone(), message: readable, mistyped: false }
+                })
+                .collect::<Vec<_>>()
+        });
+        let bound: Vec<HexFinding> = bound.collect();
+        bound.into_iter().chain(self.undeclared_variable_steps()).collect()
+    }
+
+    fn undeclared_variable_steps(&self) -> Vec<HexFinding> {
         self.brew_graph()
             .nodes
             .iter()
@@ -4001,13 +4047,13 @@ fn demo_spell() -> SpellGraph {
         |id: &str, kind: &str, position: [f32; 2], config: serde_json::Value| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position, config };
     spell.nodes = vec![
         place("trigger", "event/on_message", [0.0, 108.0], serde_json::Value::Null),
-        place("recall", "memory/search", [250.0, 12.0], serde_json::Value::Null),
+        place("recall", "memory/search", [250.0, 12.0], json!({ "limit": "{{max_memories}}" })),
         place("search", "knowledge/search", [500.0, 208.0], serde_json::Value::Null),
         place(
             "llm",
             "ai/generate_text",
             [750.0, 86.0],
-            json!({ "provider": "openai", "model": "gpt-4o-mini", "temperature": 0.4, "prompt": default_prompt("ai/generate_text") }),
+            json!({ "provider": "openai", "model": "gpt-4o-mini", "temperature": "{{temperature}}", "prompt": default_prompt("ai/generate_text") }),
         ),
         place("reply", "io/send_message", [1000.0, 128.0], serde_json::Value::Null),
     ];
@@ -4034,7 +4080,6 @@ fn demo_spell() -> SpellGraph {
 }
 fn variables() -> Vec<VariableDef> {
     vec![
-        VariableDef { name: "agent_name".to_owned(), ty: SocketType::String, default: Some(Value::String("Support Agent".to_owned())), exposed: true },
         VariableDef { name: "max_memories".to_owned(), ty: SocketType::Int, default: Some(Value::Int(5)), exposed: true },
         VariableDef { name: "temperature".to_owned(), ty: SocketType::Float, default: Some(Value::Float(0.4)), exposed: true },
     ]

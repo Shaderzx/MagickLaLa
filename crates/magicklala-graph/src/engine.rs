@@ -919,12 +919,32 @@ struct ExecContext {
     inputs: Inputs,
 }
 
+pub const UNBOUND_SETTINGS: [&str; 3] = ["template", "prompt", "script"];
+
+pub fn bound_variable(value: &serde_json::Value) -> Option<&str> {
+    value.as_str()?.trim().strip_prefix("{{")?.strip_suffix("}}").map(str::trim).filter(|name| !name.is_empty() && !name.contains(['{', '}']))
+}
+
+fn bound_settings(state: &RunState, mut node: NodeInstance) -> NodeInstance {
+    if let Some(settings) = node.config.as_object_mut() {
+        let variables = locked(&state.variables);
+        for (_, value) in settings.iter_mut().filter(|(key, _)| !UNBOUND_SETTINGS.contains(&key.as_str())) {
+            if let Some(found) = bound_variable(value).and_then(|name| variables.get(name)) {
+                *value = found.to_json();
+            }
+        }
+    }
+    node
+}
+
 impl ExecContext {
     fn flow(state: Arc<RunState>, node: NodeInstance, socket: &str, scope: Scope) -> Self {
+        let node = bound_settings(&state, node);
         Self { state, node, trigger_socket: Some(socket.to_owned()), memo: Memo::default(), scope, inputs: Inputs::Flow { fault: None } }
     }
 
     fn data(state: Arc<RunState>, node: NodeInstance, memo: Memo, scope: Scope, waiting_on: WaitCell) -> Self {
+        let node = bound_settings(&state, node);
         Self { state, node, trigger_socket: None, memo, scope, inputs: Inputs::Data { waiting_on } }
     }
 

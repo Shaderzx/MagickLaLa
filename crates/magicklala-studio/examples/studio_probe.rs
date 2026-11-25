@@ -2242,7 +2242,14 @@ fn bound_settings() -> Result<serde_json::Value, String> {
     dial.update(move |app, _| app.canvas.select(Some(picked.clone())));
     let shown = dial.state.selected_temperature();
     dial.update(|app, _| app.adjust_temperature(0.1));
-    let after_variable = dial.state.spell.variables.iter().find(|variable| variable.name == "temperature").and_then(|variable| variable.default.clone()).map(|value| format!("{value:?}"));
+    let after_variable = dial
+        .state
+        .spell
+        .variables
+        .iter()
+        .find(|variable| variable.name == "temperature")
+        .and_then(|variable| variable.default.clone())
+        .map(|value| format!("{value:?}"));
     let after_config = dial.state.spell.nodes.iter().find(|node| node.id == llm).and_then(|node| node.config.get("temperature").cloned());
     Ok(json!({
         "quick": { "check": check["validation"], "outcome": quick_outcome, "waitedForVariable": quick_ms >= 1700 },
@@ -5571,6 +5578,12 @@ fn honest_dials(db_path: &Path) -> Result<serde_json::Value, String> {
         .iter()
         .map(|variable| (variable.name.clone(), support.variable_binding_hint(&variable.name)))
         .filter(|(_, (_, linked))| *linked)
+        .filter(|(name, _)| {
+            !support.spell.nodes.iter().any(|node| {
+                let token = format!("{{{{{name}}}}}");
+                node.config.as_object().is_some_and(|settings| settings.values().any(|value| value.as_str().is_some_and(|text| text.contains(&token))))
+            })
+        })
         .map(|(name, (hint, _))| format!("{name} {hint}"))
         .collect();
     let mut greeting = SpellGraph::new("Greeting Agent");
