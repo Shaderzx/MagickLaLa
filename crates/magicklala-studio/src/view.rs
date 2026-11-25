@@ -2545,16 +2545,15 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
     let numbers = crate::numbered_steps(&app.trace);
     let number_of = |line: &TraceLine| numbers.iter().find(|(_, known)| std::ptr::eq(*known, line)).map(|(number, _)| number.clone());
     let shown: Vec<&TraceLine> = if pinned.is_some() {
+        let tops: Vec<&(String, &TraceLine)> = numbers.iter().filter(|(number, _)| !number.contains('.')).collect();
         let mut seen: Vec<&str> = Vec::new();
-        numbers
-            .iter()
-            .filter(|(number, _)| !number.contains('.'))
+        tops.iter()
             .filter(|(number, _)| {
                 let fresh = !seen.contains(&number.as_str());
                 seen.push(number.as_str());
                 fresh
             })
-            .map(|(_, line)| *line)
+            .map(|(number, first)| tops.iter().find(|(same, line)| same == number && line.kind == "NodeFailed").map_or(*first, |(_, failed)| *failed))
             .collect()
     } else {
         milestones.clone()
