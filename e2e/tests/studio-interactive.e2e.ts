@@ -2009,3 +2009,12 @@ test('Filtering the Pantry never cuts a name: with "on" or "var" typed at both s
     expect({ key, cut: report[key].cut }).toEqual({ key, cut: [] });
   }
 });
+
+test('A lone bottle tag sits centred until it has a step to show: before a brew the tag keeps its plain 10 point inset with no badge, and a bottle that fails during a brew wears its step number', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['stand-badge']);
+
+  expect(report.idleBadge).toBe(false);
+  expect(report.idleInset).toBe(10);
+  expect(report.failedStep).toBe(5);
+  expect(report.failedBadge).toBe('5');
+});

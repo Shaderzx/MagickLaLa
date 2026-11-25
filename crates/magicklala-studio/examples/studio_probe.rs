@@ -2761,6 +2761,43 @@ fn pantry_filtered() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn stand_badge() -> Result<serde_json::Value, String> {
+    let inset = |rt: &Runtime<StudioApp>| -> Option<f32> {
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let stand = layout_rect(rt, "node-reply-header")?;
+        let (_, line) = text_lines_under(rt, "node-reply-header").into_iter().find(|(line, _)| line == "io/send_message")?;
+        Some(((line[0] - stand[0]) / plan.scale).round())
+    };
+    let mut idle = runtime_for(StudioApp::from_registry().spell.clone());
+    idle.frame(1.0);
+    let idle_inset = inset(&idle);
+    let idle_badge = idle.presented("step-badge-reply").is_some();
+    let run = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4d11";
+    let at = "2026-11-25T10:00:00Z";
+    let spell_id = idle.state.spell.id.0.to_string();
+    let summary = json!({ "run_id": run, "spell_id": spell_id, "started_at": at, "finished_at": at, "status": "failed", "nodes_executed": 4, "outputs": {}, "error": "no channel" });
+    let events: Vec<magicklala_graph::TraceEvent> = [
+        json!({ "event": "run_started", "run_id": run, "spell_id": spell_id, "at": at }),
+        json!({ "event": "node_finished", "run_id": run, "node_id": "trigger", "at": at, "duration_ms": 1 }),
+        json!({ "event": "node_finished", "run_id": run, "node_id": "recall", "at": at, "duration_ms": 1 }),
+        json!({ "event": "node_finished", "run_id": run, "node_id": "search", "at": at, "duration_ms": 1 }),
+        json!({ "event": "node_finished", "run_id": run, "node_id": "llm", "at": at, "duration_ms": 1 }),
+        json!({ "event": "node_failed", "run_id": run, "node_id": "reply", "at": at, "error": "no channel" }),
+        json!({ "event": "run_finished", "run_id": run, "at": at, "summary": summary }),
+    ]
+    .into_iter()
+    .map(|event| serde_json::from_value(event).map_err(|error| error.to_string()))
+    .collect::<Result<_, _>>()?;
+    let mut failed = runtime_for(StudioApp::from_registry().spell.clone());
+    failed.update(move |app, _| {
+        app.pending_trace.extend(events.clone());
+        while app.step_trace() {}
+    });
+    failed.frame(1.0);
+    failed.frame(2.0);
+    let failed_badge = failed.presented("step-badge-reply").map(|_| words_of(&failed, "step-badge-reply"));
+    Ok(json!({ "idleInset": idle_inset, "idleBadge": idle_badge, "failedBadge": failed_badge, "failedStep": failed.state.canvas.card(&NodeId::from("reply")).and_then(|card| card.step_order) }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9029,6 +9066,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("bound-checks") => bound_checks(),
         Some("spawned-notes") => spawned_notes(),
         Some("pantry-filtered") => pantry_filtered(),
+        Some("stand-badge") => stand_badge(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
