@@ -1855,6 +1855,60 @@ fn empty_recipe() -> Result<serde_json::Value, String> {
         "sections": rt.find("recipe-overview").is_some(),
     }))
 }
+fn list_truth() -> Result<serde_json::Value, String> {
+    let mut imported = router_spell();
+    if let Some(node) = imported.nodes.iter_mut().find(|node| node.id.0 == "switch") {
+        node.config = json!({ "cases": ["north,west", "south"] });
+    }
+    let mut kept = runtime_for(imported);
+    let checked = validation_of(&mut kept)?;
+    let kept_cases = kept.state.spell.nodes.iter().find(|node| node.id.0 == "switch").and_then(|node| node.config.get("cases").cloned());
+    let shown = kept.state.prompts.get(&NodeId::from("switch")).map(|edit| edit.text.clone());
+    let kept_outputs = outputs_of(&kept.state, "switch");
+
+    let mut captions = serde_json::Map::new();
+    let mut lists = SpellGraph::new("Lists");
+    lists.nodes = vec![
+        studio_node("switch", "flow/switch", 0.0, serde_json::Value::Null),
+        studio_node("split", "flow/split", 0.0, serde_json::Value::Null),
+        studio_node("pick", "json/destructure", 0.0, serde_json::Value::Null),
+    ];
+    let mut captioned = runtime_for(lists);
+    for id in ["switch", "split", "pick"] {
+        captioned.update(move |app, _| app.canvas.select(Some(NodeId::from(id))));
+        captioned.frame(0.0);
+        captions.insert(id.to_owned(), json!(editor_caption(&captioned)));
+    }
+
+    let mut blank = runtime_for(router_spell());
+    type_prompt(&mut blank, &NodeId::from("switch"), ",")?;
+    let blank_check = validation_of(&mut blank)?;
+
+    let mut only_split = SpellGraph::new("Split");
+    only_split.nodes = vec![studio_node("fork", "flow/split", 0.0, serde_json::Value::Null)];
+    let mut split = runtime_for(only_split);
+    let split_id = split.state.canvas.nodes.first().map(|card| card.id.clone()).ok_or("no split")?;
+    let split_default = split.state.prompts.get(&split_id).map(|edit| edit.text.clone());
+    type_prompt(&mut split, &split_id, "left, right")?;
+    split.update(|app, _| app.sync_spell());
+    let split_outputs = outputs_of(&split.state, &split_id.0);
+
+    let mut stale = runtime_for(router_spell());
+    type_prompt(&mut stale, &NodeId::from("switch"), "refund, billing")?;
+    stale.update(|app, _| app.sync_spell());
+    connect(&mut stale, ("switch", "billing"), ("refund_reply", "in"))?;
+    type_prompt(&mut stale, &NodeId::from("switch"), "refund")?;
+    stale.update(|app, _| app.sync_spell());
+    let stale_check = validation_of(&mut stale)?;
+
+    Ok(json!({
+        "kept": { "check": checked["validation"], "cases": kept_cases, "shown": shown, "outputs": kept_outputs },
+        "captions": captions,
+        "blank": { "check": blank_check["validation"], "errors": blank_check["errors"] },
+        "split": { "default": split_default, "outputs": split_outputs },
+        "stale": { "check": stale_check["validation"], "errors": stale_check["errors"], "outputs": outputs_of(&stale.state, "switch") },
+    }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -7995,6 +8049,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("clear-signals") => clear_signals(),
         Some("pantry-settings") => pantry_settings(),
         Some("empty-recipe") => empty_recipe(),
+        Some("list-truth") => list_truth(),
         Some("pot-rect") => pot_rect(),
         Some("gateway-hint") => gateway_hint(),
         Some("honest-dials") => honest_dials(Path::new(args.get(1).ok_or("missing database path")?)),

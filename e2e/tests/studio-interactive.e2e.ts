@@ -1783,3 +1783,16 @@ test('A published potion keeps saying which version is live in the Potions list 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('List settings stay true: an imported case with a comma survives Check and shows quoted, the boxes are labelled Cases, Outputs and Keys, an empty case list is caught by Check, a Split shows only the outputs it lists, and a case still wired after it is removed is named by Check', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['list-truth']);
+
+  expect(report.kept).toEqual({ check: 'valid', cases: ['north,west', 'south'], shown: '"north,west", south', outputs: ['north,west', 'south', 'default'] });
+  expect(report.captions).toEqual({ switch: 'Cases', split: 'Outputs', pick: 'Keys' });
+  expect(report.blank.check).toBe('invalid');
+  expect(report.blank.errors.join(' ')).toMatch(/needs cases/);
+  expect(report.split).toEqual({ default: 'out_0, out_1', outputs: ['left', 'right'] });
+  expect(report.stale.check).toBe('invalid');
+  expect(report.stale.errors.join(' ')).toMatch(/billing/);
+  expect(report.stale.outputs).toEqual(['refund', 'billing', 'default']);
+});
