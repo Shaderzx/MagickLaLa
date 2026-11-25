@@ -983,8 +983,23 @@ pub(crate) fn rack_title(state: &CanvasState, id: &NodeId, budget: usize) -> Str
     let tail = &route[cut..];
     let room = budget.saturating_sub(head.chars().count() + 4).max(4);
     let count = tail.chars().count();
-    let tail: String = tail.chars().skip(count.saturating_sub(room)).collect();
-    format!("{head} · …{tail}")
+    let end: String = tail.chars().skip(count.saturating_sub(room)).collect();
+    if !others.iter().any(|other| other.ends_with(&end)) {
+        return format!("{head} · …{end}");
+    }
+    let lead = if cut > 0 { "…" } else { "" };
+    let room = if cut > 0 { room.saturating_sub(1).max(4) } else { room };
+    let start: String = tail.chars().take(room).collect();
+    if !others.iter().any(|other| other.starts_with(&format!("{}{start}", &route[..cut]))) {
+        return format!("{head} · {lead}{start}…");
+    }
+    let number = crate::brew::potion_ends(state)
+        .iter()
+        .filter(|other| state.display_title(other).split_once(" · ").is_some_and(|(their, _)| their == head))
+        .position(|other| other == id)
+        .map_or(1, |at| at + 1);
+    let short: String = tail.chars().take(room.saturating_sub(2).max(2)).collect();
+    format!("{head} · {lead}{short}… {number}")
 }
 
 fn title_lines(state: &CanvasState, plan: &BrewPlan, bottles: usize, id: &NodeId) -> f32 {
