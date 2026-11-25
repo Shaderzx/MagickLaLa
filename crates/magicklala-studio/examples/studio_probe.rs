@@ -5442,7 +5442,7 @@ fn hands_on() -> Result<serde_json::Value, String> {
     }))
 }
 fn many_bottle_spell(count: usize) -> SpellGraph {
-    let mut spell = SpellGraph::new(&format!("{count} Bottles"));
+    let mut spell = SpellGraph::new(format!("{count} Bottles"));
     let place = |id: &str, kind: &str, x: f32, y: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),
@@ -6427,7 +6427,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("honest-dials") => honest_dials(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("workbench-truths") => workbench_truths(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("hands-on") => hands_on(),
-        Some("crowded-bottles") => crowded_bottles(&args),
+        Some("crowded-bottles") => crowded_bottles(args),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("drawn-truths") => drawn_truths(),

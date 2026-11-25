@@ -109,16 +109,64 @@ fn rise_rank(plan: &BrewPlan, own: Option<&NodeId>) -> usize {
 }
 
 fn ribbon_route(plan: &BrewPlan, to: [f32; 2], own: Option<&NodeId>) -> Vec<[f32; 2]> {
+    ribbon_choices(plan, to, own).into_iter().next().unwrap_or_default()
+}
+
+fn ribbon_choices(plan: &BrewPlan, to: [f32; 2], own: Option<&NodeId>) -> Vec<Vec<[f32; 2]>> {
     let tap = spout_point(plan);
     let s = plan.scale.max(0.4);
     let lip_steps = 4 + rise_rank(plan, own) * 4;
     let lip: Vec<[f32; 2]> = (0..lip_steps).map(|step| [tap[0] + step as f32 * 4.0 * s, tap[1]]).collect();
-    let mut route = ribbon_course(plan, [tap[0] + lip_steps as f32 * 4.0 * s, tap[1]], to, own, s);
-    route.splice(0..0, lip);
-    route
+    ribbon_course(plan, [tap[0] + lip_steps as f32 * 4.0 * s, tap[1]], to, own, s)
+        .into_iter()
+        .map(|mut route| {
+            route.splice(0..0, lip.iter().copied());
+            route
+        })
+        .collect()
 }
 
-fn ribbon_course(plan: &BrewPlan, from: [f32; 2], to: [f32; 2], own: Option<&NodeId>, s: f32) -> Vec<[f32; 2]> {
+fn ribbon_body(plan: &BrewPlan, ribbon: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    let s = plan.scale.max(0.4);
+    let tap = ribbon.first().copied().unwrap_or_default();
+    let mouth = ribbon.last().copied().unwrap_or_default();
+    ribbon.iter().copied().filter(|p| (p[0] - tap[0]).hypot(p[1] - tap[1]) > 30.0 * s && (p[0] - mouth[0]).hypot(p[1] - mouth[1]) > 10.0 * s).collect()
+}
+
+fn ribbons_cross(plan: &BrewPlan, a: &[[f32; 2]], b: &[[f32; 2]]) -> bool {
+    let (a, b) = (ribbon_body(plan, a), ribbon_body(plan, b));
+    a.windows(2).any(|s| b.windows(2).any(|t| crosses(s[0], s[1], t[0], t[1])))
+}
+
+fn untangled(plan: &BrewPlan, choices: Vec<Vec<Vec<[f32; 2]>>>) -> Vec<Vec<[f32; 2]>> {
+    let mut picked: Vec<usize> = vec![0; choices.len()];
+    let crossings = |picked: &[usize], index: usize, option: usize| -> usize {
+        let mine = &choices[index][option];
+        choices.iter().enumerate().filter(|(other, _)| *other != index).filter(|(other, routes)| ribbons_cross(plan, mine, &routes[picked[*other]])).count()
+    };
+    for _ in 0..4 {
+        let mut changed = false;
+        for index in 0..choices.len() {
+            let now = crossings(&picked, index, picked[index]);
+            if now == 0 {
+                continue;
+            }
+            if let Some(better) = (0..choices[index].len())
+                .filter(|option| crossings(&picked, index, *option) < now)
+                .min_by_key(|option| (crossings(&picked, index, *option), *option))
+            {
+                picked[index] = better;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    choices.into_iter().zip(picked).map(|(mut routes, pick)| routes.swap_remove(pick)).collect()
+}
+
+fn ribbon_course(plan: &BrewPlan, from: [f32; 2], to: [f32; 2], own: Option<&NodeId>, s: f32) -> Vec<Vec<[f32; 2]>> {
     let own_tag = own.and_then(|id| plan.card(id)).map(|card| {
         let r = card.rect;
         [r[0] - 20.0 * s, r[1] + r[3] * 0.46 - 8.0 * s, r[2] + 28.0 * s, r[3] * 0.54 + 8.0 * s]
@@ -164,12 +212,9 @@ fn ribbon_course(plan: &BrewPlan, from: [f32; 2], to: [f32; 2], own: Option<&Nod
             dot / (pair[0][0].hypot(pair[0][1]) * pair[1][0].hypot(pair[1][1])) < 0.34
         })
     };
-    candidates
-        .into_iter()
-        .enumerate()
-        .min_by_key(|(order, points)| (hits(points), sharp(points), overshoot(points), *order))
-        .map(|(_, points)| points)
-        .unwrap_or_default()
+    let mut ranked: Vec<(usize, Vec<[f32; 2]>)> = candidates.into_iter().enumerate().collect();
+    ranked.sort_by_key(|(order, points)| (hits(points), sharp(points), overshoot(points), *order));
+    ranked.into_iter().map(|(_, points)| points).collect()
 }
 fn landing(plan: &BrewPlan, placed: &BrewCard, index: usize, spread: f32) -> ([f32; 2], f32) {
     if !plan.flank {
@@ -182,11 +227,140 @@ fn landing(plan: &BrewPlan, placed: &BrewCard, index: usize, spread: f32) -> ([f
     (rim_point(plan, share), (1.0 - depth) * 36.0 * plan.scale)
 }
 
+fn grid_ribbons(plan: &BrewPlan, bottles: &[&BrewCard]) -> Option<Vec<Vec<[f32; 2]>>> {
+    if bottles.len() < 4 {
+        return None;
+    }
+    let s = plan.scale.max(0.4);
+    let tap = spout_point(plan);
+    let mut by_x: Vec<usize> = (0..bottles.len()).collect();
+    by_x.sort_by(|a, b| bottles[*a].rect[0].total_cmp(&bottles[*b].rect[0]));
+    let mut columns: Vec<Vec<usize>> = Vec::new();
+    for index in by_x {
+        match columns.last_mut() {
+            Some(column) if (bottles[column[0]].rect[0] - bottles[index].rect[0]).abs() < 4.0 * s => column.push(index),
+            _ => columns.push(vec![index]),
+        }
+    }
+    for column in &mut columns {
+        column.sort_by(|a, b| bottles[*a].rect[1].total_cmp(&bottles[*b].rect[1]));
+    }
+    let rect = |index: usize| bottles[index].rect;
+    let left = |column: usize| rect(columns[column][0])[0];
+    let top = |column: usize| columns[column].iter().map(|index| rect(*index)[1]).fold(f32::MAX, f32::min);
+    let lip = tap[0] + 10.0 * s;
+    if left(0) < lip + 12.0 * s {
+        return None;
+    }
+    let turn_y = |column: usize, row: usize| -> f32 {
+        let below = rect(columns[column][row]);
+        if row == 0 {
+            below[1] - 10.0 * s
+        } else {
+            let above = rect(columns[column][row - 1]);
+            (above[1] + above[3] + below[1]) * 0.5
+        }
+    };
+    let mut lane_x: Vec<Option<f32>> = vec![None; bottles.len()];
+    for column in 1..columns.len() {
+        let rows = columns[column].len();
+        let gap = left(column) - (left(column - 1) + rect(columns[column - 1][0])[2]);
+        let step = (gap * 0.7 / rows as f32).min(6.0 * s);
+        let middle = left(column) - gap * 0.5;
+        for row in 0..rows {
+            lane_x[columns[column][row]] = Some(middle + ((rows - 1) as f32 * 0.5 - row as f32) * step);
+        }
+    }
+    let mut climbers: Vec<usize> = (1..columns.len()).flat_map(|column| columns[column].iter().copied()).collect();
+    climbers.sort_by(|a, b| lane_x[*a].unwrap_or_default().total_cmp(&lane_x[*b].unwrap_or_default()));
+    let lanes_floor = plan.lanes.map_or(f32::MIN, |[shelf_bottom, band]| shelf_bottom + band + 4.0 * s);
+    let mut ceiling = vec![0.0_f32; bottles.len()];
+    let mut previous = f32::MAX;
+    for index in &climbers {
+        let column = columns.iter().position(|column| column.contains(index)).unwrap_or(0);
+        let clear = (0..=column).map(top).fold(f32::MAX, f32::min) - 14.0 * s;
+        let height = clear.min(previous - 6.0 * s);
+        if height < lanes_floor {
+            return None;
+        }
+        ceiling[*index] = height;
+        previous = height;
+    }
+    let first: Vec<usize> = columns[0].clone();
+    let (mut up, mut down): (Vec<usize>, Vec<usize>) = (0..first.len()).partition(|row| turn_y(0, *row) < tap[1]);
+    up.sort_by(|a, b| turn_y(0, *b).total_cmp(&turn_y(0, *a)));
+    down.sort_by(|a, b| turn_y(0, *a).total_cmp(&turn_y(0, *b)));
+    let channel_right = left(0) - 8.0 * s;
+    let slots = climbers.len() + up.len().max(down.len());
+    let step = ((channel_right - lip) / slots.max(1) as f32).min(7.0 * s);
+    let mut climb_x = vec![0.0_f32; bottles.len()];
+    for (rank, row) in up.iter().enumerate() {
+        climb_x[first[*row]] = channel_right - rank as f32 * step;
+    }
+    for (rank, row) in down.iter().enumerate() {
+        climb_x[first[*row]] = channel_right - rank as f32 * step;
+    }
+    for (rank, index) in climbers.iter().enumerate() {
+        climb_x[*index] = channel_right - (up.len() + rank) as f32 * step;
+    }
+    let routes = (0..bottles.len())
+        .map(|index| {
+            let neck = bottle_neck(bottles[index], true);
+            let column = columns.iter().position(|column| column.contains(&index)).unwrap_or(0);
+            let row = columns[column].iter().position(|other| *other == index).unwrap_or(0);
+            let turn = turn_y(column, row);
+            let corners = match lane_x[index] {
+                None => vec![tap, [climb_x[index], tap[1]], [climb_x[index], turn], [neck[0], turn], neck],
+                Some(lane) => {
+                    vec![tap, [climb_x[index], tap[1]], [climb_x[index], ceiling[index]], [lane, ceiling[index]], [lane, turn], [neck[0], turn], neck]
+                }
+            };
+            rounded_route(&corners, 9.0 * s, 5.0 * s)
+        })
+        .collect();
+    Some(routes)
+}
+
+fn rounded_route(corners: &[[f32; 2]], radius: f32, spacing: f32) -> Vec<[f32; 2]> {
+    let mut bent = vec![corners[0]];
+    for window in corners.windows(3) {
+        let (a, b, c) = (window[0], window[1], window[2]);
+        let into = (b[0] - a[0]).hypot(b[1] - a[1]);
+        let out = (c[0] - b[0]).hypot(c[1] - b[1]);
+        let r = radius.min(into * 0.5).min(out * 0.5);
+        if r < 0.5 || into < 0.01 || out < 0.01 {
+            bent.push(b);
+            continue;
+        }
+        let start = [b[0] + (a[0] - b[0]) / into * r, b[1] + (a[1] - b[1]) / into * r];
+        let end = [b[0] + (c[0] - b[0]) / out * r, b[1] + (c[1] - b[1]) / out * r];
+        for step in 0..=6 {
+            let t = step as f32 / 6.0;
+            let mt = 1.0 - t;
+            bent.push([mt * mt * start[0] + 2.0 * mt * t * b[0] + t * t * end[0], mt * mt * start[1] + 2.0 * mt * t * b[1] + t * t * end[1]]);
+        }
+    }
+    bent.push(corners[corners.len() - 1]);
+    let mut dense = vec![bent[0]];
+    for pair in bent.windows(2) {
+        let length = (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1]);
+        let pieces = (length / spacing.max(1.0)).ceil().max(1.0) as usize;
+        for piece in 1..=pieces {
+            let t = piece as f32 / pieces as f32;
+            dense.push([pair[0][0] + (pair[1][0] - pair[0][0]) * t, pair[0][1] + (pair[1][1] - pair[0][1]) * t]);
+        }
+    }
+    dense
+}
 pub fn ribbon_paths(plan: &BrewPlan) -> Vec<Vec<[f32; 2]>> {
     let bottles: Vec<&BrewCard> = plan.with_role(BrewRole::Bottle).collect();
     let multi = bottles.len() > 1;
     let ghost = plan.ghost_bottle.map(|ghost| ribbon_route(plan, ghost_neck(ghost), None));
-    bottles.iter().map(|placed| ribbon_route(plan, bottle_neck(placed, multi), Some(&placed.id))).chain(ghost).collect()
+    if let Some(grid) = grid_ribbons(plan, &bottles) {
+        return grid.into_iter().chain(ghost).collect();
+    }
+    let choices: Vec<Vec<Vec<[f32; 2]>>> = bottles.iter().map(|placed| ribbon_choices(plan, bottle_neck(placed, multi), Some(&placed.id))).collect();
+    untangled(plan, choices).into_iter().chain(ghost).collect()
 }
 
 fn ghost_neck(ghost: [f32; 4]) -> [f32; 2] {
@@ -475,14 +649,15 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
             _ => pouring_stream_shape(shape, vial_mouth(placed, plan), to, style),
         };
     }
-    for placed in &bottles {
+    let ribbons = ribbon_paths(plan);
+    for (placed, ribbon) in bottles.iter().zip(&ribbons) {
         let Some(card) = state.card(&placed.id) else { continue };
         let taken = matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Running);
         let untaken = state.has_run() && !taken;
         let ribbon_mood = if multi && taken { CauldronMood::Brewed } else { mood };
         shape = distillation_ribbon_shape(
             shape,
-            &ribbon_route(plan, bottle_neck(placed, multi), Some(&placed.id)),
+            ribbon,
             ribbon_mood,
             state.light,
             taken,
@@ -490,8 +665,8 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
             if multi { bottle_tint(state, plan, &placed.id) } else { potion_tint(state, plan) },
         );
     }
-    if let Some(ghost) = plan.ghost_bottle {
-        shape = distillation_ribbon_shape(shape, &ribbon_route(plan, ghost_neck(ghost), None), CauldronMood::Empty, state.light, false, false, None);
+    if let Some(ghost) = ribbons.get(bottles.len()).filter(|_| plan.ghost_bottle.is_some()) {
+        shape = distillation_ribbon_shape(shape, ghost, CauldronMood::Empty, state.light, false, false, None);
     }
     shape
 }
