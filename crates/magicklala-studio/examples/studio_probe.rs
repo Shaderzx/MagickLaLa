@@ -2080,7 +2080,9 @@ fn pantry_whole() -> Result<serde_json::Value, String> {
             seen += 1;
             let (natural, line_h) = measure.measure(&spec.title, rune::TextStyle::new(12.0, 550.0), 1.0);
             let lines = (rect[3] / line_h).round().max(1.0);
-            if natural > rect[2] * lines + 2.0 {
+            let row = layout_rect(&rt, &key).unwrap_or(rect);
+            let room = row[0] + row[2] - 7.0 - 22.0 - 4.0;
+            if natural > rect[2] * lines + 2.0 || rect[0] + rect[2] > room + 0.5 {
                 cut.push(spec.title.clone());
             }
         }
