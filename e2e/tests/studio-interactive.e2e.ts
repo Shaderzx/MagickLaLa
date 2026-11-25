@@ -2135,3 +2135,9 @@ test('Check judges a bound loop limit even without a value to read: a Float vari
   expect(report.unset).toEqual(['While Loop: max iterations needs a whole number of at least 1, but the variable limit has no value']);
   expect(report.flag).toEqual(['While Loop: max iterations needs a whole number of at least 1, but the variable limit holds true or false']);
 });
+
+test('A step that finishes a pass and then fails shows its failure in the log: a While Loop that hits its limit reads as a red failed step 2 with the limit message, not as a green finish', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['finish-then-fail-log']);
+
+  expect(report.log).toBe('1 On Message · 1ms 2 While Loop: while loop exceeded max_iterations 1');
+});

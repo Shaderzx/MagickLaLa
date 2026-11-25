@@ -3381,6 +3381,34 @@ fn bound_unset() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn finish_then_fail_log() -> Result<serde_json::Value, String> {
+    let mut spell = SpellGraph::new("Late Failure");
+    spell.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("loop", "flow/while_loop", 260.0, json!({ "max_iterations": 1 })),
+    ];
+    let run = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4d31";
+    let at = "2026-11-25T10:00:00Z";
+    let spell_id = spell.id.0.to_string();
+    let summary = json!({ "run_id": run, "spell_id": spell_id, "started_at": at, "finished_at": at, "status": "failed", "nodes_executed": 2, "outputs": {}, "error": "limit" });
+    let events: Vec<magicklala_graph::TraceEvent> = [
+        json!({ "event": "run_started", "run_id": run, "spell_id": spell_id, "at": at }),
+        json!({ "event": "node_finished", "run_id": run, "node_id": "trigger", "at": at, "duration_ms": 1 }),
+        json!({ "event": "node_finished", "run_id": run, "node_id": "loop", "at": at, "duration_ms": 1 }),
+        json!({ "event": "node_failed", "run_id": run, "node_id": "loop", "at": at, "error": "while loop exceeded max_iterations 1" }),
+        json!({ "event": "run_finished", "run_id": run, "at": at, "summary": summary }),
+    ]
+    .into_iter()
+    .map(|event| serde_json::from_value(event).map_err(|error| error.to_string()))
+    .collect::<Result<_, _>>()?;
+    let mut rt = runtime_for(spell);
+    rt.update(move |app, _| {
+        app.pending_trace.extend(events.clone());
+        while app.step_trace() {}
+    });
+    rt.frame(1.0);
+    Ok(json!({ "log": texts_under(&mut rt, "trace-scroll") }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9665,6 +9693,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("gemini-pick") => gemini_pick(),
         Some("redo-then-undo") => redo_then_undo(),
         Some("bound-unset") => bound_unset(),
+        Some("finish-then-fail-log") => finish_then_fail_log(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
