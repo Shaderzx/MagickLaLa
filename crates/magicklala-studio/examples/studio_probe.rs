@@ -3787,6 +3787,48 @@ fn stacked_pot_clear() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn solo_tag_whole() -> Result<serde_json::Value, String> {
+    let mut report = serde_json::Map::new();
+    let scenes = [
+        ("research-pantry@960", example("parallel_research.json")?, (960.0_f32, 640.0_f32), true, false),
+        ("dozen-checked@960", dozen_ingredient_spell(), (960.0, 640.0), false, true),
+        ("research@1280", example("parallel_research.json")?, (1280.0, 800.0), false, false),
+    ];
+    for (name, spell, size, pantry, check) in scenes {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        if pantry {
+            click(&mut rt, "expand-nodes")?;
+        }
+        if check {
+            let _ = validation_of(&mut rt)?;
+        }
+        rt.frame(3.0);
+        rt.frame(6.0);
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let Some(bottle) = plan.with_role(magicklala_canvas::BrewRole::Bottle).next().map(|card| card.id.clone()) else { continue };
+        let wanted = [(rt.state.spell.name.clone(), 13.0_f32, 750.0_f32), (rt.state.canvas.display_title(&bottle), 12.0, 600.0)];
+        let lines = text_lines_under(&rt, &format!("node-{}-header", bottle.0));
+        let mut measure = studio_text_system();
+        let mut cut = Vec::new();
+        for (words, size, weight) in wanted {
+            let Some((_, rect)) = lines.iter().find(|(line, _)| line.replace('\u{a0}', " ") == words) else {
+                cut.push(format!("{words}: not shown"));
+                continue;
+            };
+            let font = size.max(10.5 / plan.scale);
+            let (natural, line_h) = measure.measure(&words, rune::TextStyle::new(font, weight), 1.0);
+            let rows = (rect[3] / (line_h * plan.scale)).round().max(1.0);
+            if natural * plan.scale > rect[2] * rows + 2.0 {
+                cut.push(words);
+            }
+        }
+        report.insert(name.to_owned(), json!({ "cut": cut }));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -10475,6 +10517,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("small-rack-rows") => small_rack_rows(),
         Some("plank-clear") => plank_clear(),
         Some("stacked-pot-clear") => stacked_pot_clear(),
+        Some("solo-tag-whole") => solo_tag_whole(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

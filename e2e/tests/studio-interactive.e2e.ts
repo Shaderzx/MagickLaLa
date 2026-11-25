@@ -2318,3 +2318,12 @@ test('A crowded stacked pot keeps its rim clear: with eight or more pours on lan
   }
   expect(Object.values<any>(report).some((pot) => pot.crowded)).toBe(true);
 });
+
+test('A lone bottle shows its names whole: the potion name and the bottle name on a single-bottle tag wrap instead of ending in an ellipsis, at 960 with the Pantry open, after Check, and at 1280', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['solo-tag-whole']);
+
+  expect(Object.keys(report).length).toBe(3);
+  for (const [scene, tag] of Object.entries<any>(report)) {
+    expect({ scene, cut: tag.cut }).toEqual({ scene, cut: [] });
+  }
+});
