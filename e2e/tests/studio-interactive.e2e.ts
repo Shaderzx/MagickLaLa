@@ -2341,3 +2341,16 @@ test('Recipe plugs a missing input without leaving the Cauldron: a Send Message 
   expect(report.forkOffered).toContain('trigger-content');
   expect(report.forkOffered.filter((source: string) => source.startsWith('other-') || source.startsWith('spare-'))).toEqual([]);
 });
+
+test('Plug in and Unplug are real buttons: on the Recipe rows of a step missing its query and a step whose query is wired, both buttons are at least 24 points wide and tall at 1280 and 960, and Missing reads as plain red text no taller than a line, not a second pill', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['plug-target-size']);
+
+  for (const width of ['1280', '960']) {
+    const sizes = report[width];
+    expect(sizes.plug[0], width).toBeGreaterThanOrEqual(24);
+    expect(sizes.plug[1], width).toBeGreaterThanOrEqual(24);
+    expect(sizes.unplug[0], width).toBeGreaterThanOrEqual(24);
+    expect(sizes.unplug[1], width).toBeGreaterThanOrEqual(24);
+    expect(sizes.missingPill, width).toBe(false);
+  }
+});

@@ -1546,6 +1546,17 @@ fn capture_surfaces(out_dir: &Path) -> Result<serde_json::Value, String> {
     save("21-crowded-kitchen-960x640.png", shelf(crowded_kitchen(), (960.0, 640.0), false, true, false)?)?;
     save("22-crowded-kitchen-dark-1280x800.png", shelf(crowded_kitchen(), (1280.0, 800.0), true, false, true)?)?;
     save("23-crowded-kitchen-brewed-960x640.png", shelf(crowded_kitchen(), (960.0, 640.0), false, false, true)?)?;
+    let plugging = |dark: bool, size: (f32, f32)| {
+        let mut open = build_invalid(dark);
+        open.size = size;
+        let viewport = open.canvas_size();
+        open.canvas.fit(viewport);
+        open.right_tab = RightTab::Inspector;
+        open.toggle_plug_menu(&NodeId::from("recall"), "query");
+        open
+    };
+    save("24-plug-in-menu-1280x800.png", plugging(false, (1280.0, 800.0)))?;
+    save("25-plug-in-menu-dark-960x640.png", plugging(true, (960.0, 640.0)))?;
 
     Ok(json!({ "surfaces": files }))
 }
@@ -3899,6 +3910,27 @@ fn recipe_plug() -> Result<serde_json::Value, String> {
         "afterUnplug": feeds(&rt),
     }))
 }
+fn plug_target_size() -> Result<serde_json::Value, String> {
+    let mut demo = StudioApp::from_registry().spell.clone();
+    demo.wires.retain(|wire| wire.to_socket != "query" || wire.to_node.0 != "recall");
+    let mut report = serde_json::Map::new();
+    for size in [(1280.0_f32, 800.0_f32), (960.0, 640.0)] {
+        let mut app = StudioApp::with_spell(demo.clone(), registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        let _ = validation_of(&mut rt)?;
+        rt.update(|app, _| app.canvas.select(Some(NodeId::from("recall"))));
+        rt.frame(1.0);
+        let plug = layout_rect(&rt, "plug-query").map(|rect| [rect[2].round(), rect[3].round()]);
+        let missing_pill = layout_rect(&rt, "socket-missing-query").is_none_or(|rect| rect[3] > 16.0);
+        rt.update(|app, _| app.canvas.select(Some(NodeId::from("search"))));
+        rt.frame(2.0);
+        let unplug = layout_rect(&rt, "unplug-query").map(|rect| [rect[2].round(), rect[3].round()]);
+        report.insert(format!("{}", size.0), json!({ "plug": plug, "unplug": unplug, "missingPill": missing_pill }));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -6157,6 +6189,11 @@ fn shot(args: &[String]) -> Result<serde_json::Value, String> {
     let out = PathBuf::from(args.get(4).ok_or("missing output")?);
     let spell = match name.as_str() {
         "support" => StudioApp::from_registry().spell.clone(),
+        "support-hexed" => {
+            let mut hexed = StudioApp::from_registry().spell.clone();
+            hexed.wires.retain(|wire| !(wire.to_node.0 == "recall" && wire.to_socket == "query"));
+            hexed
+        }
         "dozen" => dozen_ingredient_spell(),
         "kitchen" => crowded_kitchen(),
         other => example(other)?,
@@ -6169,7 +6206,7 @@ fn shot(args: &[String]) -> Result<serde_json::Value, String> {
     if asked("dark") {
         rt.update(|app, _| app.toggle_theme());
     }
-    if asked("pantry") {
+    if asked("pantry") && rt.find("expand-nodes").is_some() {
         click(&mut rt, "expand-nodes")?;
         rt.frame(2.0);
     }
@@ -6188,6 +6225,18 @@ fn shot(args: &[String]) -> Result<serde_json::Value, String> {
     {
         right_click(&mut rt, (card[0] + card[2] * 0.5, card[1] + card[3] * 0.5));
         rt.frame(4.0);
+    }
+    if asked("plug") {
+        let _ = validation_of(&mut rt)?;
+        let hexed =
+            rt.state.canvas.nodes.iter().find_map(|card| card.inputs.iter().find(|input| input.flagged).map(|input| (card.id.clone(), input.name.clone())));
+        let (node, socket) = hexed.ok_or("no step is missing an input to plug")?;
+        rt.update(move |app, _| {
+            app.canvas.select(Some(node.clone()));
+            app.right_tab = RightTab::Inspector;
+            app.toggle_plug_menu(&node, &socket);
+        });
+        rt.frame(5.0);
     }
     let app = std::mem::replace(&mut rt.state, StudioApp::from_registry());
     render_headless_snapshot_state(&out, app).map_err(|error| error.to_string())?;
@@ -10589,6 +10638,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("stacked-pot-clear") => stacked_pot_clear(),
         Some("solo-tag-whole") => solo_tag_whole(),
         Some("recipe-plug") => recipe_plug(),
+        Some("plug-target-size") => plug_target_size(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),
