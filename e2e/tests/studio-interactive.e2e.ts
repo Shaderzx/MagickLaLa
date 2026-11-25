@@ -1843,9 +1843,10 @@ test('An empty pot offers only things you can press: no lone heading, the trigge
   expect(report.compact).toEqual({ inertHeading: false, offered: 6, glowing: 0, starters: 6, pantryRows: 0 });
 });
 
-test('Potions flow downhill: in every everyday layout at 1280 and 960 no bottle neck sits above the cauldron tap, and two or three bottles read in recipe order left to right then top to bottom', { timeout: 900_000 }, async () => {
+test('Potions flow downhill: in every everyday layout at 1280 and 960 no bottle neck sits above the cauldron tap, two or three bottles read in recipe order left to right then top to bottom, and no ingredient kind line is cut', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['downhill']);
 
   expect(report.uphill).toEqual([]);
   expect(report.misordered).toEqual([]);
+  expect(report.cutKinds).toEqual([]);
 });

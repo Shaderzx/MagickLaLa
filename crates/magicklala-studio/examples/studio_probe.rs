@@ -2129,6 +2129,7 @@ fn downhill() -> Result<serde_json::Value, String> {
     ];
     let mut uphill: Vec<String> = Vec::new();
     let mut misordered: Vec<String> = Vec::new();
+    let mut cut_kinds: Vec<String> = Vec::new();
     for (name, spell, size) in scenes {
         let mut app = StudioApp::with_spell(spell, registry_specs());
         app.size = size;
@@ -2143,6 +2144,15 @@ fn downhill() -> Result<serde_json::Value, String> {
                 uphill.push(format!("{name} {} {:.0}", rt.state.canvas.display_title(&card.id), tap[1] - neck[1]));
             }
         }
+        let mut measure = studio_text_system();
+        for card in plan.with_role(magicklala_canvas::BrewRole::Ingredient) {
+            let Some(model) = rt.state.canvas.card(&card.id) else { continue };
+            let Some((_, rect)) = text_lines_under(&rt, &format!("node-{}", card.id.0)).into_iter().find(|(line, _)| line == &model.kind) else { continue };
+            let (natural, _) = measure.measure(&model.kind, rune::TextStyle::new(11.5_f32.max(10.5 / plan.scale), 500.0).mono(), 1.0);
+            if natural * plan.scale > rect[2] + 2.0 {
+                cut_kinds.push(format!("{name} {}", model.kind));
+            }
+        }
         let mut reading: Vec<(i32, f32, NodeId)> = bottles.iter().map(|card| ((card.rect[1] / (card.rect[3] * 0.6)).floor() as i32, card.rect[0], card.id.clone())).collect();
         reading.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
         let read: Vec<String> = reading.iter().map(|(_, _, id)| rt.state.canvas.display_title(id)).collect();
@@ -2151,7 +2161,7 @@ fn downhill() -> Result<serde_json::Value, String> {
             misordered.push(format!("{name}: {} vs {}", read.join(","), listed.join(",")));
         }
     }
-    Ok(json!({ "uphill": uphill, "misordered": misordered }))
+    Ok(json!({ "uphill": uphill, "misordered": misordered, "cutKinds": cut_kinds }))
 }
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
