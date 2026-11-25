@@ -2943,10 +2943,17 @@ fn menu_fan() -> Result<serde_json::Value, String> {
     let mut docked_off_recipe = Vec::new();
     let mut docked_outside_scroll = Vec::new();
     let mut docked = 0;
-    for spell in [StudioApp::from_registry().spell.clone(), example("parallel_research.json")?] {
+    let mut on_switcher = Vec::new();
+    let scenes = [
+        (StudioApp::from_registry().spell.clone(), (960.0_f32, 640.0_f32)),
+        (example("parallel_research.json")?, (960.0, 640.0)),
+        (StudioApp::from_registry().spell.clone(), (1280.0, 800.0)),
+        (example("parallel_research.json")?, (1280.0, 800.0)),
+    ];
+    for (spell, size) in scenes {
         let mut app = StudioApp::with_spell(spell, registry_specs());
-        app.size = (960.0, 640.0);
-        let mut rt = Runtime::new(app, studio_view, (960.0, 640.0), Env::new(true, 1.0));
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
         rt.frame(0.0);
         let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
         let s = plan.scale;
@@ -2978,7 +2985,10 @@ fn menu_fan() -> Result<serde_json::Value, String> {
                     docked_outside_scroll.push(id.0.clone());
                 }
             } else if rects_overlap(menu, fan) {
-                floating_on_fan.push(format!("{} {}", rt.state.spell.name, id.0));
+                floating_on_fan.push(format!("{}@{} {}", rt.state.spell.name, size.0, id.0));
+            }
+            if ["mode-cauldron", "mode-grimoire"].iter().filter_map(|key| layout_rect(&rt, key)).any(|pill| rects_overlap(menu, pill)) {
+                on_switcher.push(format!("{}@{} {}", rt.state.spell.name, size.0, id.0));
             }
         }
         rt.update(|app, _| app.right_tab = RightTab::Variables);
@@ -2987,7 +2997,7 @@ fn menu_fan() -> Result<serde_json::Value, String> {
             docked_off_recipe.push("shown on Variables".to_owned());
         }
     }
-    Ok(json!({ "floatingOnFan": floating_on_fan, "docked": docked, "dockedOffRecipe": docked_off_recipe, "dockedOutsideScroll": docked_outside_scroll }))
+    Ok(json!({ "onSwitcher": on_switcher, "floatingOnFan": floating_on_fan, "docked": docked, "dockedOffRecipe": docked_off_recipe, "dockedOutsideScroll": docked_outside_scroll }))
 }
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");

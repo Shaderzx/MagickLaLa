@@ -2037,10 +2037,11 @@ test('Long bottle names never break the rack: three long route names wrap whole 
   }
 });
 
-test('At 960 by 640 a card menu never floats over the pour fan: it either finds clear canvas or docks into the Recipe tab, opening that tab and sitting inside its scroll, and it does not follow you onto Variables', { timeout: 900_000 }, async () => {
+test('A card menu never floats over the pour fan or the Cauldron and Grimoire switch at either size: it either finds clear canvas or docks into the Recipe tab, opening that tab and sitting inside its scroll, and it does not follow you onto Variables', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['menu-fan']);
 
   expect(report.floatingOnFan).toEqual([]);
+  expect(report.onSwitcher).toEqual([]);
   expect(report.docked).toBeGreaterThan(0);
   expect(report.dockedOffRecipe).toEqual([]);
   expect(report.dockedOutsideScroll).toEqual([]);
