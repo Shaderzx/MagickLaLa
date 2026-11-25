@@ -2,6 +2,7 @@ pub mod brew;
 pub mod camera;
 pub mod cauldron;
 pub mod hearth;
+pub mod measure;
 pub mod model;
 pub mod view;
 

@@ -244,7 +244,7 @@ pub(crate) fn rack_title_lines(title: &str, bottles: usize, scale: f32) -> f32 {
         return 1.0;
     }
     let size = crate::view::legible_size(12.5, scale);
-    (title.chars().count() as f32 * 0.56 * size / (RACK_BOTTLE_SIZE[0] - 10.0)).ceil().clamp(1.0, 4.0)
+    crate::measure::wrapped_lines(title, size, 750.0, RACK_BOTTLE_SIZE[0] - 20.0).clamp(1.0, 4.0)
 }
 
 fn rack_tag_room(state: &CanvasState, bottles: &[NodeId], scale: f32) -> f32 {

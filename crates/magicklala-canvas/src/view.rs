@@ -281,7 +281,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         let pill_clear = if step_num.is_some() { legible(11.0) * 1.8 + 2.0 } else { 10.0 };
         let pill_icon = if dense || crammed { 10.0 + badge + 6.0 } else { 10.0 };
         let pill_room = dims[0] - pill_clear - pill_icon - 12.0;
-        let fits = |label: &String| label.chars().count() as f32 * 0.58 * legible(11.0) <= pill_room;
+        let fits = |label: &String| crate::measure::text_width(label, legible(11.0), 750.0) <= pill_room;
         let missing_label = match flagged.first() {
             Some(s) => {
                 let (verb, short) = if s.mistyped { ("Wrong type", "Wrong") } else { ("Missing", "No") };
@@ -498,7 +498,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     let icon_side = if dense || crammed { 10.0 + badge + 6.0 } else { 10.0 };
     let chip_bottom = -12.0 + chip_font * 1.25 + 3.0;
     let title_top = (dims[1] - title_size * 1.25) * 0.5;
-    let title_right = step_pad + state.display_title(&card.id).chars().count() as f32 * 0.56 * title_size;
+    let title_right = step_pad + crate::measure::text_width(&state.display_title(&card.id), title_size, 750.0);
     let chip_left = dims[0] - icon_side - (chip_font + 11.0);
     let chip_on_name = (dense || crammed) && card.status == ExecutionStatus::Succeeded && chip_bottom > title_top && (mirrored || title_right > chip_left);
     let chip_on_card_above = rows_too_tight_for_chips && card.status == ExecutionStatus::Succeeded;

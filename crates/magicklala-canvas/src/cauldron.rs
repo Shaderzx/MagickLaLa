@@ -1039,9 +1039,9 @@ pub(crate) fn rack_title(state: &CanvasState, id: &NodeId, budget: usize) -> Str
 
 fn title_lines(state: &CanvasState, plan: &BrewPlan, bottles: usize, id: &NodeId) -> f32 {
     let size = crate::view::legible_size(12.5, plan.scale);
-    let inner = crate::brew::RACK_BOTTLE_SIZE[0] - 10.0;
+    let inner = crate::brew::RACK_BOTTLE_SIZE[0] - 20.0;
     if bottles <= 3 {
-        return (state.display_title(id).chars().count() as f32 * 0.56 * size / inner).ceil().clamp(1.0, 4.0);
+        return crate::measure::wrapped_lines(&state.display_title(id), size, 750.0, inner).clamp(1.0, 4.0);
     }
     let budget = ((crate::brew::RACK_BOTTLE_SIZE[0] - 18.0) / (0.62 * size)).floor().max(4.0) as usize * 2;
     let title = rack_title(state, id, budget);

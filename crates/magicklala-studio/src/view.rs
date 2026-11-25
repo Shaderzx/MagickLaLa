@@ -395,7 +395,15 @@ fn status_chip(app: &StudioApp, empty: bool, t: &HearthPalette) -> El {
         .child(label(caption, 11.0, 650.0, ink))
 }
 
+fn studio_text_width(text: &str, size: f32, weight: f32) -> f32 {
+    thread_local! {
+        static MEASURE: std::cell::RefCell<rune::text::TextSystem> = std::cell::RefCell::new(crate::studio_text_system());
+    }
+    MEASURE.with(|measure| measure.borrow_mut().measure(text, rune::TextStyle::new(size, weight), 1.0).0)
+}
+
 pub fn studio_view(app: &StudioApp, _: &mut Cx<StudioApp>) -> El {
+    magicklala_canvas::measure::use_text_width(studio_text_width);
     let t = tones(app.theme);
     let middle = row()
         .key("workspace")
