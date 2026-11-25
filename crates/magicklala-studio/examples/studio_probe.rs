@@ -4236,6 +4236,53 @@ fn twin_tags() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn hex_chips_clear() -> Result<serde_json::Value, String> {
+    let mut report = serde_json::Map::new();
+    for (scene, size, pantry) in [("960-pantry", (960.0_f32, 640.0_f32), true), ("960", (960.0, 640.0), false), ("1280", (1280.0, 800.0), false)] {
+        let mut app = StudioApp::with_spell(dozen_ingredient_spell(), registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        if pantry && rt.find("expand-nodes").is_some() {
+            click(&mut rt, "expand-nodes")?;
+        }
+        let _ = validation_of(&mut rt)?;
+        rt.frame(3.0);
+        rt.frame(6.0);
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let mut measure = studio_text_system();
+        let mut covered = Vec::new();
+        let mut on_card_above = Vec::new();
+        for card in plan.with_role(magicklala_canvas::BrewRole::Ingredient) {
+            let id = &card.id.0;
+            let Some(chip) = layout_rect(&rt, &format!("status-pill-{id}")).filter(|rect| rect[2] > 0.5) else { continue };
+            let title = rt.state.canvas.display_title(&card.id);
+            if rt
+                .state
+                .canvas
+                .nodes
+                .iter()
+                .filter(|other| other.id != card.id)
+                .any(|other| layout_rect(&rt, &format!("node-{}", other.id.0)).is_some_and(|above| above[1] < chip[1] && rects_overlap(chip, above)))
+            {
+                on_card_above.push(title.clone());
+            }
+            let lines = text_lines_under(&rt, &format!("node-{id}"));
+            for (line, rect) in lines.iter().filter(|(line, _)| title.replace(" · ", "\u{a0}·\u{a0}").contains(line.as_str()) || title.contains(line.as_str()))
+            {
+                let (natural, _) = measure.measure(line, rune::TextStyle::new(13.0_f32.max(10.5 / plan.scale), 750.0), 1.0);
+                let inked = [rect[0], rect[1], (natural * plan.scale).min(rect[2]), rect[3]];
+                if rects_overlap(chip, inked) {
+                    covered.push(title.clone());
+                }
+            }
+        }
+        covered.sort();
+        covered.dedup();
+        report.insert(scene.to_owned(), json!({ "covered": covered, "onCardAbove": on_card_above }));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -6558,6 +6605,10 @@ fn shot(args: &[String]) -> Result<serde_json::Value, String> {
     if asked("pantry") && rt.find("expand-nodes").is_some() {
         click(&mut rt, "expand-nodes")?;
         rt.frame(2.0);
+    }
+    if asked("check") {
+        let _ = validation_of(&mut rt)?;
+        rt.frame(2.5);
     }
     if asked("brew") {
         click(&mut rt, "run-spell")?;
@@ -10992,6 +11043,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("plug-hygiene") => plug_hygiene(),
         Some("interrupted-bottles") => interrupted_bottles(),
         Some("twin-tags") => twin_tags(),
+        Some("hex-chips-clear") => hex_chips_clear(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

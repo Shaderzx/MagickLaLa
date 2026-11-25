@@ -731,3 +731,12 @@ test('Bottle names never repeat: a Send numbered among its twins and a Send on a
     expect(report[size].tags.every((tag: string) => tag.length > 0), size).toBe(true);
   }
 });
+
+test('Red chips never cover a step name: after Check on the dozen-step potion, no Missing or Failed chip sits on the name of its card or on the card above it at 960 with the Pantry open, at 960 and at 1280', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['hex-chips-clear']);
+
+  expect(Object.keys(report).length).toBe(3);
+  for (const [scene, cards] of Object.entries<any>(report)) {
+    expect({ scene, covered: cards.covered, onCardAbove: cards.onCardAbove }).toEqual({ scene, covered: [], onCardAbove: [] });
+  }
+});
