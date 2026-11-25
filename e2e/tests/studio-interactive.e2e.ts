@@ -1871,3 +1871,9 @@ test('Variables can drive step settings: a setting written as {{name}} brews wit
   expect(report.hints).toEqual([['max_memories', '→ Search Memory'], ['temperature', '→ Generate Text']]);
   expect(report.dial).toEqual({ shown: 0.4, variable: 'Float(0.5)', config: '{{temperature}}' });
 });
+
+test('Two bottles fed by the same route get their own numbered names while a lone route keeps its plain name', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['twin-routes']);
+
+  expect(report.names).toEqual(['Send · billing 1', 'Send · billing 2', 'Send · default']);
+});

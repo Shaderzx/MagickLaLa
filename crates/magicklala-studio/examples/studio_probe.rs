@@ -2258,6 +2258,19 @@ fn bound_settings() -> Result<serde_json::Value, String> {
         "dial": { "shown": shown, "variable": after_variable, "config": after_config },
     }))
 }
+fn twin_routes() -> Result<serde_json::Value, String> {
+    let mut spell = router_spell();
+    if let Some(node) = spell.nodes.iter_mut().find(|node| node.id.0 == "switch") {
+        node.config = json!({ "cases": ["billing"] });
+    }
+    spell.nodes.push(studio_node("billing_copy", "io/send_message", 840.0, serde_json::Value::Null));
+    spell.wires.push(studio_wire("w6", ("switch", "billing"), ("refund_reply", "in")));
+    spell.wires.push(studio_wire("w7", ("switch", "billing"), ("billing_copy", "in")));
+    spell.wires.push(studio_wire("w8", ("refund_text", "text"), ("billing_copy", "content")));
+    let rt = runtime_for(spell);
+    let names: Vec<String> = ["refund_reply", "billing_copy", "other_reply"].iter().map(|id| rt.state.canvas.display_title(&NodeId::from(*id))).collect();
+    Ok(json!({ "names": names }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8493,6 +8506,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("downhill") => downhill(),
         Some("failed-stub") => failed_stub(),
         Some("bound-settings") => bound_settings(),
+        Some("twin-routes") => twin_routes(),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("pot-rect") => pot_rect(),
         Some("gateway-hint") => gateway_hint(),
