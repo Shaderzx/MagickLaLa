@@ -1429,6 +1429,7 @@ fn capture_surfaces(out_dir: &Path) -> Result<serde_json::Value, String> {
     let webhook_validation = executed.validation.clone();
     let webhook_summary = executed.canvas.brew_summary.clone();
     let webhook_validated = executed.canvas.validated;
+    let webhook_last_brew = executed.canvas.last_brew;
     let webhook_nodes: Vec<(NodeId, ExecutionStatus, Option<u64>, Option<usize>)> =
         executed.canvas.nodes.iter().map(|card| (card.id.clone(), card.status, card.duration_ms, card.step_order)).collect();
     let webhook_wires: Vec<(WireId, bool)> = executed.canvas.wires.iter().map(|wire| (wire.id.clone(), wire.active)).collect();
@@ -1477,6 +1478,7 @@ fn capture_surfaces(out_dir: &Path) -> Result<serde_json::Value, String> {
         app.validation = webhook_validation.clone();
         app.canvas.brew_summary = webhook_summary.clone();
         app.canvas.validated = webhook_validated;
+        app.canvas.last_brew = webhook_last_brew;
         for card in &mut app.canvas.nodes {
             if let Some((_, status, duration, step)) = webhook_nodes.iter().find(|(id, _, _, _)| *id == card.id) {
                 card.status = *status;
@@ -3274,7 +3276,25 @@ fn waiting_not_untaken() -> Result<serde_json::Value, String> {
     });
     rt.frame(2.0);
     let after_quench = untaken_cards(&mut rt);
-    Ok(json!({ "whileBrewing": while_brewing, "afterQuench": after_quench }))
+    let mut router = runtime_for(example("webhook_router.json")?);
+    click(&mut router, "run-spell")?;
+    live_finish(&mut router)?;
+    router.frame(3.0);
+    let skipped: Vec<String> = router
+        .state
+        .canvas
+        .nodes
+        .iter()
+        .filter(|card| card.status == ExecutionStatus::Idle)
+        .map(|card| card.id.0.clone())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .filter(|id| {
+            texts_under(&mut router, &format!("node-{id}")).contains("Untaken") || texts_under(&mut router, &format!("node-{id}-header")).contains("Untaken")
+        })
+        .collect();
+    let idle = router.state.canvas.nodes.iter().filter(|card| card.status == ExecutionStatus::Idle).count();
+    Ok(json!({ "whileBrewing": while_brewing, "afterQuench": after_quench, "finishedSkipped": { "marked": skipped.len(), "idle": idle } }))
 }
 fn lit_strand() -> Result<serde_json::Value, String> {
     let mut app = StudioApp::with_spell(crowded_kitchen(), registry_specs());

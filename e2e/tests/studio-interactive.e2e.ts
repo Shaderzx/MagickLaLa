@@ -2102,10 +2102,13 @@ test('A crowded rack of broken bottles stays readable: with fourteen Sends missi
   }
 });
 
-test('Untaken means skipped by a finished brew: while the first Delay is still running the steps after it never say Untaken, and a Quenched brew leaves no step marked Untaken either', { timeout: 900_000 }, async () => {
+test('Untaken means skipped by a finished brew: while the first Delay is still running the steps after it never say Untaken, and a Quenched brew leaves no step marked Untaken either, while every step a real finished brew skipped does say Untaken', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['waiting-not-untaken']);
 
-  expect(report).toEqual({ whileBrewing: [], afterQuench: [] });
+  expect(report.whileBrewing).toEqual([]);
+  expect(report.afterQuench).toEqual([]);
+  expect(report.finishedSkipped.idle).toBeGreaterThan(0);
+  expect(report.finishedSkipped.marked).toBe(report.finishedSkipped.idle);
 });
 
 test('Selecting a vial in a crowded kitchen lights its whole pour: its strand is drawn lit and on top of the bundle all the way to the rim, and no other strand is lit', { timeout: 900_000 }, async () => {
