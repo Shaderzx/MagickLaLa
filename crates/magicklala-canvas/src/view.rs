@@ -662,6 +662,7 @@ fn bottle_hex_pill(card: &NodeCardModel, scale: f32, p: &HearthPalette) -> Optio
     };
     Some(
         row()
+            .key(format!("bottle-hex-{}", card.id.0))
             .px(6.0)
             .py(1.5)
             .radius(7.0)

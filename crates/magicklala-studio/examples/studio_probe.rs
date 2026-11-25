@@ -3170,6 +3170,47 @@ fn check_matches_brew() -> Result<serde_json::Value, String> {
     let loop_check = validation_of(&mut loop_rt)?;
     Ok(json!({ "printed": { "check": print_check["validation"], "errors": print_check["errors"] }, "halfLoop": loop_check["errors"] }))
 }
+fn rack_errors() -> Result<serde_json::Value, String> {
+    let mut report = serde_json::Map::new();
+    for size in [(960.0_f32, 640.0_f32), (1280.0, 800.0)] {
+        let mut spell = many_bottle_spell(14);
+        spell.wires.retain(|wire| wire.to_socket != "content");
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        let check = validation_of(&mut rt)?;
+        rt.frame(1.0);
+        let bottles: Vec<String> = (0..14).map(|index| format!("reply_{index}")).collect();
+        let mut marks: Vec<(String, [f32; 4])> = Vec::new();
+        let mut unmarked = Vec::new();
+        for id in &bottles {
+            let mark = layout_rect(&rt, &format!("bottle-hex-{id}"));
+            match mark {
+                Some(rect) => marks.push((id.clone(), rect)),
+                None => unmarked.push(id.clone()),
+            }
+        }
+        let mut clashes = Vec::new();
+        for (index, (id, rect)) in marks.iter().enumerate() {
+            for (other, other_rect) in &marks[index + 1..] {
+                if rects_overlap(*rect, *other_rect) {
+                    clashes.push(format!("{id}~{other}"));
+                }
+            }
+            for other in bottles.iter().filter(|other| *other != id) {
+                if layout_rect(&rt, &format!("node-{other}-header")).is_some_and(|tag| rects_overlap(*rect, tag)) {
+                    clashes.push(format!("{id} on {other}"));
+                }
+            }
+        }
+        rt.update(|app, _| app.canvas.select(Some(NodeId::from("reply_3"))));
+        rt.frame(2.0);
+        let recipe_tells = all_texts(&rt).iter().any(|line| line.contains("content"));
+        report.insert(format!("{}", size.0), json!({ "check": check["validation"], "unmarked": unmarked, "clashes": clashes, "recipeTells": recipe_tells }));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9448,6 +9489,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("rename-safe") => rename_safe(),
         Some("fresh-split") => fresh_split(),
         Some("check-matches-brew") => check_matches_brew(),
+        Some("rack-errors") => rack_errors(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),

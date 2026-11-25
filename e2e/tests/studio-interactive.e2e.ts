@@ -2090,3 +2090,11 @@ test('Check judges bound settings the way the brew does: a template that is just
   expect(report.printed).toEqual({ check: 'valid', errors: [] });
   expect(report.halfLoop).toContain('While Loop: max iterations needs a whole number of at least 1, but the variable limit is 1.5');
 });
+
+test('A crowded rack of broken bottles stays readable: with fourteen Sends missing their content every bottle wears its own error mark inside its tag, no mark touches another bottle or mark at either size, and the selected bottle explains the problem in Recipe', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['rack-errors']);
+
+  for (const width of ['960', '1280']) {
+    expect({ width, ...report[width] }).toEqual({ width, check: 'invalid', unmarked: [], clashes: [], recipeTells: true });
+  }
+});
