@@ -233,12 +233,14 @@ fn ribbon_course(plan: &BrewPlan, from: [f32; 2], to: [f32; 2], own: Option<&Nod
     ranked.sort_by_key(|(order, points)| (hits(points), sharp(points), overshoot(points), *order));
     ranked.into_iter().map(|(_, points)| points).collect()
 }
-pub fn pour_order(_state: &CanvasState, plan: &BrewPlan) -> Vec<NodeId> {
-    plan.with_role(BrewRole::Ingredient).map(|card| card.id.clone()).collect()
+pub fn pour_order(state: &CanvasState, plan: &BrewPlan) -> Vec<NodeId> {
+    let mut order: Vec<NodeId> = plan.with_role(BrewRole::Ingredient).map(|card| card.id.clone()).collect();
+    order.sort_by_key(|id| pour_lit(state, id));
+    order
 }
 
-pub fn pour_lit(_state: &CanvasState, _id: &NodeId) -> bool {
-    false
+pub fn pour_lit(state: &CanvasState, id: &NodeId) -> bool {
+    state.card(id).is_some_and(|card| card.selected && card.status != ExecutionStatus::Failed && !card.inputs.iter().any(|socket| socket.flagged))
 }
 
 fn landing(plan: &BrewPlan, placed: &BrewCard, index: usize, spread: f32) -> ([f32; 2], f32) {
@@ -472,7 +474,7 @@ fn stream_for(state: &CanvasState, card: &NodeCardModel, mood: CauldronMood, p: 
     let hexed = card.status == ExecutionStatus::Failed || card.inputs.iter().any(|socket| socket.flagged);
     let blocked = blocked_in(card, mood);
     let untaken = state.brew_completed() && card.status == ExecutionStatus::Idle && !hexed && !blocked;
-    let active = matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Running);
+    let active = matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Running) || pour_lit(state, &card.id);
     let idle = !active && !untaken && !blocked && !hexed;
     let color = if hexed {
         p.hex
@@ -743,7 +745,10 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
     let multi = bottles.len() > 1;
     let spread = ingredients.len().max(2) as f32 - 1.0;
     let paths = pour_paths(state, plan);
-    for (index, placed) in ingredients.iter().enumerate() {
+    let order = pour_order(state, plan);
+    let mut ranked: Vec<(usize, &&BrewCard)> = ingredients.iter().enumerate().collect();
+    ranked.sort_by_key(|(_, placed)| order.iter().position(|id| id == &placed.id));
+    for (index, placed) in ranked {
         let Some(card) = state.card(&placed.id) else { continue };
         let (to, lift) = landing(plan, placed, index, spread);
         let style = stream_for(state, card, mood, p, lift);

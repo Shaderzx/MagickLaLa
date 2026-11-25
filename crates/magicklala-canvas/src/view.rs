@@ -317,7 +317,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
                 .border(1.0, p.gold)
                 .child(text("Simmering").font(TextStyle::new(legible(11.0), 750.0)).color(p.simmer_ink())),
         )
-    } else if dimmed && state.brewed_clean() {
+    } else if dimmed && state.brew_completed() {
         let branch = |socket: &str| !(socket == "out" || socket.starts_with("out_") || socket == "in");
         let untaken_label = state
             .wires
@@ -496,7 +496,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     let [pos_x, pos_y, width] = frame;
     let taken = card.status == ExecutionStatus::Succeeded;
     let simmering = card.status == ExecutionStatus::Running;
-    let untaken = has_run && !taken && !simmering && state.brewed_clean();
+    let untaken = has_run && !taken && !simmering && state.brew_completed();
     let sealed = state.release_badge.is_some() && !has_run;
     let bottle_mood = branch_bottle_mood(state, card);
     let bottle_h = 66.0;
@@ -620,7 +620,7 @@ pub fn branch_bottle_mood(state: &CanvasState, card: &NodeCardModel) -> Cauldron
     let hexed = card.status == ExecutionStatus::Failed || card.inputs.iter().any(|socket| socket.flagged);
     if taken {
         CauldronMood::Brewed
-    } else if (state.has_run() && !simmering && state.brewed_clean()) || hexed || cauldron_mood(state) == CauldronMood::Hexed {
+    } else if (state.has_run() && !simmering && state.brew_completed()) || hexed || cauldron_mood(state) == CauldronMood::Hexed {
         CauldronMood::Hexed
     } else {
         CauldronMood::Ready
@@ -1079,7 +1079,7 @@ fn grimoire_card_view<S: 'static>(
                 ),
         );
     let perched_badge = status_box(card.status, card.duration_ms, p, zoom).or_else(|| {
-        (shelved || (dimmed && state.brewed_clean())).then(|| {
+        (shelved || (dimmed && state.brew_completed())).then(|| {
             let badge_bg = p.untaken_pill_fill();
             let badge_ink = p.untaken_pill_ink();
             row()

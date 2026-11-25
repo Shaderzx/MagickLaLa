@@ -1742,7 +1742,7 @@ fn recipe_overview(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             ExecutionStatus::Succeeded => (Some("Brewed"), if light { t.broth_deep } else { t.broth_foam }),
             ExecutionStatus::Failed => (Some("Failed"), t.hex),
             ExecutionStatus::Running => (Some("Simmering"), t.ink_2),
-            ExecutionStatus::Idle if app.canvas.brewed_clean() && !app.canvas.is_shelved(&card.id) => (Some("Untaken"), t.mute),
+            ExecutionStatus::Idle if app.canvas.brew_completed() && !app.canvas.is_shelved(&card.id) => (Some("Untaken"), t.mute),
             ExecutionStatus::Idle => (None, t.mute),
         };
         row()

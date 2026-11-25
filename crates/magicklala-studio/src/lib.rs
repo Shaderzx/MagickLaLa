@@ -3390,7 +3390,8 @@ impl StudioApp {
     fn trigger(&self, prefer: Option<&str>, payload: &serde_json::Value) -> Option<RunTrigger> {
         let spec_of = |node: &NodeInstance| self.specs.iter().find(|spec| spec.kind == node.kind && spec.is_trigger);
         let graph = self.brew_graph();
-        let triggers: Vec<(&NodeInstance, &NodeSpec)> = graph.nodes.iter().filter_map(|node| spec_of(node).map(|spec| (node, spec))).collect();
+        let mut triggers: Vec<(&NodeInstance, &NodeSpec)> = graph.nodes.iter().filter_map(|node| spec_of(node).map(|spec| (node, spec))).collect();
+        triggers.sort_by_key(|(node, _)| !graph.wires.iter().any(|wire| wire.from_node == node.id));
         let (node, spec) = prefer.and_then(|kind| triggers.iter().find(|(node, _)| node.kind == kind)).or_else(|| triggers.first()).copied()?;
         let socket = spec.outputs.first().map_or_else(|| "out".to_owned(), |socket| socket.name.clone());
         Some(RunTrigger { node: node.id.clone(), socket, payload: Value::from(payload.clone()) })

@@ -540,7 +540,10 @@ impl CanvasState {
             return;
         }
         match event {
-            TraceEvent::RunStarted { .. } => self.reset_execution(),
+            TraceEvent::RunStarted { .. } => {
+                self.last_brew = None;
+                self.reset_execution();
+            }
             TraceEvent::NodeStarted { node_id, .. } => self.set_status(node_id, ExecutionStatus::Running),
             TraceEvent::NodeFinished { node_id, duration_ms, .. } => {
                 self.number_step(node_id);
@@ -554,10 +557,12 @@ impl CanvasState {
                 self.set_status(node_id, ExecutionStatus::Failed);
             }
             TraceEvent::WireActivated { wire_id, .. } => self.wires.iter_mut().filter(|wire| &wire.id == wire_id).for_each(|wire| wire.active = true),
-            TraceEvent::RunFinished { summary, .. } if summary.status != RunStatus::Succeeded => {
+            TraceEvent::RunFinished { summary, .. } if summary.status == RunStatus::Succeeded => self.last_brew = Some(RunStatus::Succeeded),
+            TraceEvent::RunFinished { summary, .. } => {
+                self.last_brew = Some(summary.status);
                 self.nodes.iter_mut().filter(|card| card.status == ExecutionStatus::Running).for_each(|card| card.status = ExecutionStatus::Failed);
             }
-            TraceEvent::RunFinished { .. } | TraceEvent::StreamChunk { .. } | TraceEvent::VariableSet { .. } => {}
+            TraceEvent::StreamChunk { .. } | TraceEvent::VariableSet { .. } => {}
         }
     }
 
@@ -647,8 +652,11 @@ impl CanvasState {
         self.running_brew = false;
     }
 
-    pub fn brewed_clean(&self) -> bool {
-        self.has_run() && !self.nodes.iter().any(|card| card.status == ExecutionStatus::Failed)
+    pub fn brew_completed(&self) -> bool {
+        self.has_run()
+            && !self.running_brew
+            && self.last_brew == Some(RunStatus::Succeeded)
+            && !self.nodes.iter().any(|card| card.status == ExecutionStatus::Failed)
     }
 
     pub fn has_run(&self) -> bool {
