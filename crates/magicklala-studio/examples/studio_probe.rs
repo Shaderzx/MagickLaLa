@@ -3691,12 +3691,40 @@ fn two_failures_strip() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn eight_route_switch() -> SpellGraph {
+    let routes = ["refunds", "orders", "billing", "returns", "shipping", "support", "escalations"];
+    let mut spell = SpellGraph::new("Eight Routes");
+    spell.nodes =
+        vec![studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null), studio_node("switch", "flow/switch", 280.0, json!({ "cases": routes }))];
+    spell.wires = vec![studio_wire("w0", ("trigger", "out"), ("switch", "in")), studio_wire("wv", ("trigger", "content"), ("switch", "value"))];
+    for (index, route) in routes.iter().chain(std::iter::once(&"default")).enumerate() {
+        let id = format!("reply_{index}");
+        spell.nodes.push(studio_node(&id, "io/send_message", 560.0, serde_json::Value::Null));
+        spell.wires.push(studio_wire(&format!("r{index}"), ("switch", route), (&id, "in")));
+        spell.wires.push(studio_wire(&format!("c{index}"), ("trigger", "content"), (&id, "content")));
+    }
+    spell
+}
 fn small_rack_rows() -> Result<serde_json::Value, String> {
     let mut report = serde_json::Map::new();
-    for (name, size, pantry) in
-        [("router-pantry@960", (960.0_f32, 640.0_f32), true), ("router@960", (960.0, 640.0), false), ("router@1280", (1280.0, 800.0), false)]
-    {
-        let mut app = StudioApp::with_spell(example("webhook_router.json")?, registry_specs());
+    for (name, size, pantry) in [
+        ("router-pantry@960", (960.0_f32, 640.0_f32), true),
+        ("router@960", (960.0, 640.0), false),
+        ("router@1280", (1280.0, 800.0), false),
+        ("kitchen-pantry@960", (960.0, 640.0), true),
+        ("kitchen@960", (960.0, 640.0), false),
+        ("switch8@960", (960.0, 640.0), false),
+        ("switch8-pantry@960", (960.0, 640.0), true),
+        ("switch8@1280", (1280.0, 800.0), false),
+    ] {
+        let spell = if name.starts_with("kitchen") {
+            crowded_kitchen()
+        } else if name.starts_with("switch8") {
+            eight_route_switch()
+        } else {
+            example("webhook_router.json")?
+        };
+        let mut app = StudioApp::with_spell(spell, registry_specs());
         app.size = size;
         let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
         rt.frame(0.0);
@@ -3717,7 +3745,7 @@ fn small_rack_rows() -> Result<serde_json::Value, String> {
         for pipe in magicklala_canvas::cauldron::rack_glass(&plan) {
             for pair in pipe.windows(2) {
                 let (a, b) = ([pair[0][0] + origin[0], pair[0][1] + origin[1]], [pair[1][0] + origin[0], pair[1][1] + origin[1]]);
-                if (a[1] - b[1]).abs() > 0.5 {
+                if (a[1] - b[1]).abs() > 0.5 || (a[0] - b[0]).abs() < 1.0 {
                     continue;
                 }
                 let (left, right) = (a[0].min(b[0]), a[0].max(b[0]));
@@ -3748,6 +3776,8 @@ fn plank_clear() -> Result<serde_json::Value, String> {
         ("eight-brewed@1280", many_bottle_spell(8), (1280.0, 800.0), true),
         ("eight-brewed@960", many_bottle_spell(8), (960.0, 640.0), true),
         ("three-brewed@1280", many_bottle_spell(3), (1280.0, 800.0), true),
+        ("router-brewed@960", example("webhook_router.json")?, (960.0, 640.0), true),
+        ("three-brewed@960", many_bottle_spell(3), (960.0, 640.0), true),
     ];
     for (name, spell, size, brew) in scenes {
         let mut app = StudioApp::with_spell(spell, registry_specs());
@@ -3773,7 +3803,12 @@ fn plank_clear() -> Result<serde_json::Value, String> {
                 let top = origin[1] + frame[1] + row[0] + 2.0 * s;
                 let (x0, x1) = (origin[0] + frame[0] + row[1].max(0.0) + 2.0 * s, origin[0] + frame[0] + row[2] - 2.0 * s);
                 let foot = magicklala_canvas::cauldron::RACK_BRACKET_DROP * s;
-                [[x0, top, x1 - x0, 9.0 * s], [x0 + 3.0 * s - 1.5 * s, top + 9.0 * s, 13.5 * s, foot], [x1 - 15.0 * s, top + 9.0 * s, 13.5 * s, foot]]
+                let stroke = 1.3 * s + 1.0;
+                [
+                    [x0, top, x1 - x0, 9.0 * s],
+                    [x0 + 3.0 * s - stroke, top + 9.0 * s, 12.0 * s + 2.0 * stroke, foot + stroke],
+                    [x1 - 15.0 * s - stroke, top + 9.0 * s, 12.0 * s + 2.0 * stroke, foot + stroke],
+                ]
             })
             .collect();
         let mut clashes: Vec<String> = Vec::new();
@@ -3786,6 +3821,9 @@ fn plank_clear() -> Result<serde_json::Value, String> {
             }
             if let Some(badge) = rt.presented(&format!("step-badge-{id}")).map(|(rect, _)| rect) {
                 parts.push(("step seal".to_owned(), badge));
+            }
+            if let Some(pill) = rt.presented(&format!("bottle-pill-{id}")).map(|(rect, _)| rect).filter(|rect| rect[2] > 0.5 && rect[3] > 0.5) {
+                parts.push(("status chip".to_owned(), pill));
             }
             for (part, rect) in parts {
                 if bands.iter().any(|band| rects_overlap(rect, *band)) {
@@ -3868,20 +3906,41 @@ fn stacked_pot_clear() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn long_named_lone_bottle() -> SpellGraph {
+    let mut spell = SpellGraph::new("Incoming Customer Reconciliation Escalation");
+    spell.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("switch", "flow/switch", 280.0, json!({ "cases": ["customer_reconciliation_notification"] })),
+        studio_node("notify", "io/send_message", 560.0, serde_json::Value::Null),
+        studio_node("spare", "io/send_message", 560.0, serde_json::Value::Null),
+    ];
+    spell.wires = vec![
+        studio_wire("w0", ("trigger", "out"), ("switch", "in")),
+        studio_wire("wv", ("trigger", "content"), ("switch", "value")),
+        studio_wire("w1", ("switch", "customer_reconciliation_notification"), ("notify", "in")),
+        studio_wire("w2", ("trigger", "content"), ("notify", "content")),
+    ];
+    spell
+}
 fn solo_tag_whole() -> Result<serde_json::Value, String> {
     let mut report = serde_json::Map::new();
     let scenes = [
         ("research-pantry@960", example("parallel_research.json")?, (960.0_f32, 640.0_f32), true, false),
         ("dozen-checked@960", dozen_ingredient_spell(), (960.0, 640.0), false, true),
         ("research@1280", example("parallel_research.json")?, (1280.0, 800.0), false, false),
+        ("long-pantry@960", long_named_lone_bottle(), (960.0, 640.0), true, false),
+        ("long@1280", long_named_lone_bottle(), (1280.0, 800.0), false, false),
     ];
     for (name, spell, size, pantry, check) in scenes {
         let mut app = StudioApp::with_spell(spell, registry_specs());
         app.size = size;
         let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
         rt.frame(0.0);
-        if pantry {
+        if pantry && rt.find("expand-nodes").is_some() {
             click(&mut rt, "expand-nodes")?;
+        }
+        if rt.state.canvas.card(&NodeId::from("spare")).is_some() {
+            rt.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("spare"))));
         }
         if check {
             let _ = validation_of(&mut rt)?;
@@ -4527,20 +4586,33 @@ fn seal_clear() -> Result<serde_json::Value, String> {
         let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
         let bottles: Vec<NodeId> = plan.with_role(magicklala_canvas::BrewRole::Bottle).map(|card| card.id.clone()).collect();
         let mut on_fill = Vec::new();
+        let mut spilled = Vec::new();
+        let mut on_cork = Vec::new();
         let mut time_chips = 0;
         for id in &bottles {
             let Some(column) = layout_rect(&rt, &format!("node-{}-header", id.0)) else { continue };
             let fill_line = column[1] + 66.0 * plan.scale * 0.45;
-            if let Some(badge) = layout_rect(&rt, &format!("step-badge-{}", id.0))
-                && badge[1] + badge[3] > fill_line + 0.5
-            {
-                on_fill.push(id.0.clone());
+            if let Some(badge) = layout_rect(&rt, &format!("step-badge-{}", id.0)) {
+                if badge[1] + badge[3] > fill_line + 0.5 {
+                    on_fill.push(id.0.clone());
+                }
+                if badge[0] + badge[2] > column[0] + column[2] * 0.5 - 4.0 * plan.scale {
+                    on_cork.push(id.0.clone());
+                }
+                let digits = text_lines_under(&rt, &format!("step-badge-{}", id.0));
+                let mut measure = studio_text_system();
+                if digits.iter().any(|(line, rect)| {
+                    let (natural, _) = measure.measure(line, rune::TextStyle::new(9.0_f32.max(10.5 / plan.scale), 750.0), 1.0);
+                    natural * plan.scale > badge[2] + 0.5 || rect[0] < badge[0] - 0.5
+                }) {
+                    spilled.push(id.0.clone());
+                }
             }
             if texts_under(&mut rt, &format!("node-{}-header", id.0)).contains("ms") {
                 time_chips += 1;
             }
         }
-        report.insert(name.to_owned(), json!({ "bottles": bottles.len(), "onFill": on_fill, "timeChips": time_chips }));
+        report.insert(name.to_owned(), json!({ "bottles": bottles.len(), "onFill": on_fill, "timeChips": time_chips, "spilled": spilled, "onCork": on_cork }));
     }
     Ok(serde_json::Value::Object(report))
 }
@@ -6472,6 +6544,7 @@ fn shot(args: &[String]) -> Result<serde_json::Value, String> {
         }
         "dozen" => dozen_ingredient_spell(),
         "kitchen" => crowded_kitchen(),
+        "switch8" => eight_route_switch(),
         other => example(other)?,
     };
     let mut app = StudioApp::with_spell(spell, registry_specs());

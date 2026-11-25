@@ -531,12 +531,12 @@ test('Typing a variable rename one key at a time never takes over a step input: 
   });
 });
 
-test('Big racks keep the potion in view: after a brew every bottle on a rack of four or more wears its step number up by the cork, clear of the fill line, and none of them shows a time chip, at 960 and 1280 alike', { timeout: 900_000 }, async () => {
+test('Big racks keep the potion in view: after a brew every bottle on a rack of four or more wears its step number on the shoulder left of the neck, clear of the cork and the fill line with every digit inside the seal, and none of them shows a time chip, at 960 and 1280 alike', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['seal-clear']);
 
   for (const scene of ['kitchen@960', 'kitchen@1280', 'eight@1280']) {
     expect(report[scene].bottles).toBeGreaterThanOrEqual(8);
-    expect({ scene, onFill: report[scene].onFill, timeChips: report[scene].timeChips }).toEqual({ scene, onFill: [], timeChips: 0 });
+    expect({ scene, onFill: report[scene].onFill, timeChips: report[scene].timeChips, onCork: report[scene].onCork, spilled: report[scene].spilled }).toEqual({ scene, onFill: [], timeChips: 0, onCork: [], spilled: [] });
   }
 });
 
@@ -617,11 +617,11 @@ test('Two failures fit the collapsed Cauldron Log strip: when both parallel rese
   }
 });
 
-test('A small rack that wraps to two rows keeps its pipes clear of the tags above: the webhook router brewed at 960 with the Pantry open, and at both sizes without it, runs no shelf pipe behind or within a hair of any bottle tag', { timeout: 900_000 }, async () => {
+test('Shelf rows keep their pipes clear of the tags above: the webhook router brewed at 960 with the Pantry open, and at both sizes without it, and racks of eight and fourteen whose tags wrap to two lines, run no shelf pipe behind or within a hair of any bottle tag', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['small-rack-rows']);
 
   for (const [scene, rack] of Object.entries<any>(report)) {
-    expect({ scene, bottles: rack.bottles }).toEqual({ scene, bottles: 3 });
+    expect({ scene, bottles: rack.bottles }).toEqual({ scene, bottles: scene.startsWith('router') ? 3 : scene.startsWith('switch8') ? 8 : 14 });
     expect({ scene, crossings: rack.crossings }).toEqual({ scene, crossings: [] });
   }
 });
@@ -649,10 +649,10 @@ test('A crowded stacked pot keeps its rim clear: with eight or more pours on lan
   expect(Object.values<any>(report).some((pot) => pot.crowded)).toBe(true);
 });
 
-test('A lone bottle shows its names whole: the potion name and the bottle name on a single-bottle tag wrap instead of ending in an ellipsis, at 960 with the Pantry open, after Check, and at 1280', { timeout: 900_000 }, async () => {
+test('A lone bottle shows its names whole: the potion name and the bottle name on a single-bottle tag wrap instead of ending in an ellipsis, at 960 with the Pantry open, after Check, and at 1280, even for Incoming Customer Reconciliation Escalation bottled as Send · customer_reconciliation_notification', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['solo-tag-whole']);
 
-  expect(Object.keys(report).length).toBe(3);
+  expect(Object.keys(report).length).toBe(5);
   for (const [scene, tag] of Object.entries<any>(report)) {
     expect({ scene, cut: tag.cut }).toEqual({ scene, cut: [] });
   }
