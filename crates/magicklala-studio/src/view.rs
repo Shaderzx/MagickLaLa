@@ -1794,7 +1794,7 @@ fn recipe_overview(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                         .continuous_corners()
                         .items_center()
                         .border(1.0, with_alpha(t.rule_2, 0.8))
-                        .child(label("None yet", 11.0, 500.0, t.mute)),
+                        .child(label(if title == "Bottles" { "The last step fills a bottle" } else { "Start with an event from the Pantry" }, 11.0, 500.0, t.mute)),
                 )
             } else {
                 cards.iter().fold(list, |list, card| list.child(entry(card)))
