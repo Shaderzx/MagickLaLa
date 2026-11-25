@@ -1851,6 +1851,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             .find(|w| is_input && !socket.ty.is_flow() && w.to_node == card.id && w.to_socket == socket.name)
             .map(|w| format!("{} · {}", app.canvas.display_title(&w.from_node), w.from_socket));
         let has_plug_button = is_input && !socket.ty.is_flow() && !app.is_running();
+        let stand_in = is_input && app.is_stand_in(&card.id, &socket.name);
         let name_weight = if socket.ty.is_flow() || flagged { 650.0 } else { 500.0 };
         let name_room = 16.5 + studio_text_width(&socket.name, if compact { 11.5 } else { 12.0 }, name_weight).min(if compact { 96.0 } else { 120.0 });
         if has_plug_button {
@@ -1871,9 +1872,10 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                     .continuous_corners()
                     .items_center()
                     .fill(t.card)
-                    .border(1.0, t.rule_2)
+                    .border(if stand_in { 1.4 } else { 1.0 }, if stand_in { t.gold } else { t.rule_2 })
                     .shadow(1.0, 3.0, with_alpha(t.ink, 0.08))
                     .shrink()
+                    .children(stand_in.then(|| label("stand-in", 10.0, 700.0, t.gold)))
                     .children(fed_from.clone().map(|source| label(source, 10.5, 600.0, t.ink).key(format!("plug-source-{name}")).truncate().shrink()))
                     .child(label("✕", 10.5, 700.0, t.ink_2))
                     .on_press(move |app: &mut StudioApp| app.unplug_wire(&wire)),

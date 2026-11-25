@@ -2096,8 +2096,8 @@ impl StudioApp {
                 self.rebuild_bridges();
                 let title = self.canvas.display_title(&id);
                 let bridges = self.aside_bridges.get(&id).cloned().unwrap_or_default();
+                self.undo_banner = Some(self.aside_banner(&title, &bridges));
                 self.undo_stack.push(UndoEntry::Aside { id, wires: removed, bridges });
-                self.undo_banner = Some(format!("Set aside {title}"));
             }
             magicklala_canvas::Toss::IntoPot(id) => {
                 self.canvas.unshelve(&id);
@@ -3101,6 +3101,21 @@ impl StudioApp {
             }
         }
         bridges
+    }
+
+    fn aside_banner(&self, title: &str, bridges: &[(SocketRef, SocketRef)]) -> String {
+        let reroutes: Vec<String> = bridges
+            .iter()
+            .filter(|(_, to)| self.input_type(to).is_some_and(|ty| !ty.is_flow()))
+            .map(|(from, to)| {
+                format!("{} {} now reads {} · {}", self.canvas.display_title(&to.node), to.socket, self.canvas.display_title(&from.node), from.socket)
+            })
+            .collect();
+        if reroutes.is_empty() { format!("Set aside {title}") } else { format!("Set aside {title} · {}", reroutes.join("; ")) }
+    }
+
+    pub fn is_stand_in(&self, node: &NodeId, socket: &str) -> bool {
+        self.aside_bridges.values().flatten().any(|(_, to)| &to.node == node && to.socket == socket)
     }
 
     fn drop_bridges(&mut self, bridges: &[(SocketRef, SocketRef)]) {
