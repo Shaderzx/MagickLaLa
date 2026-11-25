@@ -2111,3 +2111,11 @@ test('Selecting a vial in a crowded kitchen lights its whole pour: its strand is
   expect(report.drawnLast).toBe(report.picked);
   expect(report.lit).toEqual([report.picked]);
 });
+
+test('Picking Gemini in the model menu saves a provider the step accepts: gemini-2.5-pro is stored with provider gemini, one of the provider choices the Generate Text step declares', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['gemini-pick']);
+
+  expect(report.model).toBe('gemini-2.5-pro');
+  expect(report.provider).toBe('gemini');
+  expect(report.allowed).toContain(report.provider);
+});

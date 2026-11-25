@@ -3280,6 +3280,30 @@ fn lit_strand() -> Result<serde_json::Value, String> {
     let lit: Vec<String> = order.iter().filter(|id| magicklala_canvas::cauldron::pour_lit(&rt.state.canvas, id)).map(|id| id.0.clone()).collect();
     Ok(json!({ "picked": picked.0, "drawnLast": order.last().map(|id| id.0.clone()), "lit": lit }))
 }
+fn gemini_pick() -> Result<serde_json::Value, String> {
+    let mut rt = runtime_for(StudioApp::from_registry().spell.clone());
+    rt.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("llm")));
+        app.toggle_model_menu();
+    });
+    rt.frame(1.0);
+    let spot = text_lines_under(&rt, "model-dropdown").into_iter().find(|(line, _)| line == "gemini-2.5-pro").map(|(_, rect)| (rect[0] + rect[2] * 0.5, rect[1] + rect[3] * 0.5)).ok_or("no gemini choice")?;
+    rt.pointer_move(spot.0, spot.1);
+    rt.pointer_down(spot.0, spot.1);
+    rt.pointer_up(spot.0, spot.1);
+    rt.frame(1.0);
+    let config = rt.state.spell.nodes.iter().find(|node| node.id.0 == "llm").map(|node| node.config.clone()).unwrap_or_default();
+    let providers = registry_specs()
+        .iter()
+        .find(|spec| spec.kind == "ai/generate_text")
+        .and_then(|spec| spec.config.iter().find(|field| field.key == "provider"))
+        .map(|field| match &field.kind {
+            magicklala_graph::FieldKind::Select { options } => options.clone(),
+            _ => Vec::new(),
+        })
+        .unwrap_or_default();
+    Ok(json!({ "provider": config.get("provider"), "model": config.get("model"), "allowed": providers }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9561,6 +9585,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("rack-errors") => rack_errors(),
         Some("waiting-not-untaken") => waiting_not_untaken(),
         Some("lit-strand") => lit_strand(),
+        Some("gemini-pick") => gemini_pick(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
