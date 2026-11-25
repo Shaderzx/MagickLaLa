@@ -1454,7 +1454,7 @@ test('Studio keeps its promises: a prompt typed over a shelf shortcut stays type
     expect(report.bindings.greetingLinked).toBe(true);
     expect(report.bindings.first).toEqual(['hi friend']);
     expect(report.bindings.second).toEqual(['hey friend']);
-    if (report.compactGrimoire.zoom < 0.6) expect(report.compactGrimoire.hoverTip).toBe('body');
+    if (report.compactGrimoire.zoom < 0.42) expect(report.compactGrimoire.hoverTip).toBe('body');
     else expect(report.compactGrimoire.socketNames).toBeGreaterThan(0);
     expect(report.badgesSeen).toBeGreaterThanOrEqual(4);
     expect(report.badgeMismatch).toEqual([]);

@@ -231,7 +231,7 @@ fn grid_ribbons(plan: &BrewPlan, bottles: &[&BrewCard]) -> Option<Vec<Vec<[f32; 
     if bottles.len() < 4 {
         return None;
     }
-    let s = plan.scale.max(0.4);
+    let s = plan.scale.max(0.2);
     let tap = spout_point(plan);
     let mut by_x: Vec<usize> = (0..bottles.len()).collect();
     by_x.sort_by(|a, b| bottles[*a].rect[0].total_cmp(&bottles[*b].rect[0]));
@@ -247,87 +247,51 @@ fn grid_ribbons(plan: &BrewPlan, bottles: &[&BrewCard]) -> Option<Vec<Vec<[f32; 
     }
     let rect = |index: usize| bottles[index].rect;
     let left = |column: usize| rect(columns[column][0])[0];
-    let top = |column: usize| columns[column].iter().map(|index| rect(*index)[1]).fold(f32::MAX, f32::min);
-    let lip = tap[0] + 10.0 * s;
-    if left(0) < lip + 12.0 * s {
+    let right = |column: usize| columns[column].iter().map(|index| rect(*index)[0] + rect(*index)[2]).fold(f32::MIN, f32::max);
+    if left(0) < tap[0] + 16.0 * s {
+        return None;
+    }
+    let trunk_x = (tap[0] + left(0)) * 0.5;
+    let top = bottles.iter().map(|card| card.rect[1]).fold(f32::MAX, f32::min);
+    let ceiling = top - 12.0 * s;
+    let lanes_floor = plan.lanes.map_or(f32::MIN, |[shelf_bottom, band]| shelf_bottom + band + 2.0 * s);
+    if columns.len() > 1 && ceiling < lanes_floor {
         return None;
     }
     let turn_y = |column: usize, row: usize| -> f32 {
         let below = rect(columns[column][row]);
         if row == 0 {
-            below[1] - 10.0 * s
+            below[1] - 8.0 * s
         } else {
             let above = rect(columns[column][row - 1]);
             (above[1] + above[3] + below[1]) * 0.5
         }
     };
-    let mut lane_x: Vec<Option<f32>> = vec![None; bottles.len()];
-    for column in 1..columns.len() {
-        let rows = columns[column].len();
-        let gap = left(column) - (left(column - 1) + rect(columns[column - 1][0])[2]);
-        let step = (gap * 0.7 / rows as f32).min(6.0 * s);
-        let middle = left(column) - gap * 0.5;
-        for row in 0..rows {
-            lane_x[columns[column][row]] = Some(middle + ((rows - 1) as f32 * 0.5 - row as f32) * step);
-        }
-    }
-    let mut climbers: Vec<usize> = (1..columns.len()).flat_map(|column| columns[column].iter().copied()).collect();
-    climbers.sort_by(|a, b| lane_x[*a].unwrap_or_default().total_cmp(&lane_x[*b].unwrap_or_default()));
-    let lanes_floor = plan.lanes.map_or(f32::MIN, |[shelf_bottom, band]| shelf_bottom + band + 4.0 * s);
-    let mut ceiling = vec![0.0_f32; bottles.len()];
-    let mut previous = f32::MAX;
-    for index in &climbers {
-        let column = columns.iter().position(|column| column.contains(index)).unwrap_or(0);
-        let clear = (0..=column).map(top).fold(f32::MAX, f32::min) - 14.0 * s;
-        let height = clear.min(previous - 6.0 * s);
-        if height < lanes_floor {
-            return None;
-        }
-        ceiling[*index] = height;
-        previous = height;
-    }
-    let first: Vec<usize> = columns[0].clone();
-    let (mut up, mut down): (Vec<usize>, Vec<usize>) = (0..first.len()).partition(|row| turn_y(0, *row) < tap[1]);
-    up.sort_by(|a, b| turn_y(0, *b).total_cmp(&turn_y(0, *a)));
-    down.sort_by(|a, b| turn_y(0, *a).total_cmp(&turn_y(0, *b)));
-    let channel_right = left(0) - 8.0 * s;
-    let slots = climbers.len() + up.len().max(down.len());
-    let step = ((channel_right - lip) / slots.max(1) as f32).min(7.0 * s);
-    let mut climb_x = vec![0.0_f32; bottles.len()];
-    for (rank, row) in up.iter().enumerate() {
-        climb_x[first[*row]] = channel_right - rank as f32 * step;
-    }
-    for (rank, row) in down.iter().enumerate() {
-        climb_x[first[*row]] = channel_right - rank as f32 * step;
-    }
-    for (rank, index) in climbers.iter().enumerate() {
-        climb_x[*index] = channel_right - (up.len() + rank) as f32 * step;
-    }
+    let radius = 8.0 * s;
     let routes = (0..bottles.len())
         .map(|index| {
             let neck = bottle_neck(bottles[index], true);
             let column = columns.iter().position(|column| column.contains(&index)).unwrap_or(0);
             let row = columns[column].iter().position(|other| *other == index).unwrap_or(0);
             let turn = turn_y(column, row);
-            let corners = match lane_x[index] {
-                None => vec![tap, [climb_x[index], tap[1]], [climb_x[index], turn], [neck[0], turn], neck],
-                Some(lane) => {
-                    vec![tap, [climb_x[index], tap[1]], [climb_x[index], ceiling[index]], [lane, ceiling[index]], [lane, turn], [neck[0], turn], neck]
-                }
+            let corners = if column == 0 {
+                vec![tap, [trunk_x, tap[1]], [trunk_x, turn], [neck[0], turn], neck]
+            } else {
+                let lane = (right(column - 1) + left(column)) * 0.5;
+                vec![tap, [trunk_x, tap[1]], [trunk_x, ceiling], [lane, ceiling], [lane, turn], [neck[0], turn], neck]
             };
-            rounded_route(&corners, 9.0 * s, 5.0 * s)
+            rounded_route(&corners, radius, 4.0 * s)
         })
         .collect();
     Some(routes)
 }
-
 fn rounded_route(corners: &[[f32; 2]], radius: f32, spacing: f32) -> Vec<[f32; 2]> {
     let mut bent = vec![corners[0]];
     for window in corners.windows(3) {
         let (a, b, c) = (window[0], window[1], window[2]);
         let into = (b[0] - a[0]).hypot(b[1] - a[1]);
         let out = (c[0] - b[0]).hypot(c[1] - b[1]);
-        let r = radius.min(into * 0.5).min(out * 0.5);
+        let r = radius.min(into).min(out);
         if r < 0.5 || into < 0.01 || out < 0.01 {
             bent.push(b);
             continue;
@@ -981,7 +945,18 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         let natural = if multi { MULTI_BOTTLE_SIZE } else { SINGLE_BOTTLE_SIZE };
         let origin = card_frame(placed.rect, natural, plan.scale, [0.0, 0.0]);
         let view = if multi {
-            branch_bottle_view(state, card, step, [0.0, 0.0, natural[0]], bottle_tint(state, &plan, &placed.id), has_run, plan.vial[1] < 50.0, &p, lens)
+            branch_bottle_view(
+                state,
+                card,
+                step,
+                [0.0, 0.0, natural[0]],
+                bottle_tint(state, &plan, &placed.id),
+                has_run,
+                plan.vial[1] < 50.0,
+                plan.scale,
+                &p,
+                lens,
+            )
         } else {
             potion_stand_view(state, card, step, [0.0, 0.0, natural[0]], potion_tint(state, &plan), mood, plan.vial[1] < 50.0, &p, lens)
         };

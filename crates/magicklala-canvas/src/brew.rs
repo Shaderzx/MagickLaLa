@@ -414,18 +414,19 @@ fn plan_stacked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
     let aside: Vec<NodeId> = order.iter().filter(|id| !brewing.contains(*id) && !bottles.contains(*id)).cloned().collect();
     let usable_w = (size.0 - 2.0 * SIDE_ROOM).max(120.0);
     let usable_h = (size.1 - TOP_ROOM - BOTTOM_ROOM).max(120.0);
-    let per_row = (((usable_w / READABLE + m.col_gap) / (m.vial[0] + m.col_gap)).floor() as usize).max(1);
-    let shelf_rows = ingredients.len().div_ceil(per_row);
-    let shelf_cols = ingredients.len().min(per_row);
-    let shelf_w = if shelf_cols == 0 { 0.0 } else { shelf_cols as f32 * m.vial[0] + (shelf_cols - 1) as f32 * m.col_gap };
-    let shelf_h = stack_height(shelf_rows, m.vial[1], m.row_gap);
+    let readable_row = (((usable_w / READABLE + m.col_gap) / (m.vial[0] + m.col_gap)).floor() as usize).max(1);
     let bottle_size = if bottles.len() > 1 { MULTI_BOTTLE_SIZE } else { SINGLE_BOTTLE_SIZE };
     let pot_block_h = m.pot[1] + PLAQUE_ROOM;
     let lane_band = 14.0 + 6.0 * ingredients.len().min(4) as f32;
-    let hop_room = 14.0 * bottles.len().saturating_sub(1) as f32;
+    let hop_room = if bottles.len() >= 4 { 18.0 } else { 14.0 * bottles.len().saturating_sub(1) as f32 };
     let shelf_gap = if ingredients.is_empty() { 0.0 } else { 22.0 + lane_band + hop_room };
     let bottle_count = bottles.len().max(1);
-    let shape_for = |rows: usize| {
+    let shelf_for = |per_row: usize| {
+        let cols = ingredients.len().min(per_row);
+        let w = if cols == 0 { 0.0 } else { cols as f32 * m.vial[0] + (cols - 1) as f32 * m.col_gap };
+        (per_row, w, stack_height(ingredients.len().div_ceil(per_row), m.vial[1], m.row_gap))
+    };
+    let shape_for = |(per_row, shelf_w, shelf_h): (usize, f32, f32), rows: usize| {
         let cols = bottle_count.div_ceil(rows);
         let rows = bottle_count.div_ceil(cols);
         let w = cols as f32 * bottle_size[0] + (cols - 1) as f32 * m.col_gap;
@@ -433,10 +434,13 @@ fn plan_stacked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
         let lower_w = m.pot[0] + m.pot_to_bottles + w;
         let lower_h = pot_block_h.max(h);
         let fit = (usable_w / shelf_w.max(lower_w)).min(usable_h / (shelf_h + shelf_gap + lower_h));
-        (fit, rows, w, h, lower_w, lower_h)
+        (fit, per_row, shelf_w, shelf_h, rows, h, lower_w, lower_h)
     };
-    let (_, bottle_rows, _, bottles_h, lower_w, lower_h) =
-        (1..=bottle_count).map(shape_for).fold(shape_for(1), |best, next| if next.0 > best.0 { next } else { best });
+    let widest = if bottles.len() >= 4 { ingredients.len().max(readable_row) } else { readable_row };
+    let (_, per_row, shelf_w, shelf_h, bottle_rows, bottles_h, lower_w, lower_h) = (readable_row..=widest)
+        .flat_map(|per_row| (1..=bottle_count).map(move |rows| (per_row, rows)))
+        .map(|(per_row, rows)| shape_for(shelf_for(per_row), rows))
+        .fold(shape_for(shelf_for(readable_row), 1), |best, next| if next.0 > best.0 + 0.001 { next } else { best });
     let block_w = shelf_w.max(lower_w);
     let block_h = shelf_h + shelf_gap + lower_h;
     let aside_per_row = (((block_w + m.col_gap) / (m.vial[0] + m.col_gap)).floor() as usize).max(1);

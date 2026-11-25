@@ -154,6 +154,13 @@ pub(crate) fn mode_switcher<S: 'static>(state: &CanvasState, p: &HearthPalette, 
 }
 
 #[allow(clippy::too_many_arguments)]
+const LEGIBLE_PX: f32 = 10.5;
+
+fn legible_size(size: f32, scale: f32) -> f32 {
+    size.max(LEGIBLE_PX / scale.max(0.05))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn ingredient_vial_card<S: 'static>(
     state: &CanvasState,
     card: &NodeCardModel,
@@ -196,6 +203,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     let node_id = card.id.clone();
     let select_id = card.id.clone();
 
+    let legible = |size: f32| legible_size(size, plan.scale);
     let dense = dims[1] < 50.0;
     let narrow = dims[0] < 170.0;
     let badge = if dense || narrow { 30.0 } else { 38.0 };
@@ -214,10 +222,12 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
             0.5
         }));
 
+    let badge_side = legible(11.0) * 1.8;
     let step_badge = step_num.map(|num| {
+        let side = badge_side;
         row()
-            .size(20.0, 20.0)
-            .radius(10.0)
+            .size(side, side)
+            .radius(side * 0.5)
             .items_center()
             .justify_center()
             .fill(if hexed {
@@ -237,11 +247,11 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
                     p.rule_2
                 },
             )
-            .child(text(num.to_string()).font(TextStyle::new(11.0, 750.0).features("'tnum' 1")).color(if hexed || card.status == ExecutionStatus::Succeeded {
-                p.primary_ink
-            } else {
-                p.ink_2
-            }))
+            .child(
+                text(num.to_string())
+                    .font(TextStyle::new(legible(11.0), 750.0).features("'tnum' 1"))
+                    .color(if hexed || card.status == ExecutionStatus::Succeeded { p.primary_ink } else { p.ink_2 }),
+            )
     });
 
     let status_pill = if hexed {
@@ -303,12 +313,13 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         None
     };
 
+    let title_size = legible(13.0);
     let title_room = dims[0] - 24.0 - 6.0 - 30.0;
-    let wraps = narrow && state.display_title(&card.id).chars().count() as f32 * 7.4 > title_room;
-    let top_row = col()
-        .w_full()
-        .min_w(0.0)
-        .child(text(state.display_title(&card.id)).font(TextStyle::new(13.0, 750.0)).color(if dimmed { untaken_title } else { p.ink }).wrap());
+    let wraps = narrow && state.display_title(&card.id).chars().count() as f32 * 7.4 * title_size / 13.0 > title_room;
+    let top_row = col().w_full().min_w(0.0).child({
+        let title = text(state.display_title(&card.id)).font(TextStyle::new(title_size, 750.0)).color(if dimmed { untaken_title } else { p.ink });
+        if title_size > 13.0 { title.truncate() } else { title.wrap() }
+    });
 
     let sub_color = if hexed {
         p.hex
@@ -318,27 +329,30 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         p.mute
     };
 
-    let kind_line = text(&card.kind).font(TextStyle::new((11.2 / plan.scale).clamp(11.5, 13.0), 500.0).mono()).color(sub_color).truncate();
+    let kind_line =
+        (legible(11.5) <= 13.0).then(|| text(&card.kind).font(TextStyle::new((11.2 / plan.scale).clamp(11.5, 13.0), 500.0).mono()).color(sub_color).truncate());
     let side_by_side = |words: El, vial: El, gap: f32| {
         let pair = row().grow(1.0).min_w(0.0).gap(gap).items_center();
         if mirrored { pair.child(vial).child(words) } else { pair.child(words).child(vial) }
     };
-    let card_body = if dense {
+    let card_body = if title_size > 13.0 {
+        col().grow(1.0).min_w(0.0).child(top_row)
+    } else if dense {
         side_by_side(col().grow(1.0).min_w(0.0).child(top_row), vial_badge, 9.0)
     } else if narrow {
         let words = col().grow(1.0).min_w(0.0).child(top_row);
         let pair = row().w_full().gap(6.0).items_center();
         let pair = if mirrored { pair.child(vial_badge).child(words) } else { pair.child(words).child(vial_badge) };
-        col().grow(1.0).min_w(0.0).gap(if wraps { 0.0 } else { 2.0 }).child(pair).child(kind_line)
+        col().grow(1.0).min_w(0.0).gap(if wraps { 0.0 } else { 2.0 }).child(pair).children(kind_line)
     } else {
-        side_by_side(col().grow(1.0).min_w(0.0).gap(2.0).child(top_row).child(kind_line), vial_badge, 9.0)
+        side_by_side(col().grow(1.0).min_w(0.0).gap(2.0).child(top_row).children(kind_line), vial_badge, 9.0)
     };
 
     let content = row()
         .key(format!("node-{}-header", card.id.0))
         .size(dims[0], dims[1])
-        .pl(if step_num.is_some() && !mirrored { 15.0 } else { 9.0 })
-        .pr(if step_num.is_some() && mirrored { 15.0 } else { 9.0 })
+        .pl(if step_num.is_some() && !mirrored { (badge_side - 4.0).max(15.0) } else { 9.0 })
+        .pr(if step_num.is_some() && mirrored { (badge_side - 4.0).max(15.0) } else { 9.0 })
         .gap(9.0)
         .radius(24.0)
         .continuous_corners()
@@ -404,9 +418,12 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     tint: Option<Color>,
     has_run: bool,
     terse: bool,
+    scale: f32,
     p: &HearthPalette,
     lens: fn(&mut S) -> &mut CanvasState,
 ) -> El {
+    let legible = |size: f32| legible_size(size, scale);
+    let terse = terse || legible(11.0) > 11.0;
     let [pos_x, pos_y, width] = frame;
     let taken = card.status == ExecutionStatus::Succeeded;
     let simmering = card.status == ExecutionStatus::Running;
@@ -479,19 +496,22 @@ pub(crate) fn branch_bottle_view<S: 'static>(
         .border(if taken || card.selected { 1.6 } else { 1.1 }, card_border)
         .shadow(2.0, 8.0, if untaken { Color::TRANSPARENT } else { p.shadow_card })
         .child(match route_key {
-            Some(key) => col().key(key).w_full().min_w(0.0).child(text(title).font(TextStyle::new(12.5, 750.0)).color(title_col).wrap_anywhere().max_lines(2)),
-            None => col().w_full().min_w(0.0).child(text(title).font(TextStyle::new(12.5, 750.0)).color(title_col).wrap_anywhere().max_lines(2)),
+            Some(key) => {
+                col().key(key).w_full().min_w(0.0).child(text(title).font(TextStyle::new(legible(12.5), 750.0)).color(title_col).wrap_anywhere().max_lines(2))
+            }
+            None => col().w_full().min_w(0.0).child(text(title).font(TextStyle::new(legible(12.5), 750.0)).color(title_col).wrap_anywhere().max_lines(2)),
         })
         .children((!terse).then(|| text(&card.kind).font(TextStyle::new(11.0, 500.0).mono()).color(sub_col).truncate()));
     let mut tag_wrap = el().w_full().child(tag_inner).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(pill));
     if let Some(num) = step_num {
+        let side = legible(11.0) * 1.55;
         let step_badge = row()
-            .size(17.0, 17.0)
-            .radius(8.5)
+            .size(side, side)
+            .radius(side * 0.5)
             .items_center()
             .justify_center()
             .fill(if hexed { p.hex } else { p.primary_bg })
-            .child(text(num.to_string()).font(TextStyle::new(11.0, 750.0).features("'tnum' 1")).color(p.primary_ink));
+            .child(text(num.to_string()).font(TextStyle::new(legible(11.0), 750.0).features("'tnum' 1")).color(p.primary_ink));
         tag_wrap = tag_wrap.child(el().absolute(-6.0, -7.0).child(step_badge));
     }
     let tag = col().w_full().child(tag_wrap);
@@ -540,6 +560,7 @@ pub fn grimoire_lanes(state: &CanvasState) -> Vec<(magicklala_graph::WireId, i8)
 
 const PULL_SLOP: f32 = 4.0;
 pub(crate) const DETAIL_ZOOM: f32 = 0.6;
+pub(crate) const LABEL_ZOOM: f32 = 0.42;
 const KIND_ZOOM: f32 = DETAIL_ZOOM;
 
 fn bottle_hex_pill(card: &NodeCardModel, p: &HearthPalette) -> Option<El> {
@@ -780,7 +801,11 @@ fn wire_shape(state: &CanvasState) -> Shape {
         }
     });
     let lanes = grimoire_lanes(state);
-    let shape = ordered.into_iter().fold(Shape::new(), |shape, (_, wire)| {
+    let lifted = match &state.drag {
+        DragState::PullingWire { held, detached: true, .. } => Some(held.id.clone()),
+        _ => None,
+    };
+    let shape = ordered.into_iter().filter(|(_, wire)| Some(&wire.id) != lifted.as_ref()).fold(Shape::new(), |shape, (_, wire)| {
         let from = state.camera.world_to_screen(wire.from);
         let to = state.camera.world_to_screen(wire.to);
         let untaken = has_run && !wire.active;
@@ -844,7 +869,8 @@ fn socket_row(card: &NodeCardModel, row_index: usize, dimmed: bool, p: &HearthPa
             Some(socket) => (socket.name.as_str(), 500.0, if dimmed { if p.light { hex(0x463D57) } else { hex(0xCFC7E6) } } else { p.ink_2 }),
             None => ("", 450.0, p.mute),
         };
-        text(if zoom >= DETAIL_ZOOM { content } else { "" }).font(TextStyle::new((13.0 * zoom).clamp(11.4, 13.5), weight)).color(color)
+        let floor = if zoom >= DETAIL_ZOOM { 11.4 } else { 10.0 };
+        text(if zoom >= LABEL_ZOOM { content } else { "" }).font(TextStyle::new((13.0 * zoom).clamp(floor, 13.5), weight)).color(color)
     };
     let mut r = row()
         .w_full()
@@ -1062,7 +1088,7 @@ fn socket_port<S: 'static>(
         (p.data_wire, p.card, 2.0 * zoom)
     };
     let hovered = (card.id.clone(), socket.name.clone(), output);
-    let shows_tip = zoom < DETAIL_ZOOM && state.hover_socket.as_ref() == Some(&hovered);
+    let shows_tip = zoom < LABEL_ZOOM && state.hover_socket.as_ref() == Some(&hovered);
     let mut port = el()
         .key(format!("socket-{}-{side}-{}", card.id.0, socket.name))
         .size(size * zoom, size * zoom)
@@ -1070,7 +1096,7 @@ fn socket_port<S: 'static>(
         .fill(fill)
         .border((1.6 * zoom).max(1.0), border_color)
         .absolute((socket.offset[0] - size / 2.0) * zoom, (socket.offset[1] - size / 2.0) * zoom);
-    if zoom < DETAIL_ZOOM {
+    if zoom < LABEL_ZOOM {
         let mine = hovered.clone();
         port = port.on_hover_change(move |s: &mut S, on, _| {
             let canvas = lens(s);
@@ -1112,25 +1138,26 @@ fn socket_port<S: 'static>(
                 }
                 Phase::Move => {
                     let zoom = canvas.camera.zoom;
-                    let mut lifted = None;
-                    if let DragState::PullingWire { held, base, cursor, detached } = &mut canvas.drag {
+                    if let DragState::PullingWire { base, cursor, detached, .. } = &mut canvas.drag {
                         *cursor = [base[0] + drag.dx / zoom, base[1] + drag.dy / zoom];
-                        if !*detached && drag.dx.hypot(drag.dy) >= PULL_SLOP {
-                            *detached = true;
-                            lifted = Some(held.id.clone());
-                        }
-                    }
-                    if let Some(id) = lifted {
-                        canvas.wires.retain(|wire| wire.id != id);
+                        *detached |= drag.dx.hypot(drag.dy) >= PULL_SLOP;
                     }
                 }
                 _ => {
-                    if let DragState::PullingWire { held, cursor, detached: true, .. } = canvas.drag.clone() {
+                    if let DragState::PullingWire { held, cursor, detached: true, .. } = canvas.drag.clone()
+                        && !drag.cancelled()
+                    {
                         let from = SocketRef::new(held.from_node.clone(), held.from_socket.clone());
-                        if drag.cancelled() {
-                            canvas.wires.push(held);
-                        } else if let Some(target) = canvas.input_socket_at(cursor) {
-                            canvas.last_connect_error = canvas.connect_sockets(&from, &target).err();
+                        match canvas.input_socket_at(cursor) {
+                            Some(target) if target == into => {}
+                            Some(target) => {
+                                canvas.wires.retain(|wire| wire.id != held.id);
+                                if let Err(refused) = canvas.connect_sockets(&from, &target) {
+                                    canvas.wires.push(held);
+                                    canvas.last_connect_error = Some(refused);
+                                }
+                            }
+                            None => canvas.wires.retain(|wire| wire.id != held.id),
                         }
                     }
                     canvas.drag = DragState::Idle;

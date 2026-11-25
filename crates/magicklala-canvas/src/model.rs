@@ -4,7 +4,7 @@ use crate::Camera;
 
 pub const CARD_WIDTH: f32 = 218.0;
 pub const CARD_HEADER: f32 = 44.0;
-pub const SOCKET_ROW: f32 = 22.0;
+pub const SOCKET_ROW: f32 = 28.0;
 pub const SOCKET_HIT_RADIUS: f32 = 14.0;
 const BODY_TOP: f32 = 6.0;
 const BREW_SCALE_FLOOR: f32 = 0.6;

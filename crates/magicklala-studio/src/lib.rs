@@ -787,6 +787,7 @@ pub enum UndoEntry {
         wires: Vec<WireModel>,
         bridges: Vec<(SocketRef, SocketRef)>,
         shelf: Option<ParkedShelf>,
+        call: Option<SubgraphRef>,
     },
     Variable {
         index: usize,
@@ -815,6 +816,7 @@ pub struct StudioApp {
     pub frozen_edit: TextEdit,
     pub trace_expanded: bool,
     pub trace_stale: bool,
+    pub variables_touched: bool,
     pub model_menu_open: bool,
     pub open_var_type: Option<usize>,
     pub pending_type_reset: Option<(usize, SocketType)>,
@@ -938,6 +940,7 @@ impl StudioApp {
             frozen_edit: TextEdit::new(""),
             trace_expanded: false,
             trace_stale: false,
+            variables_touched: false,
             model_menu_open: false,
             open_var_type: None,
             pending_type_reset: None,
@@ -1206,6 +1209,8 @@ impl StudioApp {
         self.validation = ValidationState::Unchecked;
         self.canvas.validated = false;
         self.dirty = true;
+        self.variables_touched = true;
+        self.sync_spell();
     }
 
     pub fn remove_variable_at(&mut self, index: usize) {
@@ -1222,6 +1227,7 @@ impl StudioApp {
         };
         self.undo_stack.push(UndoEntry::Variable { index, variable, name_edit, default_edit });
         self.undo_banner = Some(format!("Removed variable {name}"));
+        self.variables_touched = true;
         self.open_var_type = self.open_var_type.filter(|open| *open != index).map(|open| if open > index { open - 1 } else { open });
         self.pending_type_reset = self.pending_type_reset.filter(|(open, _)| *open != index).map(|(open, ty)| (if open > index { open - 1 } else { open }, ty));
         self.validation = ValidationState::Unchecked;
@@ -2201,7 +2207,7 @@ impl StudioApp {
             self.aside_refused.entry(id).or_default().push(bridge);
         }
         self.aside_bridges.retain(|_, bridges| !bridges.is_empty());
-        let mut vars_changed = false;
+        let mut vars_changed = std::mem::take(&mut self.variables_touched);
         for (idx, var) in self.spell.variables.iter_mut().enumerate() {
             if let Some(edit) = self.var_name_edits.get(idx) {
                 let next_name = edit.text.trim();
@@ -2531,21 +2537,7 @@ impl StudioApp {
         if !version_findings.is_empty() {
             return version_findings;
         }
-        let field_findings: Vec<HexFinding> = self
-            .brew_graph()
-            .nodes
-            .iter()
-            .filter(|node| node.kind != SUBGRAPH_KIND)
-            .filter_map(|node| {
-                let key = editable_field(&node.kind)?;
-                let field = self.specs.iter().find(|spec| spec.kind == node.kind)?.config.iter().find(|field| field.key == key && field.required)?;
-                let blank = node.config.get(key).is_none_or(|value| value.is_null() || value.as_str().is_some_and(|text| text.trim().is_empty()));
-                blank.then(|| {
-                    let readable = format!("{}: needs a {}", self.canvas.display_title(&node.id), field.label.to_lowercase());
-                    HexFinding { node: Some(node.id.clone()), socket: None, readable: readable.clone(), message: readable, mistyped: false }
-                })
-            })
-            .collect();
+        let field_findings = self.blank_field_findings();
         if !field_findings.is_empty() {
             return field_findings;
         }
@@ -2567,6 +2559,23 @@ impl StudioApp {
         }
     }
 
+    fn blank_field_findings(&self) -> Vec<HexFinding> {
+        self.brew_graph()
+            .nodes
+            .iter()
+            .filter(|node| node.kind != SUBGRAPH_KIND)
+            .filter_map(|node| {
+                let key = editable_field(&node.kind)?;
+                let field = self.specs.iter().find(|spec| spec.kind == node.kind)?.config.iter().find(|field| field.key == key && field.required)?;
+                let blank = node.config.get(key).is_none_or(|value| value.is_null() || value.as_str().is_some_and(|text| text.trim().is_empty()));
+                blank.then(|| {
+                    let readable = format!("{}: needs a {}", self.canvas.display_title(&node.id), field.label.to_lowercase());
+                    HexFinding { node: Some(node.id.clone()), socket: None, readable: readable.clone(), message: readable, mistyped: false }
+                })
+            })
+            .collect()
+    }
+
     fn check_spell_with_root(&self, root: SubgraphKey) -> Result<(), Vec<String>> {
         let variable_errors = self.variable_errors();
         if !variable_errors.is_empty() {
@@ -2575,6 +2584,10 @@ impl StudioApp {
         let version_errors = self.release_version_errors();
         if !version_errors.is_empty() {
             return Err(version_errors);
+        }
+        let blank_fields: Vec<String> = self.blank_field_findings().into_iter().map(|finding| finding.message).collect();
+        if !blank_fields.is_empty() {
+            return Err(blank_fields);
         }
         let validator = SpellValidator::new(self.specs.clone());
         validator.validate(&self.brew_graph()).map_err(|errors| errors.iter().map(ToString::to_string).collect::<Vec<_>>())?;
@@ -3048,6 +3061,7 @@ impl StudioApp {
             refused: self.aside_refused.get(&selected_id).cloned().unwrap_or_default(),
         });
         let at = self.canvas.nodes.iter().position(|card| card.id == selected_id).unwrap_or(self.canvas.nodes.len());
+        let call = self.spell.subgraphs.iter().find(|reference| reference.node_id == selected_id).cloned();
         let title = self.canvas.display_title(&selected_id);
         let bridges = self.bridge_around(&selected_id);
         self.canvas.select(Some(selected_id.clone()));
@@ -3058,7 +3072,7 @@ impl StudioApp {
             let prompt = self.prompts.remove(&removed.id);
             let version = self.versions.remove(&removed.id);
             let config = self.configs.remove(&removed.id);
-            self.undo_stack.push(UndoEntry::Node { at, card: Box::new(removed), prompt, version, config, wires: attached_wires, bridges, shelf });
+            self.undo_stack.push(UndoEntry::Node { at, card: Box::new(removed), prompt, version, config, wires: attached_wires, bridges, shelf, call });
             self.undo_banner = Some(format!("Removed {title}"));
             self.validation = ValidationState::Unchecked;
             self.dirty = true;
@@ -3086,9 +3100,12 @@ impl StudioApp {
                 self.validation = ValidationState::Unchecked;
                 self.sync_spell();
             }
-            UndoEntry::Node { at, card, prompt, version, config, wires, bridges, shelf } => {
+            UndoEntry::Node { at, card, prompt, version, config, wires, bridges, shelf, call } => {
                 self.drop_bridges(&bridges);
                 let id = card.id.clone();
+                if let Some(call) = call.filter(|call| !self.spell.subgraphs.iter().any(|kept| kept.node_id == call.node_id)) {
+                    self.spell.subgraphs.push(call);
+                }
                 if let Some(prompt) = prompt {
                     self.prompts.insert(id.clone(), prompt);
                 }
@@ -3122,6 +3139,7 @@ impl StudioApp {
                 self.var_name_edits.insert(name_at, name_edit);
                 let def_at = at.min(self.var_default_edits.len());
                 self.var_default_edits.insert(def_at, default_edit);
+                self.variables_touched = true;
                 self.validation = ValidationState::Unchecked;
                 self.canvas.validated = false;
                 self.dirty = true;
