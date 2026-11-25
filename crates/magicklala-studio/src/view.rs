@@ -968,6 +968,7 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     let agent_rows = agent_names.iter().fold(col().gap(6.0), |list, name| {
         let active = name == &app.spell.name;
         let published = app.active_release_version;
+        let shelved_live = (!active).then(|| app.saved_live.iter().find(|(saved, _)| saved == name).map(|(_, version)| *version)).flatten();
         let draft_tested = active && app.canvas.has_run() && !spell_invalid && published.is_some();
         let (sub_label, badge_label, badge_bg, badge_border, badge_ink, is_action) = if active && spell_invalid {
             (format!("{ingr_count} {ingr_word}"), "Hexed", t.hex_tint, t.hex, t.hex, false)
@@ -1003,6 +1004,10 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                 Some((_, summary)) => summary.clone(),
                 None if name == "Research Agent" => "3 ingredients".to_owned(),
                 None => "4 ingredients".to_owned(),
+            };
+            let sample_count = match shelved_live {
+                Some(version) => format!("{sample_count} · v{version} live"),
+                None => sample_count,
             };
             (sample_count, "Open ›", t.card, t.rule_2, t.ink, true)
         };
@@ -1048,7 +1053,7 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                                 light,
                                 56.0,
                                 70.0,
-                                active && published.is_some(),
+                                (active && published.is_some()) || shelved_live.is_some(),
                                 None,
                             ))
                             .size(56.0, 70.0)

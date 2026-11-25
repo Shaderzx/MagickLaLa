@@ -863,6 +863,7 @@ pub struct StudioApp {
     wire_homes: Vec<((SocketRef, SocketRef), (WireId, usize))>,
     var_problems: Vec<String>,
     pub saved_potions: Vec<(String, String)>,
+    pub saved_live: Vec<(String, u32)>,
     pub pantry_drag: Option<PantryDrag>,
     pub undo_banner: Option<String>,
     pub dirty: bool,
@@ -990,6 +991,7 @@ impl StudioApp {
             wire_homes: Vec::new(),
             var_problems: Vec::new(),
             saved_potions: Vec::new(),
+            saved_live: Vec::new(),
             pantry_drag: None,
             undo_banner: None,
             dirty: false,
@@ -1545,6 +1547,21 @@ impl StudioApp {
             .store
             .as_ref()
             .map(|store| store.saved_spells().into_iter().map(|record| (record.name.clone(), self.recipe_summary(&record.graph))).collect())
+            .unwrap_or_default();
+        self.saved_live = self
+            .store
+            .as_ref()
+            .map(|store| {
+                store
+                    .saved_spells()
+                    .into_iter()
+                    .filter_map(|record| {
+                        let releases = store.releases_of_record(record.id);
+                        let name = record.name.clone();
+                        StudioWorkspace::of(record, releases).active_release.map(|version| (name, version))
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
     }
 
