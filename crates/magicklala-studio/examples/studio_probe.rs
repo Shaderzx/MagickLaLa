@@ -4283,6 +4283,46 @@ fn hex_chips_clear() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn error_actions() -> Result<serde_json::Value, String> {
+    let mut demo = StudioApp::from_registry().spell.clone();
+    demo.wires.retain(|wire| wire.to_socket != "query" || wire.to_node.0 != "recall");
+    let mut wiring = runtime_for(demo);
+    let _ = validation_of(&mut wiring)?;
+    wiring.update(|app, _| app.canvas.select(Some(NodeId::from("recall"))));
+    wiring.frame(1.0);
+    let wiring_report = json!({
+        "grimoire": wiring.find("inspector-open-grimoire").is_some(),
+        "ringOnSelected": wiring.find("selection-ring-recall").is_some(),
+        "ringOnOthers": wiring.state.canvas.nodes.iter().filter(|card| card.id.0 != "recall").any(|card| wiring.find(&format!("selection-ring-{}", card.id.0)).is_some()),
+    });
+    let spell = StudioApp::from_registry().spell.clone();
+    let writer = spell.nodes.iter().find(|node| node.kind == "ai/generate_text").map(|node| node.id.clone()).ok_or("no writer")?;
+    let run = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4d61";
+    let at = "2026-11-25T10:00:00Z";
+    let spell_id = spell.id.0.to_string();
+    let summary = json!({ "run_id": run, "spell_id": spell_id, "started_at": at, "finished_at": at, "status": "failed", "nodes_executed": 1, "outputs": {}, "error": "service error" });
+    let events: Vec<magicklala_graph::TraceEvent> = [
+        json!({ "event": "run_started", "run_id": run, "spell_id": spell_id, "at": at }),
+        json!({ "event": "node_failed", "run_id": run, "node_id": writer.0, "at": at, "error": "service error: no LLM gateway is configured" }),
+        json!({ "event": "run_finished", "run_id": run, "at": at, "summary": summary }),
+    ]
+    .into_iter()
+    .map(|event| serde_json::from_value(event).map_err(|error| error.to_string()))
+    .collect::<Result<_, _>>()?;
+    let mut service = runtime_for(spell);
+    let chosen = writer.clone();
+    service.update(move |app, _| {
+        app.pending_trace.extend(events.clone());
+        while app.step_trace() {}
+        app.canvas.select(Some(chosen.clone()));
+    });
+    service.frame(1.0);
+    let service_report = json!({
+        "errorShown": service.find("inspector-error").is_some(),
+        "grimoire": service.find("inspector-open-grimoire").is_some(),
+    });
+    Ok(json!({ "wiring": wiring_report, "service": service_report }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11044,6 +11084,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("interrupted-bottles") => interrupted_bottles(),
         Some("twin-tags") => twin_tags(),
         Some("hex-chips-clear") => hex_chips_clear(),
+        Some("error-actions") => error_actions(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

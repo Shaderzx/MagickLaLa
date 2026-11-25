@@ -740,3 +740,10 @@ test('Red chips never cover a step name: after Check on the dozen-step potion, n
     expect({ scene, covered: cards.covered, onCardAbove: cards.onCardAbove }).toEqual({ scene, covered: [], onCardAbove: [] });
   }
 });
+
+test('Error actions fit the error: a step missing an input offers Grimoire and its selected red card wears a selection ring no other card has, while a step that failed because no AI service is set up shows its error without a Grimoire button', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['error-actions']);
+
+  expect(report.wiring).toEqual({ grimoire: true, ringOnSelected: true, ringOnOthers: false });
+  expect(report.service).toEqual({ errorShown: true, grimoire: false });
+});
