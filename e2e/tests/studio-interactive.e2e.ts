@@ -2046,3 +2046,9 @@ test('A card menu never floats over the pour fan or the Cauldron and Grimoire sw
   expect(report.dockedOffRecipe).toEqual([]);
   expect(report.dockedOutsideScroll).toEqual([]);
 });
+
+test('Bottles never share a visible name: two Sends fed by an orders route on two different Switches read Send · orders 1 and Send · orders 2, while a unique route keeps its plain name', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['twin-switch-names']);
+
+  expect(report.titles).toEqual(['Send · orders 1', 'Send · refunds', 'Send · orders 2']);
+});

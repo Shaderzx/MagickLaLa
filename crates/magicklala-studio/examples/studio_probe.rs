@@ -2997,7 +2997,28 @@ fn menu_fan() -> Result<serde_json::Value, String> {
             docked_off_recipe.push("shown on Variables".to_owned());
         }
     }
-    Ok(json!({ "onSwitcher": on_switcher, "floatingOnFan": floating_on_fan, "docked": docked, "dockedOffRecipe": docked_off_recipe, "dockedOutsideScroll": docked_outside_scroll }))
+    Ok(
+        json!({ "onSwitcher": on_switcher, "floatingOnFan": floating_on_fan, "docked": docked, "dockedOffRecipe": docked_off_recipe, "dockedOutsideScroll": docked_outside_scroll }),
+    )
+}
+fn twin_switch_names() -> Result<serde_json::Value, String> {
+    let mut spell = long_route_spell(&["orders", "refunds"]);
+    spell.nodes.push(NodeInstance { id: NodeId::from("route_two"), kind: "flow/switch".to_owned(), position: [260.0, 200.0], config: json!({ "cases": ["orders"] }) });
+    spell.nodes.push(NodeInstance { id: NodeId::from("send_late"), kind: "io/send_message".to_owned(), position: [560.0, 400.0], config: serde_json::Value::Null });
+    let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    spell.wires.push(wire("t0", ("send_1", "out"), ("route_two", "in")));
+    spell.wires.push(wire("t1", ("trigger", "content"), ("route_two", "value")));
+    spell.wires.push(wire("t2", ("route_two", "orders"), ("send_late", "in")));
+    spell.wires.push(wire("t3", ("trigger", "content"), ("send_late", "content")));
+    let rt = runtime_for(spell);
+    let titles: Vec<String> = ["send_0", "send_1", "send_late"].iter().map(|id| rt.state.canvas.display_title(&NodeId::from(*id))).collect();
+    Ok(json!({ "titles": titles }))
 }
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
@@ -9271,6 +9292,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("rack-pipes") => rack_pipes(),
         Some("long-routes") => long_routes(),
         Some("menu-fan") => menu_fan(),
+        Some("twin-switch-names") => twin_switch_names(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
