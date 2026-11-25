@@ -2226,3 +2226,10 @@ test('Card icons stay readable on crowded pots: the smallest ingredient icon is 
     expect({ scene, readable: report[scene] >= 14 }).toEqual({ scene, readable: true });
   }
 });
+
+test('Recipe speaks the cauldron language on the Cauldron tab: a selected step lists what it Pours in and Pours out, while Grimoire keeps the node words Sockets, Inputs and Outputs', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['socket-words']);
+
+  expect(report.cauldron).toEqual(['Pours', 'Pours in', 'Pours out']);
+  expect(report.grimoire).toEqual(['Sockets', 'Inputs', 'Outputs']);
+});
