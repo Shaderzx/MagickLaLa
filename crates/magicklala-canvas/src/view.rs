@@ -717,7 +717,7 @@ pub(crate) fn potion_stand_view<S: 'static>(
     }
 
     let kind_fits = out_kind.chars().count() as f32 * 6.7 * legible(11.0) / 11.0 <= width - 22.0;
-    let shown_step = step_num.filter(|_| out_brewed || output.status == ExecutionStatus::Failed);
+    let shown_step = step_num.filter(|_| out_brewed || (output.step_order.is_some() && output.status == ExecutionStatus::Failed));
     let badge_room = if shown_step.is_some() { (legible(11.0) * 1.6 - 2.0).max(10.0) } else { 10.0 };
     let step_badge = shown_step.map(|num| {
         let side = legible(11.0) * 1.6;
@@ -770,9 +770,10 @@ pub(crate) fn potion_stand_view<S: 'static>(
         let wrapped = el().w_full().child(tag_card).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(timing_pill));
         tag_card = col().w_full().child(wrapped.children(step_badge));
     } else if let Some(pill) = hex_pill {
+        let clear = if step_badge.is_some() { legible(11.0) * 1.6 } else { 8.0 };
         tag_card = col()
             .w_full()
-            .child(el().w_full().child(tag_card).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(pill)).children(step_badge));
+            .child(el().w_full().child(tag_card).child(row().w_full().pl(clear).pr(8.0).justify_end().absolute(0.0, -12.0).child(pill)).children(step_badge));
     } else if let Some(badge) = step_badge {
         tag_card = col().w_full().child(el().w_full().child(tag_card).child(badge));
     }

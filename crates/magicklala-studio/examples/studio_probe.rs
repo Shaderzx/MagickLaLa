@@ -3003,8 +3003,18 @@ fn menu_fan() -> Result<serde_json::Value, String> {
 }
 fn twin_switch_names() -> Result<serde_json::Value, String> {
     let mut spell = long_route_spell(&["orders", "refunds"]);
-    spell.nodes.push(NodeInstance { id: NodeId::from("route_two"), kind: "flow/switch".to_owned(), position: [260.0, 200.0], config: json!({ "cases": ["orders"] }) });
-    spell.nodes.push(NodeInstance { id: NodeId::from("send_late"), kind: "io/send_message".to_owned(), position: [560.0, 400.0], config: serde_json::Value::Null });
+    spell.nodes.push(NodeInstance {
+        id: NodeId::from("route_two"),
+        kind: "flow/switch".to_owned(),
+        position: [260.0, 200.0],
+        config: json!({ "cases": ["orders"] }),
+    });
+    spell.nodes.push(NodeInstance {
+        id: NodeId::from("send_late"),
+        kind: "io/send_message".to_owned(),
+        position: [560.0, 400.0],
+        config: serde_json::Value::Null,
+    });
     let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
         id: WireId::from(id),
         from_node: NodeId::from(from.0),

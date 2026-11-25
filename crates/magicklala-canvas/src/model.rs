@@ -351,7 +351,9 @@ impl CanvasState {
                 .map(|wire| (wire.from_node.clone(), wire.from_socket.clone()))
         };
         let route = route_of(id);
-        let same_route: Vec<&&NodeId> = twins.iter().filter(|twin| route.is_some() && route_of(twin) == route).collect();
+        let socket_of = |node: &NodeId| route_of(node).map(|(_, socket)| socket);
+        let same_route: Vec<&&NodeId> =
+            twins.iter().filter(|twin| route.is_some() && socket_of(twin) == route.as_ref().map(|(_, socket)| socket.clone())).collect();
         match route.map(|(_, socket)| socket) {
             Some(route) if same_route.len() > 1 => {
                 format!("{short} · {route} {}", same_route.iter().position(|twin| **twin == id).unwrap_or_default() + 1)

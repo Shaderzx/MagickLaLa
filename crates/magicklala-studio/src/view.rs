@@ -182,6 +182,8 @@ fn context_tether(card: [f32; 4], menu: [f32; 4], t: &HearthPalette) -> Option<E
     Some(canvas(thread).key("context-tether").size(width, height).absolute(left, top))
 }
 
+const MODE_SWITCH_ZONE: [f32; 4] = [8.0, 6.0, 164.0, 44.0];
+
 fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<(El, Option<El>, Option<[f32; 2]>)> {
     let anchor = app.canvas.context_menu?;
     let view = app.canvas_size();
@@ -200,7 +202,11 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<(El, Option<El>, O
     let overlap = |spot: [f32; 2], r: [f32; 4]| overlap_beyond(spot, r, 4.0);
     let pot_zone = plan.as_ref().map(|plan| {
         let body = plan.pot_body(false);
-        [body[0], body[1], body[2], (plan.plaque_top + 34.0 * plan.scale.max(0.6)) - body[1]]
+        let s = plan.scale;
+        let top = body[1].min(plan.pot[1]);
+        let left = body[0].min(plan.pot[0] - 32.0 * s);
+        let right = (body[0] + body[2]).max(plan.pot[0] + plan.pot[2] + 32.0 * s);
+        [left, top, right - left, (plan.plaque_top + 34.0 * s.max(0.6)) - top]
     });
     let picked = app.canvas.selection.clone();
     let others: Vec<[f32; 4]> = match &plan {
@@ -221,6 +227,7 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<(El, Option<El>, O
             })
             .collect(),
     };
+    let others: Vec<[f32; 4]> = others.into_iter().chain(std::iter::once(MODE_SWITCH_ZONE)).collect();
     let clamp = |[x, y]: [f32; 2]| [x.min(view.0 - menu_w - 12.0).max(12.0), y.min(view.1 - menu_h - 12.0).max(12.0)];
     let beside = app.canvas.context_card.filter(|_| app.canvas.selection.is_some()).map(|card| {
         let below = card[1] + card[3] + 10.0;
@@ -1264,9 +1271,16 @@ fn inspector(app: &StudioApp, t: &HearthPalette, docked: Option<El>) -> El {
         .child(tab_sized("tab-variables", "Variables", app.right_tab == RightTab::Variables, compact, light, t, |app| app.right_tab = RightTab::Variables))
         .child(tab_sized("tab-playground", "Tasting", app.right_tab == RightTab::Playground, compact, light, t, |app| app.right_tab = RightTab::Playground));
     let mut panel = col().key("inspector").w(panel_w).h_full().min_h(0.0).fill(t.shelf).border_sides([0.0, 0.0, 0.0, 1.0], t.rule).child(tabs);
-    if let Some(menu) = docked {
-        panel = panel.child(row().w_full().px(10.0).pt(8.0).child(menu.w_full()));
+    let opened = app.canvas.context_menu;
+    if docked.is_some() && app.docked_menu_seen != opened {
+        panel = panel.child(el().key("docked-menu-opener").size(0.0, 0.0).on_layout(move |app: &mut StudioApp, _| {
+            if app.docked_menu_seen != opened {
+                app.docked_menu_seen = opened;
+                app.right_tab = RightTab::Inspector;
+            }
+        }));
     }
+    let docked = docked.filter(|_| app.right_tab == RightTab::Inspector).map(El::w_full);
     match app.right_tab {
         RightTab::Playground => panel = panel.child(playground_panel(app, light, t)),
         RightTab::Trace => {
@@ -1292,6 +1306,7 @@ fn inspector(app: &StudioApp, t: &HearthPalette, docked: Option<El>) -> El {
                     .px(14.0)
                     .pb(14.0)
                     .scroll(ScrollSpec { stick_bottom: false })
+                    .children(docked.map(|menu| row().w_full().pt(8.0).pb(4.0).child(menu)))
                     .child(inspector_body(app, light, t)),
             );
         }
