@@ -141,9 +141,11 @@ fn socket_pairs(wires: &[Wire]) -> Vec<(SocketRef, SocketRef)> {
 }
 
 fn set_earlier_on_route(graph: &SpellGraph, node: &NodeId, name: &str, is_flow: impl Fn(&magicklala_graph::Wire) -> bool) -> bool {
-    let sets_it = |id: &NodeId| {
-        graph.node(id).is_some_and(|step| step.kind == "var/set" && step.config.get("name").and_then(|value| value.as_str()).map(str::trim) == Some(name))
+    let touches = |id: &NodeId, kind: &str| {
+        graph.node(id).is_some_and(|step| step.kind == kind && step.config.get("name").and_then(|value| value.as_str()).map(str::trim) == Some(name))
     };
+    let sets_it = |id: &NodeId| touches(id, "var/set");
+    let resets_it = |id: &NodeId| touches(id, "var/reset");
     let mut seen = std::collections::HashSet::new();
     let mut frontier = vec![node.clone()];
     let mut met_a_set = false;
@@ -153,6 +155,9 @@ fn set_earlier_on_route(graph: &SpellGraph, node: &NodeId, name: &str, is_flow: 
             return false;
         }
         for from in feeders {
+            if resets_it(from) {
+                return false;
+            }
             if sets_it(from) {
                 met_a_set = true;
             } else if seen.insert(from.clone()) {
@@ -3244,7 +3249,7 @@ impl StudioApp {
                 };
                 let problem = match &value {
                     _ if !type_fits => Some(format!("holds {}", type_words(variable.ty))),
-                    None if matches!(field.kind, FieldKind::Number { .. })
+                    None if matches!(field.kind, FieldKind::Number { .. } | FieldKind::Boolean | FieldKind::Select { .. })
                         && !set_earlier_on_route(&graph, &node.id, name, |wire| {
                             self.input_type(&SocketRef::new(wire.to_node.clone(), wire.to_socket.clone())).is_some_and(|ty| ty.is_flow())
                         }) =>
