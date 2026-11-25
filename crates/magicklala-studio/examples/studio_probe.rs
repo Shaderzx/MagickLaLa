@@ -5916,6 +5916,138 @@ fn steady_hands() -> Result<serde_json::Value, String> {
 
     Ok(json!({ "menus": menus, "keys": keys, "findings": findings, "staleHint": stale_hint, "hintBefore": hint_before, "orphans": orphans }))
 }
+fn fair_shelves() -> Result<serde_json::Value, String> {
+    let open = |spell: SpellGraph, size: (f32, f32)| {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt
+    };
+    let mut layouts = Vec::new();
+    let mut bends = Vec::new();
+    for (name, spell) in [("4", many_bottle_spell(4)), ("8", many_bottle_spell(8)), ("kitchen", crowded_kitchen())] {
+        let rt = open(spell, (1280.0, 800.0));
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        if name != "kitchen" {
+            layouts.push(json!({ "case": name, "stacked": plan.lanes.is_some() }));
+        }
+        let s = plan.scale;
+        for (index, ribbon) in magicklala_canvas::cauldron::ribbon_paths(&plan).iter().enumerate() {
+            let mouth = ribbon.last().copied().unwrap_or_default();
+            let body: Vec<[f32; 2]> = ribbon.iter().copied().filter(|p| (p[0] - mouth[0]).hypot(p[1] - mouth[1]) > 24.0 * s).collect();
+            let tightest = body
+                .windows(5)
+                .filter_map(|w| {
+                    let (a, b, c) = (w[0], w[2], w[4]);
+                    let ab = (b[0] - a[0]).hypot(b[1] - a[1]);
+                    let bc = (c[0] - b[0]).hypot(c[1] - b[1]);
+                    let ca = (a[0] - c[0]).hypot(a[1] - c[1]);
+                    let area2 = ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs();
+                    (area2 > 1e-3).then(|| ab * bc * ca / (2.0 * area2))
+                })
+                .fold(f32::MAX, f32::min);
+            if tightest < 14.0 * s {
+                bends.push(format!("{name}: ribbon {index} bends at {:.0}px", tightest));
+            }
+        }
+    }
+
+    let mut grim = runtime_for(StudioApp::from_registry().spell.clone());
+    click(&mut grim, "mode-grimoire")?;
+    grim.update(|app, _| {
+        app.canvas.camera.zoom = 0.36;
+        app.canvas.camera.pan_x = 4.0;
+        app.canvas.camera.pan_y = 60.0;
+    });
+    grim.frame(1.0);
+    let leftmost = grim.state.canvas.nodes.iter().min_by(|a, b| a.position[0].total_cmp(&b.position[0])).cloned().ok_or("no cards")?;
+    let socket = leftmost.inputs.first().or(leftmost.outputs.first()).cloned().ok_or("no socket")?;
+    let is_output = leftmost.inputs.is_empty();
+    let hovered = (leftmost.id.clone(), socket.name.clone(), is_output);
+    grim.update(move |app, _| app.canvas.hover_socket = Some(hovered.clone()));
+    grim.frame(1.0);
+    let canvas_rect = layout_rect(&grim, "canvas").ok_or("no canvas")?;
+    let tip = layout_rect(&grim, "socket-tip");
+    let elements = grim.elements();
+    let tip_index = elements.iter().position(|element| element.key.as_deref() == Some("socket-tip"));
+    let last_card = elements.iter().rposition(|element| element.key.as_deref().is_some_and(|key| key.starts_with("node-")));
+    let tooltip = json!({
+        "shown": tip.is_some(),
+        "inside": tip.is_some_and(|t| t[0] >= canvas_rect[0] && t[0] + t[2] <= canvas_rect[0] + canvas_rect[2] && t[1] >= canvas_rect[1]),
+        "onTop": matches!((tip_index, last_card), (Some(tip), Some(card)) if tip > card),
+    });
+
+    let bottle_kind = |spell: SpellGraph| {
+        let rt = open(spell, (960.0, 640.0));
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        plan.with_role(magicklala_canvas::BrewRole::Bottle)
+            .any(|card| text_lines_under(&rt, &format!("node-{}", card.id.0)).iter().any(|(line, _)| line == "io/send_message"))
+    };
+    let kinds = json!({ "dozen": bottle_kind(dozen_ingredient_spell()), "support": bottle_kind(StudioApp::from_registry().spell.clone()) });
+
+    let mut hexed = open(example("parallel_research.json")?, (960.0, 640.0));
+    let plan = magicklala_canvas::brew_plan(&hexed.state.canvas, hexed.state.canvas_size());
+    let mirrored = plan
+        .cards
+        .iter()
+        .find(|card| card.mirrored && hexed.state.canvas.card(&card.id).is_some_and(|c| c.inputs.iter().any(|s| s.name == "prompt")))
+        .map(|card| card.id.clone())
+        .ok_or("no mirrored model")?;
+    let cut = mirrored.clone();
+    hexed.update(move |app, _| {
+        app.canvas.wires.retain(|wire| !(wire.to_node == cut && wire.to_socket == "prompt"));
+        app.prompts.insert(cut.clone(), rune::TextEdit::new(""));
+        app.sync_spell();
+    });
+    click(&mut hexed, "validate")?;
+    hexed.frame(1.0);
+    let card_rect = layout_rect(&hexed, &format!("node-{}", mirrored.0)).ok_or("no card")?;
+    let pill = layout_rect(&hexed, &format!("status-pill-{}", mirrored.0));
+    let pill_inside = pill.is_some_and(|p| p[0] >= card_rect[0] - 1.0 && p[0] + p[2] <= card_rect[0] + card_rect[2] + 1.0);
+
+    let mut fresh = runtime_for(tasting_spell());
+    click(&mut fresh, "mode-grimoire")?;
+    let model = fresh.state.spawn("ai/generate_text").ok_or("no model")?;
+    let seeded = fresh.state.prompts.get(&model).map(|edit| edit.text.clone()).unwrap_or_default();
+    let mut words = SpellGraph::new("Words");
+    words.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("ask", "ai/generate_text", 280.0, json!({ "prompt": "Reply in a {{mood}} voice" })),
+        studio_node("say", "io/send_message", 560.0, serde_json::Value::Null),
+    ];
+    words.wires = vec![
+        studio_wire("w1", ("trigger", "out"), ("ask", "in")),
+        studio_wire("w2", ("ask", "out"), ("say", "in")),
+        studio_wire("w3", ("ask", "text"), ("say", "content")),
+    ];
+    let mut worded = runtime_for(words.clone());
+    click(&mut worded, "validate")?;
+    let unfilled = worded.state.validation.label();
+    let unfilled_says = match &worded.state.validation {
+        ValidationState::Invalid(errors) => errors.join(" "),
+        _ => String::new(),
+    };
+    let mut templated = words;
+    templated.nodes[1] = studio_node("ask", "text/template", 280.0, json!({ "template": "Reply in a {{mood}} voice" }));
+    templated.wires = vec![studio_wire("w1", ("trigger", "out"), ("say", "in")), studio_wire("w3", ("ask", "text"), ("say", "content"))];
+    templated.variables = vec![magicklala_graph::VariableDef {
+        name: "mood".to_owned(),
+        ty: SocketType::String,
+        default: Some(magicklala_graph::Value::String("calm".to_owned())),
+        exposed: true,
+    }];
+    let mut filled = runtime_for(templated);
+    click(&mut filled, "validate")?;
+    let prompts = json!({
+        "seededTokens": seeded.matches("{{").count(),
+        "unfilledCheck": unfilled,
+        "namesWord": unfilled_says.contains("{{mood}}"),
+        "filledCheck": filled.state.validation.label(),
+    });
+
+    Ok(json!({ "layouts": layouts, "bends": bends, "tooltip": tooltip, "bottleKinds": kinds, "pillInside": pill_inside, "prompts": prompts }))
+}
 fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
@@ -6826,6 +6958,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("crowded-bottles") => crowded_bottles(args),
         Some("agreed-edits") => agreed_edits(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("steady-hands") => steady_hands(),
+        Some("fair-shelves") => fair_shelves(),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("drawn-truths") => drawn_truths(),

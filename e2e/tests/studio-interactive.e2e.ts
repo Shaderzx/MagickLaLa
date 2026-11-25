@@ -1589,3 +1589,13 @@ test('Steady hands: a card menu opens beside its card clear of the pot and other
   expect(report.staleHint).toBe(false);
   expect(report.orphans).toEqual([]);
 });
+test('Fair shelves: a short recipe with four or eight bottles keeps the pot centred instead of stacking, bottle ribbons turn on wide curves, the zoomed-out socket tip floats above every card inside the canvas, bottles show their kind the same way at 960, hex pills stay inside right-hand cards, and prompts never seed or keep words nothing fills', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['fair-shelves']);
+
+  expect(report.layouts).toEqual([{ case: '4', stacked: false }, { case: '8', stacked: false }]);
+  expect(report.bends).toEqual([]);
+  expect(report.tooltip).toEqual({ shown: true, inside: true, onTop: true });
+  expect(report.bottleKinds.dozen).toBe(report.bottleKinds.support);
+  expect(report.pillInside).toBe(true);
+  expect(report.prompts).toEqual({ seededTokens: 0, unfilledCheck: 'invalid', namesWord: true, filledCheck: 'valid' });
+});
