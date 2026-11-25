@@ -3349,7 +3349,11 @@ fn bound_unset() -> Result<serde_json::Value, String> {
             studio_node("loop", "flow/while_loop", 260.0, json!({ "max_iterations": "{{limit}}" })),
             studio_node("tick", "var/set", 520.0, json!({ "name": "seen", "value": 1 })),
         ];
-        spell.wires = vec![link("l1", ("start", "out"), ("loop", "in")), link("l2", ("always", "matched"), ("loop", "condition")), link("l3", ("loop", "body"), ("tick", "in"))];
+        spell.wires = vec![
+            link("l1", ("start", "out"), ("loop", "in")),
+            link("l2", ("always", "matched"), ("loop", "condition")),
+            link("l3", ("loop", "body"), ("tick", "in")),
+        ];
         spell.variables = vec![
             VariableDef { name: "limit".to_owned(), ty, default, exposed: true },
             VariableDef { name: "seen".to_owned(), ty: SocketType::Int, default: Some(Value::Int(0)), exposed: true },
@@ -3357,14 +3361,23 @@ fn bound_unset() -> Result<serde_json::Value, String> {
         spell
     };
     let mut report = serde_json::Map::new();
-    for (name, spell) in [
-        ("whole", looped(SocketType::Float, Some(Value::Float(3.0)))),
-        ("unset", looped(SocketType::Int, None)),
-        ("flag", looped(SocketType::Bool, None)),
-    ] {
+    for (name, spell) in
+        [("whole", looped(SocketType::Float, Some(Value::Float(3.0)))), ("unset", looped(SocketType::Int, None)), ("flag", looped(SocketType::Bool, None))]
+    {
         let mut rt = runtime_for(spell);
         let check = validation_of(&mut rt)?;
-        report.insert(name.to_owned(), json!(check["errors"].as_array().cloned().unwrap_or_default().into_iter().filter(|error| error.as_str().is_some_and(|text| text.contains("While Loop"))).collect::<Vec<_>>()));
+        report.insert(
+            name.to_owned(),
+            json!(
+                check["errors"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|error| error.as_str().is_some_and(|text| text.contains("While Loop")))
+                    .collect::<Vec<_>>()
+            ),
+        );
     }
     Ok(serde_json::Value::Object(report))
 }

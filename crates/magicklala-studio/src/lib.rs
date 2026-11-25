@@ -3120,55 +3120,59 @@ impl StudioApp {
             for (key, setting) in node.config.as_object().into_iter().flatten().filter(|(key, _)| !magicklala_graph::UNBOUND_SETTINGS.contains(&key.as_str())) {
                 let Some(name) = magicklala_graph::bound_variable(setting) else { continue };
                 let Some(field) = spec.config.iter().find(|field| &field.key == key) else { continue };
-                let Some(value) = self
-                    .spell
-                    .variables
-                    .iter()
-                    .find(|variable| variable.name == name)
-                    .and_then(|variable| variable.default.as_ref())
-                    .map(|value| value.to_json())
-                else {
-                    continue;
-                };
-                if value.is_null() {
-                    continue;
-                }
+                let Some(variable) = self.spell.variables.iter().find(|variable| variable.name == name) else { continue };
+                let value = variable.default.as_ref().map(|value| value.to_json()).filter(|value| !value.is_null());
+                let whole = matches!(field.kind, FieldKind::Number { min, .. } if min == Some(1.0))
+                    || field.default.as_ref().is_some_and(|default| default.is_i64() || default.is_u64());
                 let need = match &field.kind {
                     FieldKind::Number { min, max } => {
-                        let whole = field.default.as_ref().is_some_and(|default| default.is_i64() || default.is_u64()) || *min == Some(1.0);
-                        let fits = value.as_f64().is_some_and(|number| {
-                            min.is_none_or(|min| number >= min) && max.is_none_or(|max| number <= max) && (!whole || number.fract() == 0.0)
-                        });
                         let noun = if whole { "a whole number" } else { "a number" };
-                        (!fits).then(|| match (min, max) {
+                        Some(match (min, max) {
                             (Some(min), Some(max)) => format!("{noun} from {min} to {max}"),
                             (Some(min), None) => format!("{noun} of at least {min}"),
                             (None, Some(max)) => format!("{noun} of at most {max}"),
                             (None, None) => noun.to_owned(),
                         })
                     }
-                    FieldKind::Boolean => (!value.is_boolean()).then(|| "true or false".to_owned()),
-                    FieldKind::Select { options } => {
-                        (!value.as_str().is_some_and(|text| options.iter().any(|option| option == text))).then(|| format!("one of {}", options.join(", ")))
-                    }
+                    FieldKind::Boolean => Some("true or false".to_owned()),
+                    FieldKind::Select { options } => Some(format!("one of {}", options.join(", "))),
                     FieldKind::Json => None,
                     FieldKind::Text | FieldKind::TextArea | FieldKind::Code { .. } | FieldKind::Credential { .. } | FieldKind::Model { .. } => {
-                        (!value.is_string()).then(|| "text".to_owned())
+                        Some("text".to_owned())
                     }
                 };
-                if let Some(need) = need {
-                    let shown = match value.as_f64().filter(|number| value.is_f64() && number.fract() == 0.0) {
-                        Some(whole) => format!("{whole}"),
-                        None => value.to_string(),
-                    };
-                    let readable = format!("{}: {} needs {need}, but the variable {name} is {shown}", self.canvas.display_title(&node.id), field.label);
+                let Some(need) = need else { continue };
+                let type_fits = match &field.kind {
+                    FieldKind::Number { .. } => matches!(variable.ty, SocketType::Int | SocketType::Float | SocketType::Any),
+                    FieldKind::Boolean => matches!(variable.ty, SocketType::Bool | SocketType::Any),
+                    _ => matches!(variable.ty, SocketType::String | SocketType::Any),
+                };
+                let value_fits = |value: &serde_json::Value| match &field.kind {
+                    FieldKind::Number { min, max } => value
+                        .as_f64()
+                        .is_some_and(|number| min.is_none_or(|min| number >= min) && max.is_none_or(|max| number <= max) && (!whole || number.fract() == 0.0)),
+                    FieldKind::Boolean => value.is_boolean(),
+                    FieldKind::Select { options } => value.as_str().is_some_and(|text| options.iter().any(|option| option == text)),
+                    _ => value.is_string(),
+                };
+                let problem = match &value {
+                    _ if !type_fits => Some(format!("holds {}", type_words(variable.ty))),
+                    None if matches!(field.kind, FieldKind::Number { .. }) => Some("has no value".to_owned()),
+                    None => None,
+                    Some(value) if !value_fits(value) => Some(match value.as_f64().filter(|number| value.is_f64() && number.fract() == 0.0) {
+                        Some(whole) => format!("is {whole}"),
+                        None => format!("is {value}"),
+                    }),
+                    Some(_) => None,
+                };
+                if let Some(problem) = problem {
+                    let readable = format!("{}: {} needs {need}, but the variable {name} {problem}", self.canvas.display_title(&node.id), field.label);
                     findings.push(HexFinding { node: Some(node.id.clone()), socket: None, readable: readable.clone(), message: readable, mistyped: false });
                 }
             }
         }
         findings
     }
-
     fn undeclared_variable_steps(&self) -> Vec<HexFinding> {
         self.brew_graph()
             .nodes
@@ -4336,6 +4340,16 @@ pub fn numbered_steps(trace: &[TraceLine]) -> Vec<(String, &TraceLine)> {
 
 pub fn top_step_count(trace: &[TraceLine]) -> usize {
     numbered_steps(trace).iter().filter(|(number, _)| !number.contains('.')).map(|(number, _)| number.clone()).collect::<std::collections::BTreeSet<_>>().len()
+}
+
+fn type_words(ty: SocketType) -> &'static str {
+    match ty {
+        SocketType::Bool => "true or false",
+        SocketType::Int => "a whole number",
+        SocketType::Float => "a number",
+        SocketType::String => "text",
+        _ => "structured data",
+    }
 }
 
 pub fn template_roots(text: &str) -> Vec<String> {
