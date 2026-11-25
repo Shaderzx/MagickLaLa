@@ -2153,7 +2153,18 @@ fn downhill() -> Result<serde_json::Value, String> {
                 cut_kinds.push(format!("{name} {}", model.kind));
             }
         }
-        let mut reading: Vec<(i32, f32, NodeId)> = bottles.iter().map(|card| ((card.rect[1] / (card.rect[3] * 0.6)).floor() as i32, card.rect[0], card.id.clone())).collect();
+        let mut by_height: Vec<&&magicklala_canvas::BrewCard> = bottles.iter().collect();
+        by_height.sort_by(|a, b| a.rect[1].total_cmp(&b.rect[1]));
+        let mut row = 0;
+        let mut row_top = by_height.first().map_or(0.0, |card| card.rect[1]);
+        let mut reading: Vec<(i32, f32, NodeId)> = Vec::new();
+        for card in by_height {
+            if card.rect[1] - row_top > card.rect[3] * 0.5 {
+                row += 1;
+                row_top = card.rect[1];
+            }
+            reading.push((row, card.rect[0], card.id.clone()));
+        }
         reading.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
         let read: Vec<String> = reading.iter().map(|(_, _, id)| rt.state.canvas.display_title(id)).collect();
         let listed: Vec<String> = bottles.iter().map(|card| rt.state.canvas.display_title(&card.id)).collect();
@@ -4632,7 +4643,7 @@ fn plain_sight() -> Result<serde_json::Value, String> {
         for size in sizes {
             let rt = brewed(spell.clone(), size)?;
             let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
-            let ribbons = magicklala_canvas::cauldron::ribbon_paths(&plan);
+            let ribbons = if magicklala_canvas::cauldron::rack_planks(&plan).is_some() { Vec::new() } else { magicklala_canvas::cauldron::ribbon_paths(&plan) };
             let body = |ribbon: &Vec<[f32; 2]>| -> Vec<[f32; 2]> {
                 let tap = ribbon.first().copied().unwrap_or_default();
                 let mouth = ribbon.last().copied().unwrap_or_default();
@@ -6896,7 +6907,10 @@ fn clear_sight() -> Result<serde_json::Value, String> {
         .into_iter()
         .filter(|(_, rect)| !menu_words.contains(rect))
         .filter(|(_, rect)| {
-            rect[0] < docked_menu[0] + docked_menu[2] && docked_menu[0] < rect[0] + rect[2] && rect[1] < docked_menu[1] + docked_menu[3] && docked_menu[1] < rect[1] + rect[3]
+            rect[0] < docked_menu[0] + docked_menu[2]
+                && docked_menu[0] < rect[0] + rect[2]
+                && rect[1] < docked_menu[1] + docked_menu[3]
+                && docked_menu[1] < rect[1] + rect[3]
         })
         .map(|(line, _)| line)
         .collect();

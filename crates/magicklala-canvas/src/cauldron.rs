@@ -26,7 +26,7 @@ fn rim_point(plan: &BrewPlan, share: f32) -> [f32; 2] {
     [pot[0] + pot[2] * (0.30 + 0.40 * share), pot[1] + pot[3] * 0.44]
 }
 
-fn spout_point(plan: &BrewPlan) -> [f32; 2] {
+pub fn spout_point(plan: &BrewPlan) -> [f32; 2] {
     let (cx, cy, u) = pot_frame(plan.pot);
     [cx + 94.0 * u, cy + 30.0 * u]
 }
@@ -251,7 +251,7 @@ fn rack_ribbons(plan: &BrewPlan, bottles: &[&BrewCard]) -> Option<Vec<Vec<[f32; 
             let neck = bottle_neck(card, bottles.len());
             let pipe = pipe_height(plan, card);
             if (pipe - tap[1]).abs() < 6.0 * s {
-                rounded_route(&[tap, [neck[0], tap[1]], neck], &[drip], 4.0 * s)
+                rounded_route(&[tap, [trunk_x, tap[1]], [neck[0], tap[1]], neck], &[0.0, drip], 4.0 * s)
             } else {
                 rounded_route(&[tap, [trunk_x, tap[1]], [trunk_x, pipe], [neck[0], pipe], neck], &[radius.min(trunk_room), radius, drip], 4.0 * s)
             }
@@ -361,7 +361,7 @@ fn ghost_neck(ghost: [f32; 4]) -> [f32; 2] {
     [ghost[0] + ghost[2] * 0.5, ghost[1] + ghost[3] * 0.15]
 }
 
-fn bottle_neck(card: &BrewCard, count: usize) -> [f32; 2] {
+pub fn bottle_neck(card: &BrewCard, count: usize) -> [f32; 2] {
     let rect = card.rect;
     let natural = bottle_size_for(count);
     let neck_share = if count > 1 { 17.8 / natural[1] } else { 28.0 / natural[1] };
@@ -870,9 +870,25 @@ fn plaque(state: &CanvasState, mood: CauldronMood, plan: &BrewPlan, p: &HearthPa
     )
 }
 
-fn rack_tag_floor(plan: &BrewPlan, bottles: &[&BrewCard]) -> f32 {
-    let title = crate::view::legible_size(12.5, plan.scale) * 1.35;
-    bottles.iter().map(|card| card.rect[1] + (66.0 + 12.0 + 16.0 + title + 2.0) * plan.scale).fold(f32::MIN, f32::max)
+fn title_lines(state: &CanvasState, plan: &BrewPlan, bottles: usize, id: &NodeId) -> f32 {
+    let size = crate::view::legible_size(12.5, plan.scale);
+    let inner = crate::brew::RACK_BOTTLE_SIZE[0] - 10.0;
+    if bottles <= 3 { (state.display_title(id).chars().count() as f32 * 0.62 * size / inner).ceil().clamp(1.0, 4.0) } else { 1.0 }
+}
+
+fn extra_title_lines(state: &CanvasState, plan: &BrewPlan, bottles: &[&BrewCard], id: &NodeId) -> f32 {
+    if bottles.len() < RACK_FROM {
+        return 0.0;
+    }
+    (title_lines(state, plan, bottles.len(), id) - 1.0) * crate::view::legible_size(12.5, plan.scale) * 1.35
+}
+
+fn rack_tag_floor(state: &CanvasState, plan: &BrewPlan, bottles: &[&BrewCard]) -> f32 {
+    let size = crate::view::legible_size(12.5, plan.scale);
+    bottles
+        .iter()
+        .map(|card| card.rect[1] + (66.0 + 12.0 + 16.0 + title_lines(state, plan, bottles.len(), &card.id) * size * 1.35 + 2.0) * plan.scale)
+        .fold(f32::MIN, f32::max)
 }
 
 fn rack_plank_shape(size: [f32; 2], rows: &[[f32; 3]], s: f32, p: &HearthPalette) -> Shape {
@@ -1099,7 +1115,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
                 row()
                     .w(frame[2])
                     .justify_center()
-                    .absolute(frame[0], rack_tag_floor(&plan, &bottles).max(frame[1] + frame[3]) + 6.0 * plan.scale)
+                    .absolute(frame[0], rack_tag_floor(state, &plan, &bottles).max(frame[1] + frame[3]) + 6.0 * plan.scale)
                     .child(el().key("rack-kind").child(text(*kind).font(TextStyle::new(size * plan.scale, 500.0).mono()).color(p.mute))),
             );
         }
@@ -1121,8 +1137,13 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         } else {
             potion_stand_view(state, card, step, [0.0, 0.0, natural[0]], potion_tint(state, &plan), mood, false, plan.scale, &p, lens)
         };
-        board =
-            board.child(el().key(format!("node-{}", placed.id.0)).size(natural[0], natural[1]).absolute(origin[0], origin[1]).child(view).scale(plan.scale));
+        board = board.child(
+            el().key(format!("node-{}", placed.id.0))
+                .size(natural[0], natural[1] + extra_title_lines(state, &plan, &bottles, &placed.id))
+                .absolute(origin[0], origin[1])
+                .child(view)
+                .scale(plan.scale),
+        );
     }
     if let Some(ghost) = plan.ghost_bottle {
         board = board.child(

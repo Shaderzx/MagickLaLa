@@ -352,7 +352,13 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
         .filter(|placed| placed.role != crate::brew::BrewRole::Bottle)
         .all(|placed| state.display_title(&placed.id).chars().count() as f32 * 7.6 * title_size / 13.0 <= title_room_est);
     let title_lines = if one_line || crammed { 1.0 } else { 2.0 };
-    let kind_fits = !dense && (title_lines * title_size + kind_size) * 1.25 + 8.0 <= dims[1];
+    let kinds_fit_across = plan
+        .cards
+        .iter()
+        .filter(|placed| placed.role != crate::brew::BrewRole::Bottle)
+        .filter_map(|placed| state.card(&placed.id))
+        .all(|other| other.kind.chars().count() as f32 * 0.62 * kind_size <= title_room_est + badge);
+    let kind_fits = !dense && kinds_fit_across && (title_lines * title_size + kind_size) * 1.25 + 8.0 <= dims[1];
     let title_room = dims[0] - 24.0 - 6.0 - 30.0;
     let wraps = narrow && state.display_title(&card.id).chars().count() as f32 * 7.4 * title_size / 13.0 > title_room;
     let title_ink = if dimmed { untaken_title } else { p.ink };
@@ -551,6 +557,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     };
     let title_col = if untaken { p.untaken_title() } else { p.ink };
     let sub_col = if untaken { p.untaken_sub() } else { p.mute };
+    let long_tag = crate::brew::potion_ends(state).len() <= 3;
     let tag_inner = col()
         .w_full()
         .px(if width >= crate::brew::RACK_BOTTLE_SIZE[0] + 1.0 { 9.0 } else { 5.0 })
@@ -562,10 +569,15 @@ pub(crate) fn branch_bottle_view<S: 'static>(
         .border(if taken || card.selected { 1.6 } else { 1.1 }, card_border)
         .shadow(2.0, 8.0, if untaken { Color::TRANSPARENT } else { p.shadow_card })
         .child(match route_key {
-            Some(key) => {
-                col().key(key).w_full().min_w(0.0).child(text(title).font(TextStyle::new(legible(12.5), 750.0)).color(title_col).wrap_anywhere().max_lines(2))
-            }
-            None => col().w_full().min_w(0.0).child(text(title).font(TextStyle::new(legible(12.5), 750.0)).color(title_col).wrap_anywhere().max_lines(2)),
+            Some(key) => col()
+                .key(key)
+                .w_full()
+                .min_w(0.0)
+                .child(text(title).font(TextStyle::new(legible(12.5), 750.0)).color(title_col).wrap_anywhere().max_lines(if long_tag { 4 } else { 2 })),
+            None => col()
+                .w_full()
+                .min_w(0.0)
+                .child(text(title).font(TextStyle::new(legible(12.5), 750.0)).color(title_col).wrap_anywhere().max_lines(if long_tag { 4 } else { 2 })),
         })
         .children((!terse).then(|| text(&card.kind).font(TextStyle::new(legible(11.0), 500.0).mono()).color(sub_col).truncate()));
     let mut tag_wrap = el().w_full().child(tag_inner).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(pill));

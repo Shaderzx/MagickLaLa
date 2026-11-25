@@ -397,10 +397,7 @@ pub fn studio_view(app: &StudioApp, _: &mut Cx<StudioApp>) -> El {
         .min_h(0.0)
         .child(left_rail(app, &t))
         .child(el().key("center").grow(1.0).min_w(0.0).h_full().child(canvas_with_menu(app, &t)))
-        .child(match context_menu(app, &t) {
-            Some((menu, _, None)) => inspector(app, &t).child(menu.absolute(10.0, 44.0)),
-            _ => inspector(app, &t),
-        });
+        .child(inspector(app, &t, context_menu(app, &t).and_then(|(menu, _, spot)| spot.is_none().then_some(menu))));
     let studio = col().key("studio").w_full().h_full().fill(t.paper).child(toolbar(app, &t)).child(middle).child(trace_strip(app, &t));
     let root = el().key("studio-root").w_full().h_full().child(studio).on_layout(|app: &mut StudioApp, rect: [f32; 4]| app.follow_window((rect[2], rect[3])));
     match pantry_ghost(app, &t) {
@@ -1257,7 +1254,7 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     })
 }
 
-fn inspector(app: &StudioApp, t: &HearthPalette) -> El {
+fn inspector(app: &StudioApp, t: &HearthPalette, docked: Option<El>) -> El {
     let light = app.theme == Theme::Light;
     let compact = app.compact_toolbar();
     let panel_w = app.inspector_width();
@@ -1273,6 +1270,9 @@ fn inspector(app: &StudioApp, t: &HearthPalette) -> El {
         .child(tab_sized("tab-variables", "Variables", app.right_tab == RightTab::Variables, compact, light, t, |app| app.right_tab = RightTab::Variables))
         .child(tab_sized("tab-playground", "Tasting", app.right_tab == RightTab::Playground, compact, light, t, |app| app.right_tab = RightTab::Playground));
     let mut panel = col().key("inspector").w(panel_w).h_full().min_h(0.0).fill(t.shelf).border_sides([0.0, 0.0, 0.0, 1.0], t.rule).child(tabs);
+    if let Some(menu) = docked {
+        panel = panel.child(row().w_full().px(10.0).pt(8.0).child(menu.w_full()));
+    }
     match app.right_tab {
         RightTab::Playground => panel = panel.child(playground_panel(app, light, t)),
         RightTab::Trace => {
