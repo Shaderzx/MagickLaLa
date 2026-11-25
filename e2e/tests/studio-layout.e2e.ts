@@ -816,3 +816,14 @@ test('Renaming a variable reaches every step that really reads it and nothing el
   expect(report.template).toBe('Say {{ amount.amount }} and {{amount}}');
   expect(report.aiPrompt).toBe('Hello {{value}}');
 });
+
+test('Check agrees with Brew on variable-bound settings: a Delay after Wait For All reads a variable one arm set, a value step reads a variable its consumer set first, a value step reading a variable nothing sets is flagged, and a JSON setting bound to a text variable is flagged', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['check-routes']);
+
+  expect(report.joined).toEqual({ check: 'valid', errors: [] });
+  expect(report.valueSetFirst).toEqual({ check: 'valid', errors: [] });
+  expect(report.valueNeverSet.check).toBe('invalid');
+  expect(report.valueNeverSet.errors).toEqual([expect.stringContaining('the variable pat has no value')]);
+  expect(report.jsonFromText.check).toBe('invalid');
+  expect(report.jsonFromText.errors).toEqual([expect.stringContaining('the variable keys holds text')]);
+});

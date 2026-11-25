@@ -4528,6 +4528,56 @@ fn rename_reach() -> Result<serde_json::Value, String> {
         "aiPrompt": setting(&rt.state, "llm", "prompt"),
     }))
 }
+fn check_routes() -> Result<serde_json::Value, String> {
+    use magicklala_graph::{Value, VariableDef};
+    let var = |name: &str, ty: SocketType, default: Option<Value>| VariableDef { name: name.to_owned(), ty, default, exposed: true };
+    let check = |spell: SpellGraph| -> Result<serde_json::Value, String> {
+        let mut rt = runtime_for(spell);
+        let report = validation_of(&mut rt)?;
+        Ok(json!({ "check": report["validation"], "errors": report["errors"] }))
+    };
+    let mut joined = SpellGraph::new("Joined");
+    joined.nodes = vec![
+        studio_node("start", "event/on_start", 0.0, serde_json::Value::Null),
+        studio_node("split", "flow/split", 150.0, serde_json::Value::Null),
+        studio_node("set", "var/set", 300.0, json!({ "name": "ms", "value": 5 })),
+        studio_node("join", "flow/wait_for_all", 450.0, serde_json::Value::Null),
+        studio_node("wait", "time/delay", 600.0, json!({ "ms": "{{ms}}" })),
+        studio_node("reply", "io/send_message", 750.0, json!({ "content": "Ready" })),
+    ];
+    joined.wires = vec![
+        studio_wire("j1", ("start", "out"), ("split", "in")),
+        studio_wire("j2", ("split", "out_0"), ("set", "in")),
+        studio_wire("j3", ("set", "out"), ("join", "in")),
+        studio_wire("j4", ("split", "out_1"), ("join", "in")),
+        studio_wire("j5", ("join", "out"), ("wait", "in")),
+        studio_wire("j6", ("wait", "out"), ("reply", "in")),
+    ];
+    joined.variables = vec![var("ms", SocketType::Int, None)];
+    let valued = |with_set: bool| {
+        let mut spell = SpellGraph::new("Valued");
+        spell.nodes = vec![
+            studio_node("start", "event/on_start", 0.0, serde_json::Value::Null),
+            studio_node("check", "logic/validate", 150.0, json!({ "pattern": "{{pat}}" })),
+            studio_node("text", "json/stringify", 300.0, serde_json::Value::Null),
+            studio_node("reply", "io/send_message", 600.0, serde_json::Value::Null),
+        ];
+        spell.wires = vec![studio_wire("v2", ("check", "errors"), ("text", "value")), studio_wire("v3", ("text", "text"), ("reply", "content"))];
+        if with_set {
+            spell.nodes.push(studio_node("set", "var/set", 450.0, json!({ "name": "pat", "value": "a+" })));
+            spell.wires.push(studio_wire("v1", ("start", "out"), ("set", "in")));
+            spell.wires.push(studio_wire("v4", ("set", "out"), ("reply", "in")));
+        } else {
+            spell.wires.push(studio_wire("v1", ("start", "out"), ("reply", "in")));
+        }
+        spell.variables = vec![var("pat", SocketType::String, None)];
+        spell
+    };
+    let mut keyed = valued(true);
+    keyed.nodes[1].config = json!({ "pattern": "a", "required_keys": "{{keys}}" });
+    keyed.variables.push(var("keys", SocketType::String, Some(Value::String("abc".to_owned()))));
+    Ok(json!({ "joined": check(joined)?, "valueSetFirst": check(valued(true))?, "valueNeverSet": check(valued(false))?, "jsonFromText": check(keyed)? }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11299,6 +11349,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("fix-fits") => fix_fits(),
         Some("literal-braces") => literal_braces(),
         Some("rename-reach") => rename_reach(),
+        Some("check-routes") => check_routes(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),
