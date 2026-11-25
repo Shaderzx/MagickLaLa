@@ -239,18 +239,20 @@ fn rack_per_row(count: usize) -> usize {
     if count <= 3 { count.max(1) } else { ((count as f32).sqrt().ceil() as usize).max(2) }
 }
 
-pub(crate) fn rack_title_lines(title: &str, bottles: usize, scale: f32) -> f32 {
-    if bottles > 3 {
-        return 1.0;
-    }
+pub(crate) fn rack_title_lines(state: &CanvasState, id: &NodeId, bottles: usize, scale: f32) -> f32 {
     let size = crate::view::legible_size(12.5, scale);
-    crate::measure::wrapped_lines(title, size, 750.0, RACK_BOTTLE_SIZE[0] - 20.0).clamp(1.0, 4.0)
+    let room = RACK_BOTTLE_SIZE[0] - 18.0;
+    let most = if bottles > 3 { 2 } else { 4 };
+    let shown = crate::cauldron::fitted_rack_title(state, id, size, room, most);
+    crate::measure::wrapped_lines(&shown, size, 750.0, room).clamp(1.0, most as f32)
 }
 
 fn rack_tag_room(state: &CanvasState, bottles: &[NodeId], scale: f32) -> f32 {
     let line = crate::view::legible_size(12.5, scale) * 1.35;
-    let grown = 0.5 * ((line - 12.5 * 1.35) + (crate::view::legible_size(11.0, scale) - 11.0) * 0.9);
-    grown + bottles.iter().map(|id| (rack_title_lines(&state.display_title(id), bottles.len(), scale) - 1.0) * line).fold(0.0, f32::max)
+    let growth = (line - 12.5 * 1.35) + (crate::view::legible_size(11.0, scale) - 11.0) * 0.9;
+    let extra_lines = bottles.iter().map(|id| rack_title_lines(state, id, bottles.len(), scale) - 1.0).fold(0.0, f32::max);
+    let wrapped_air = if extra_lines > 0.0 { 0.5 * growth + 8.0 } else { 0.0 };
+    0.5 * growth + extra_lines * line + wrapped_air
 }
 
 fn rack_block(count: usize, per_row: usize, room: f32) -> [f32; 2] {

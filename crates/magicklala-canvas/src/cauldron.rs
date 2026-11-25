@@ -1001,6 +1001,17 @@ fn plaque(state: &CanvasState, mood: CauldronMood, plan: &BrewPlan, p: &HearthPa
     )
 }
 
+pub(crate) fn fitted_rack_title(state: &CanvasState, id: &NodeId, size: f32, room: f32, lines: usize) -> String {
+    let full = state.display_title(id);
+    let wide = crate::measure::text_width(&full, size, 750.0);
+    if crate::measure::wrapped_lines(&full, size, 750.0, room) <= lines as f32 {
+        return full;
+    }
+    let per_char = wide / full.chars().count().max(1) as f32;
+    let per_line = (room / per_char.max(0.1)).floor().max(4.0) as usize;
+    rack_title(state, id, per_line * lines)
+}
+
 pub(crate) fn rack_title(state: &CanvasState, id: &NodeId, budget: usize) -> String {
     let full = state.display_title(id);
     if full.chars().count() <= budget {
@@ -1043,10 +1054,7 @@ fn title_lines(state: &CanvasState, plan: &BrewPlan, bottles: usize, id: &NodeId
     if bottles <= 3 {
         return crate::measure::wrapped_lines(&state.display_title(id), size, 750.0, inner).clamp(1.0, 4.0);
     }
-    let budget = ((crate::brew::RACK_BOTTLE_SIZE[0] - 18.0) / (0.62 * size)).floor().max(4.0) as usize * 2;
-    let title = rack_title(state, id, budget);
-    let across = title.chars().count() as f32 * 0.5 * size / (crate::brew::RACK_BOTTLE_SIZE[0] - 18.0);
-    if title.contains('…') || across > 1.3 { 2.0 } else { 1.0 }
+    1.0
 }
 
 fn extra_title_lines(state: &CanvasState, plan: &BrewPlan, bottles: &[&BrewCard], id: &NodeId) -> f32 {

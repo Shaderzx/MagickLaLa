@@ -535,8 +535,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     let route = crate::cauldron::route_label(state, &card.id);
     let tag_lines = if crate::brew::potion_ends(state).len() <= 3 { 4 } else { 2 };
     let tag_room = width - if width >= crate::brew::RACK_BOTTLE_SIZE[0] + 1.0 { 18.0 } else { 10.0 };
-    let per_line = (tag_room / (0.62 * legible(12.5))).floor().max(4.0) as usize;
-    let title = crate::cauldron::rack_title(state, &card.id, per_line * tag_lines);
+    let title = crate::cauldron::fitted_rack_title(state, &card.id, legible(12.5), tag_room, tag_lines);
     let route_key = route.as_ref().map(|_| format!("route-{}", card.id.0));
     let hex_pill = bottle_hex_mark(card, scale, p);
     let hexed = hex_pill.is_some();
@@ -605,7 +604,9 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     let step_badge = step_num.map(|num| {
         el().key(format!("step-badge-{}", card.id.0)).child(
             row()
-                .size(side, side)
+                .min_w(side)
+                .h(side)
+                .px(side * 0.18)
                 .radius(side * 0.5)
                 .items_center()
                 .justify_center()
@@ -640,10 +641,10 @@ pub(crate) fn branch_bottle_view<S: 'static>(
             }),
         )
         .children((!terse).then(|| text(&card.kind).font(TextStyle::new(legible(11.0), 500.0).mono()).color(sub_col).truncate()));
-    let tag_wrap = el()
-        .w_full()
-        .child(tag_inner)
-        .children((!(chipless_when_taken && taken)).then(|| row().w_full().px(8.0).justify_end().absolute(0.0, -8.0).child(pill)));
+    let tag_wrap = el().w_full().child(tag_inner).children(
+        (!(chipless_when_taken && taken))
+            .then(|| row().w_full().pl(8.0).pr(22.0).justify_end().absolute(0.0, -8.0).child(el().key(format!("bottle-pill-{}", card.id.0)).child(pill))),
+    );
     let tag = col().w_full().child(tag_wrap);
     let select_id = card.id.clone();
     col()
@@ -654,7 +655,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
         .absolute(pos_x, pos_y)
         .child(bottle_art)
         .child(tag)
-        .children(step_badge.map(|badge| badge.absolute(width * 0.5 + 5.0, 1.0)))
+        .children(step_badge.map(|badge| row().w(width * 0.5 - 9.0).justify_end().absolute(0.0, 1.0).child(badge)))
         .on_press(move |s: &mut S| lens(s).select(Some(select_id.clone())))
 }
 
@@ -784,7 +785,7 @@ pub(crate) fn potion_stand_view<S: 'static>(
         .gap(4.0)
         .items_start()
         .justify_between()
-        .child(text(spell_label).font(TextStyle::new(legible(13.0), 750.0)).color(p.ink).wrap_anywhere().max_lines(2).grow(1.0).min_w(0.0));
+        .child(text(spell_label).font(TextStyle::new(legible(13.0), 750.0)).color(p.ink).wrap_anywhere().max_lines(4).grow(1.0).min_w(0.0));
     if sealed_vintage && let Some(vintage) = &state.release_badge {
         header_row = header_row.child(
             row()
@@ -834,7 +835,7 @@ pub(crate) fn potion_stand_view<S: 'static>(
         )
         .shadow(3.0, 10.0, p.shadow_card)
         .child(header_row)
-        .child(text(&out_title).font(TextStyle::new(legible(12.0), 600.0)).color(p.ink_2).wrap_anywhere().max_lines(2))
+        .child(text(&out_title).font(TextStyle::new(legible(12.0), 600.0)).color(p.ink_2).wrap_anywhere().max_lines(4))
         .children((!terse && kind_fits).then(|| text(out_kind).font(TextStyle::new(legible(11.0), 500.0).mono()).color(p.mute)));
     if out_brewed {
         let ms_text = match primary_output.and_then(|c| c.duration_ms) {
