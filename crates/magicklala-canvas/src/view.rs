@@ -506,7 +506,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     let per_line = (tag_room / (0.62 * legible(12.5))).floor().max(4.0) as usize;
     let title = crate::cauldron::rack_title(state, &card.id, per_line * tag_lines);
     let route_key = route.as_ref().map(|_| format!("route-{}", card.id.0));
-    let hex_pill = bottle_hex_pill(card, scale, p);
+    let hex_pill = bottle_hex_mark(card, scale, p);
     let hexed = hex_pill.is_some();
     let bottle_art = canvas(potion_bottle_shape(bottle_mood, state.light, width, bottle_h, sealed && !hexed, tint)).size(width, bottle_h);
     let pill = if let Some(hex_pill) = hex_pill {
@@ -653,13 +653,34 @@ pub fn short_line(line: &str) -> &str {
     line.split_once(" · ").map_or(line, |(value, _)| value)
 }
 
+fn bottle_hex_caption(card: &NodeCardModel) -> Option<String> {
+    match card.inputs.iter().find(|socket| socket.flagged) {
+        Some(socket) if socket.mistyped => Some(format!("Wrong type \"{}\"", socket.name)),
+        Some(socket) => Some(format!("Missing \"{}\"", socket.name)),
+        None if card.status == ExecutionStatus::Failed => Some("Failed".to_owned()),
+        None => None,
+    }
+}
+
+fn bottle_hex_mark(card: &NodeCardModel, scale: f32, p: &HearthPalette) -> Option<El> {
+    let caption = bottle_hex_caption(card)?;
+    let side = legible_size(11.0, scale) * 1.55;
+    Some(
+        row()
+            .key(format!("bottle-hex-{}", card.id.0))
+            .label(caption)
+            .size(side, side)
+            .radius(side * 0.5)
+            .fill(p.hex)
+            .border(1.2, p.card)
+            .items_center()
+            .justify_center()
+            .child(text("!").font(TextStyle::new(legible_size(11.0, scale), 800.0)).color(p.primary_ink)),
+    )
+}
+
 fn bottle_hex_pill(card: &NodeCardModel, scale: f32, p: &HearthPalette) -> Option<El> {
-    let caption = match card.inputs.iter().find(|socket| socket.flagged) {
-        Some(socket) if socket.mistyped => format!("Wrong type \"{}\"", socket.name),
-        Some(socket) => format!("Missing \"{}\"", socket.name),
-        None if card.status == ExecutionStatus::Failed => "Failed".to_owned(),
-        None => return None,
-    };
+    let caption = bottle_hex_caption(card)?;
     Some(
         row()
             .key(format!("bottle-hex-{}", card.id.0))
