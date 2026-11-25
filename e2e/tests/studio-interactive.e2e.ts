@@ -1907,3 +1907,17 @@ test('Variable edits undo and rename cleanly: a bound temperature press, a typed
   expect(report.rename.check).toBe('valid');
   expect(report.rename.undone).toEqual({ name: 'max_memories', limit: '{{max_memories}}' });
 });
+
+test('Bound settings say where they come from: the temperature tile names its variable, a card bound to a variable shows its value and the variable, and an open published potion says Live once with its version on the pill', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-bound-looks-'));
+  try {
+    const report = await studioProbe(['bound-looks', join(dir, 'studio.sqlite')]);
+
+    expect(report.tile).toContain('Temperature · temperature');
+    expect(report.recall).toBe('top 5 · max_memories');
+    expect(report.activeRow).toContain('v1 Live');
+    expect(report.activeRow.filter((line: string) => /live/i.test(line))).toEqual(['v1 Live']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

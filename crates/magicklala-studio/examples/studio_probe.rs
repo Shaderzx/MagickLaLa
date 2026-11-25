@@ -2388,6 +2388,27 @@ fn var_undo() -> Result<serde_json::Value, String> {
         "rename": { "after": rename_after, "check": rename_check["validation"], "undone": rename_undone },
     }))
 }
+fn bound_looks(db_path: &Path) -> Result<serde_json::Value, String> {
+    let mut demo = runtime_for(StudioApp::from_registry().spell.clone());
+    demo.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("llm")));
+        app.right_tab = RightTab::Inspector;
+    });
+    demo.frame(1.0);
+    let tile = all_texts(&demo).into_iter().filter(|line| line.starts_with("Temperature")).collect::<Vec<_>>();
+    let recall_line = demo.state.canvas.card(&NodeId::from("recall")).map(|card| demo.state.canvas.card_line(card).to_owned());
+
+    let config = StudioConfig { db_path: Some(db_path.to_path_buf()), ..StudioConfig::default() };
+    let mut app = StudioApp::open(&config).map_err(|error| error.to_string())?;
+    app.load_graph(tasting_spell());
+    let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    click(&mut rt, "publish")?;
+    rt.update(|app, _| app.left_tab = LeftTab::Agents);
+    rt.frame(1.0);
+    let row: Vec<String> = text_lines_under(&rt, "spell-tasting-agent").into_iter().map(|(line, _)| line).collect();
+    Ok(json!({ "tile": tile, "recall": recall_line, "activeRow": row }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8630,6 +8651,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("small-truths") => small_truths(),
         Some("card-notes") => card_notes(),
         Some("var-undo") => var_undo(),
+        Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("pot-rect") => pot_rect(),
         Some("gateway-hint") => gateway_hint(),
