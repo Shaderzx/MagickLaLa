@@ -332,7 +332,7 @@ fn rack_ribbons(plan: &BrewPlan, bottles: &[&BrewCard]) -> Option<Vec<Vec<[f32; 
         .map(|card| {
             let neck = bottle_neck(card, bottles.len());
             let pipe = pipe_height(plan, card);
-            if (pipe - tap[1]).abs() < 6.0 * s {
+            if (pipe - tap[1]).abs() < 12.0 * s {
                 rounded_route(&[tap, [trunk_x, tap[1]], [neck[0], tap[1]], neck], &[0.0, drip], 4.0 * s)
             } else {
                 rounded_route(&[tap, [trunk_x, tap[1]], [trunk_x, pipe], [neck[0], pipe], neck], &[radius.min(trunk_room), radius, drip], 4.0 * s)
@@ -376,7 +376,7 @@ pub fn rack_planks(plan: &BrewPlan) -> Option<([f32; 4], Vec<[f32; 3]>)> {
     let bottom = bottles.iter().map(|card| card.rect[1] + card.rect[3]).fold(f32::MIN, f32::max);
     let mut rows: Vec<[f32; 3]> = Vec::new();
     for card in &bottles {
-        let y = card.rect[1] + 68.0 * s - top;
+        let y = card.rect[1] + RACK_LEDGE * s - top;
         let (x0, x1) = (card.rect[0] - 10.0 * s - left, card.rect[0] + card.rect[2] + 10.0 * s - left);
         match rows.iter_mut().find(|row| (row[0] - y).abs() < 1.0) {
             Some(row) => {
@@ -1021,6 +1021,11 @@ fn extra_title_lines(state: &CanvasState, plan: &BrewPlan, bottles: &[&BrewCard]
     (title_lines(state, plan, bottles.len(), id) - 1.0) * crate::view::legible_size(12.5, plan.scale) * 1.35
 }
 
+/// How far a rack plank's iron brackets reach below the board, in plan units.
+pub const RACK_BRACKET_DROP: f32 = 7.0;
+/// Where a rack plank's top sits below a bottle's top, in plan units: just under the glass's shadow, so the bottle stands on it.
+pub const RACK_LEDGE: f32 = 64.0;
+
 fn rack_plank_shape(size: [f32; 2], rows: &[[f32; 3]], s: f32, p: &HearthPalette) -> Shape {
     let mut shape = Shape::new();
     let thick = 9.0 * s;
@@ -1028,7 +1033,7 @@ fn rack_plank_shape(size: [f32; 2], rows: &[[f32; 3]], s: f32, p: &HearthPalette
         let y = ledge + 2.0 * s;
         let (x0, x1) = (x0.max(0.0) + 2.0 * s, x1.min(size[0]) - 2.0 * s);
         for (foot, reach) in [(x0 + 3.0 * s, 12.0 * s), (x1 - 3.0 * s, -12.0 * s)] {
-            let arm = Path::new().move_to([foot, y + thick]).line_to([foot, y + thick + 12.0 * s]).line_to([foot + reach, y + thick]);
+            let arm = Path::new().move_to([foot, y + thick]).line_to([foot, y + thick + RACK_BRACKET_DROP * s]).line_to([foot + reach, y + thick]);
             shape = shape.stroke_path(&arm, 2.6 * s, LineCap::Round, p.iron_rim);
         }
         let board = Path::new().move_to([x0, y]).line_to([x1, y]).line_to([x1, y + thick]).line_to([x0, y + thick]).close();

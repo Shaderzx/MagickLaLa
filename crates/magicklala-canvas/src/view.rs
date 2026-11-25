@@ -376,6 +376,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     let title_room = dims[0] - 24.0 - 6.0 - 30.0;
     let wraps = narrow && state.display_title(&card.id).chars().count() as f32 * 7.4 * title_size / 13.0 > title_room;
     let title_ink = if dimmed { untaken_title } else { p.ink };
+    let chip_font = legible(11.0);
     let top_row = col().w_full().min_w(0.0).child(if crammed {
         twin_title(&state.display_title(&card.id), TextStyle::new(title_size, 750.0), title_ink, title_room_est)
     } else {
@@ -483,9 +484,15 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     if let Some(badge) = step_badge {
         shell = shell.child(el().key(format!("step-badge-{}", card.id.0)).absolute(if mirrored { dims[0] - 11.0 } else { -9.0 }, -9.0).child(badge));
     }
-    if let Some(pill) = status_pill {
-        let clear = if step_num.is_some() { badge_side + 2.0 } else { 10.0 };
-        let icon_side = if dense || crammed { 10.0 + badge + 6.0 } else { 10.0 };
+    let clear = if step_num.is_some() { badge_side + 2.0 } else { 10.0 };
+    let icon_side = if dense || crammed { 10.0 + badge + 6.0 } else { 10.0 };
+    // A squeezed card's check chip would sit on its name: the step number and green rim already say it ran, so the chip goes.
+    let chip_bottom = -12.0 + chip_font * 1.25 + 3.0;
+    let title_top = (dims[1] - title_size * 1.25) * 0.5;
+    let title_right = step_pad + state.display_title(&card.id).chars().count() as f32 * 0.56 * title_size;
+    let chip_left = dims[0] - icon_side - (chip_font + 11.0);
+    let chip_on_name = (dense || crammed) && card.status == ExecutionStatus::Succeeded && chip_bottom > title_top && (mirrored || title_right > chip_left);
+    if let Some(pill) = status_pill.filter(|_| !chip_on_name) {
         let lane = row().w(dims[0]).pl(if mirrored { icon_side } else { clear }).pr(if mirrored { clear } else { icon_side }).absolute(0.0, -12.0);
         let lane = if mirrored { lane.justify_start() } else { lane.justify_end() };
         let room = dims[0] - clear - icon_side;
@@ -583,22 +590,26 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     let sub_col = if untaken { p.untaken_sub() } else { p.mute };
     let long_tag = crate::brew::potion_ends(state).len() <= 3;
     let crowded_tag = legible(11.0) > 11.0 * 1.15;
-    let inline_badge = !long_tag || crowded_tag;
-    let side = if inline_badge { legible(9.5) * 1.45 } else { legible(11.0) * 1.55 };
+    let chipless_when_taken = !long_tag || crowded_tag;
+    let side = (legible(9.5) * 1.45).min(bottle_h * 0.45 - 2.0);
     let step_badge = step_num.map(|num| {
         el().key(format!("step-badge-{}", card.id.0)).child(
-            row().size(side, side).radius(side * 0.5).items_center().justify_center().fill(if hexed { p.hex } else { p.primary_bg }).child(
-                text(num.to_string())
-                    .font(TextStyle::new(if inline_badge { legible(9.0) } else { legible(10.5) }, 750.0).features("'tnum' 1"))
-                    .color(p.primary_ink),
-            ),
+            row()
+                .size(side, side)
+                .radius(side * 0.5)
+                .items_center()
+                .justify_center()
+                .fill(if hexed { p.hex } else { p.primary_bg })
+                .child(text(num.to_string()).font(TextStyle::new(legible(9.0), 750.0).features("'tnum' 1")).color(p.primary_ink)),
         )
     });
+    let perched = hexed || !(chipless_when_taken && taken) && (taken || simmering || untaken || state.stopped.contains(&card.id) || sealed);
     let tag_inner = col()
         .key(format!("bottle-tag-{}", card.id.0))
         .w_full()
         .px(if width >= crate::brew::RACK_BOTTLE_SIZE[0] + 1.0 { 9.0 } else { 5.0 })
-        .py(8.0)
+        .pt(if perched { (legible(11.0) * 0.9).max(9.0) } else { 8.0 })
+        .pb(8.0)
         .gap(2.0)
         .radius(12.0)
         .continuous_corners()
@@ -622,19 +633,18 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     let tag_wrap = el()
         .w_full()
         .child(tag_inner)
-        .children((!(inline_badge && taken)).then(|| row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(pill)))
-        .children(step_badge.clone().filter(|_| !inline_badge).map(|badge| badge.absolute(-6.0, -side - 3.0)));
+        .children((!(chipless_when_taken && taken)).then(|| row().w_full().px(8.0).justify_end().absolute(0.0, -8.0).child(pill)));
     let tag = col().w_full().child(tag_wrap);
     let select_id = card.id.clone();
     col()
         .key(format!("node-{}-header", card.id.0))
         .w(width)
-        .gap(12.0)
+        .gap(crate::brew::RACK_TAG_GAP)
         .items_center()
         .absolute(pos_x, pos_y)
         .child(bottle_art)
         .child(tag)
-        .children(step_badge.filter(|_| inline_badge).map(|badge| badge.absolute(width * 0.5 + 5.0, 1.0)))
+        .children(step_badge.map(|badge| badge.absolute(width * 0.5 + 5.0, 1.0)))
         .on_press(move |s: &mut S| lens(s).select(Some(select_id.clone())))
 }
 
