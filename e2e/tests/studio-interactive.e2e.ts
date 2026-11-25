@@ -1968,7 +1968,7 @@ test('One brew has one set of step numbers: the canvas badges and the Trace list
     expect(report[status].steps).toEqual(steps);
     expect(report[status].log).toBe('1 On Message · 1ms 2 Subgraph · 2ms 3 Rhai Script: boom');
     expect(report[status].inspectedChild).toBe('call');
-    expect(report[status].header).toBe(`Brew #0 · ${word} 3 steps · 7 events · <1ms total`);
+    expect(report[status].header).toBe(`Brew #1 · ${word} 3 steps · 7 events · <1ms total`);
   }
 });
 
@@ -2048,6 +2048,7 @@ test('A card menu never floats over the pour fan or the Cauldron and Grimoire sw
   expect(report.docked).toBeGreaterThan(0);
   expect(report.dockedOffRecipe).toEqual([]);
   expect(report.dockedOutsideScroll).toEqual([]);
+  expect(report.dockedRepeatsTitle).toEqual([]);
 });
 
 test('Bottles never share a visible name: two Sends fed by an orders route on two different Switches read Send · orders 1 and Send · orders 2, while a unique route keeps its plain name', { timeout: 900_000 }, async () => {

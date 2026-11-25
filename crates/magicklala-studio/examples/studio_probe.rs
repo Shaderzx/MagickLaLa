@@ -2649,10 +2649,11 @@ fn step_numbers() -> Result<serde_json::Value, String> {
             steps.push(words);
         }
         let log = texts_under(&mut rt, "trace-scroll");
+        let header = texts_under(&mut rt, "inspector-trace").split(" Brewing sequence").next().unwrap_or_default().to_owned();
         rt.update(|app, _| app.canvas.select(None));
         click_at(&mut rt, "trace-step-2", 3.0)?;
         let inspected = rt.state.canvas.selection.as_ref().map(|id| id.0.clone());
-        report.insert(status.to_owned(), json!({ "badges": badges, "steps": steps, "log": log, "inspectedChild": inspected, "header": texts_under(&mut rt, "inspector-trace").split(" Brewing sequence").next().unwrap_or_default().to_owned() }));
+        report.insert(status.to_owned(), json!({ "badges": badges, "steps": steps, "log": log, "inspectedChild": inspected, "header": header }));
     }
     Ok(serde_json::Value::Object(report))
 }
@@ -2948,6 +2949,7 @@ fn menu_fan() -> Result<serde_json::Value, String> {
     let mut docked_outside_scroll = Vec::new();
     let mut docked = 0;
     let mut on_switcher = Vec::new();
+    let mut docked_repeats: Vec<String> = Vec::new();
     let scenes = [
         (StudioApp::from_registry().spell.clone(), (960.0_f32, 640.0_f32)),
         (example("parallel_research.json")?, (960.0, 640.0)),
@@ -2981,6 +2983,10 @@ fn menu_fan() -> Result<serde_json::Value, String> {
             let in_panel = menu[0] >= inspector[0] - 0.5;
             if in_panel {
                 docked += 1;
+                let title = rt.state.canvas.display_title(&id);
+                if text_lines_under(&rt, "context-menu").iter().any(|(line, _)| line.replace('\u{a0}', " ") == title) {
+                    docked_repeats.push(title);
+                }
                 if rt.state.right_tab != RightTab::Inspector {
                     docked_off_recipe.push(id.0.clone());
                 }
@@ -3002,7 +3008,7 @@ fn menu_fan() -> Result<serde_json::Value, String> {
         }
     }
     Ok(
-        json!({ "onSwitcher": on_switcher, "floatingOnFan": floating_on_fan, "docked": docked, "dockedOffRecipe": docked_off_recipe, "dockedOutsideScroll": docked_outside_scroll }),
+        json!({ "dockedRepeatsTitle": docked_repeats, "onSwitcher": on_switcher, "floatingOnFan": floating_on_fan, "docked": docked, "dockedOffRecipe": docked_off_recipe, "dockedOutsideScroll": docked_outside_scroll }),
     )
 }
 fn twin_switch_names() -> Result<serde_json::Value, String> {
