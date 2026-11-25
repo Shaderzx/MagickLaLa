@@ -91,14 +91,14 @@ test('Pantry steps that need a list can be set up: a Switch takes its cases as p
   expect(report.keyConfig).toEqual(['name', 'age']);
 });
 
-test('An empty pot shows its recipe card in the Recipe tab, naming the potion, counting nothing yet and listing the empty pot and bottle sections, each saying what to do next instead of a bare None yet', { timeout: 900_000 }, async () => {
+test('An empty pot shows its recipe card in the Recipe tab, naming the potion, counting nothing yet and listing the empty pot and bottle sections, each naming what it is still missing instead of a bare None yet', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['empty-recipe']);
 
   expect(report.placeholder).toBe(false);
   expect(report.sections).toBe(true);
   expect(report.texts).toEqual(expect.arrayContaining(['Fresh Potion', '0 ingredients · 0 bottles', 'In the pot', 'Bottles']));
   expect(report.texts).not.toContain('None yet');
-  expect(report.texts).toEqual(expect.arrayContaining(['Start with an event from the Pantry', 'The last step fills a bottle']));
+  expect(report.texts).toEqual(expect.arrayContaining(['No ingredients yet', 'No bottles yet']));
 });
 
 test('A published potion keeps saying which version is live in the Potions list after another potion is opened', { timeout: 900_000 }, async () => {
