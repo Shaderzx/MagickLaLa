@@ -1957,6 +1957,49 @@ fn check_save_truth(db_path: &Path) -> Result<serde_json::Value, String> {
         "failedBrew": { "before": before, "after": format!("{:?}", failing.state.canvas.last_brew), "failedCards": failed_cards, "stale": failing.state.trace_stale },
     }))
 }
+fn one_step_undo() -> Result<serde_json::Value, String> {
+    let cmd_z = |rt: &mut Runtime<StudioApp>| {
+        rt.key(rune::KeyEvent { key: rune::Key::Command('z'), mods: rune::Mods { cmd: true, ..Default::default() } });
+        rt.frame(0.0);
+    };
+    let mut empty = runtime_for(SpellGraph::new("Empty Pot"));
+    empty.on_key = Some(magicklala_studio::studio_key);
+    empty.frame(0.0);
+    let tossed = pantry_toss(&mut empty, "io/send_message", "Send")?;
+    let toss_entries = empty.state.undo_stack.len();
+    cmd_z(&mut empty);
+    let toss = json!({ "added": tossed["nodesAfter"], "entries": toss_entries, "afterUndo": empty.state.canvas.nodes.len() });
+
+    let mut twin = runtime_for(tasting_spell());
+    twin.on_key = Some(magicklala_studio::studio_key);
+    twin.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("echo")));
+        app.duplicate_selected_node();
+    });
+    twin.frame(0.0);
+    let twin_nodes = twin.state.canvas.nodes.len();
+    let twin_entries = twin.state.undo_stack.len();
+    cmd_z(&mut twin);
+    let duplicate = json!({ "after": twin_nodes, "entries": twin_entries, "afterUndo": twin.state.canvas.nodes.len() });
+
+    let mut back = runtime_for(tasting_spell());
+    back.on_key = Some(magicklala_studio::studio_key);
+    back.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("echo")));
+        app.set_aside_selected();
+        app.sync_edits();
+    });
+    back.frame(0.0);
+    back.update(|app, _| {
+        app.toss(magicklala_canvas::Toss::IntoPot(NodeId::from("echo")));
+        app.sync_edits();
+    });
+    back.frame(0.0);
+    let poured = !back.state.canvas.is_shelved(&NodeId::from("echo"));
+    cmd_z(&mut back);
+    let pour = json!({ "poured": poured, "shelvedAfterUndo": back.state.canvas.is_shelved(&NodeId::from("echo")) });
+    Ok(json!({ "toss": toss, "duplicate": duplicate, "pour": pour }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8098,6 +8141,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("pantry-settings") => pantry_settings(),
         Some("empty-recipe") => empty_recipe(),
         Some("list-truth") => list_truth(),
+        Some("one-step-undo") => one_step_undo(),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("pot-rect") => pot_rect(),
         Some("gateway-hint") => gateway_hint(),

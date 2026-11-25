@@ -1809,3 +1809,11 @@ test('Check and Save tell the truth: a draft holding only a variable saves from 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('One action is one undo: a Send Message tossed into an empty pot and set aside on its own, a duplicated step with its settings, and a step poured back from the shelf each go away with a single Cmd or Ctrl Z', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['one-step-undo']);
+
+  expect(report.toss).toEqual({ added: 1, entries: 1, afterUndo: 0 });
+  expect(report.duplicate).toEqual({ after: 4, entries: 1, afterUndo: 3 });
+  expect(report.pour).toEqual({ poured: true, shelvedAfterUndo: true });
+});
