@@ -1202,32 +1202,10 @@ impl StudioApp {
     }
 
     pub fn hex_mend_source(&self, card_id: &NodeId) -> Option<(SocketRef, String)> {
-        let card = self.canvas.card(card_id)?;
         let socket_name = self.missing_socket_of(card_id)?;
-        let socket = card.inputs.iter().find(|socket| socket.name == socket_name)?;
-        let mut downstream: Vec<NodeId> = vec![card_id.clone()];
-        let mut cursor = 0;
-        while let Some(node) = downstream.get(cursor).cloned() {
-            for wire in self.canvas.wires.iter().filter(|wire| wire.from_node == node) {
-                if !downstream.contains(&wire.to_node) {
-                    downstream.push(wire.to_node.clone());
-                }
-            }
-            cursor += 1;
-        }
-        let route = self.flow_ancestors(card_id);
-        let mut ranked: Vec<&NodeCardModel> = self
-            .canvas
-            .nodes
-            .iter()
-            .filter(|other| !downstream.contains(&other.id) && !self.canvas.is_shelved(&other.id) && self.runs_on(&other.id, &route))
-            .collect();
-        ranked.sort_by_key(|other| if other.category == "events" { 0 } else { 1 });
-        ranked.into_iter().find_map(|other| {
-            other.outputs.iter().find(|output| !output.ty.is_flow() && socket.ty.accepts(output.ty)).map(|output| {
-                (SocketRef::new(other.id.clone(), output.name.clone()), format!("Pour {} · {}", self.canvas.display_title(&other.id), output.name))
-            })
-        })
+        let source = self.earlier_fitting_outputs(card_id, &socket_name).into_iter().next()?;
+        let caption = format!("Plug in {} · {}", self.canvas.display_title(&source.node), source.socket);
+        Some((source, caption))
     }
 
     fn missing_socket_of(&self, card_id: &NodeId) -> Option<String> {
@@ -1241,10 +1219,7 @@ impl StudioApp {
         let Some(card) = self.canvas.selected_card().cloned() else { return };
         let Some(socket) = self.missing_socket_of(&card.id) else { return };
         let Some((source, _)) = self.hex_mend_source(&card.id) else { return };
-        if self.canvas.connect_sockets(&source, &SocketRef::new(card.id.clone(), socket)).is_ok() {
-            self.sync_spell();
-            self.validate();
-        }
+        self.plug_input(&source, &SocketRef::new(card.id.clone(), socket));
     }
 
     pub fn fill_default_prompt_for_selected(&mut self) {
@@ -1892,7 +1867,8 @@ impl StudioApp {
                 }
             }
         }
-        self.canvas
+        let mut fitting: Vec<(bool, bool, SocketRef)> = self
+            .canvas
             .nodes
             .iter()
             .filter(|card| earlier.contains(&card.id) && !self.canvas.shelved.contains(&card.id))
@@ -1900,10 +1876,12 @@ impl StudioApp {
                 card.outputs
                     .iter()
                     .filter(|output| !output.ty.is_flow() && to_ty.accepts(output.ty))
-                    .map(|output| SocketRef::new(card.id.clone(), output.name.clone()))
+                    .map(|output| (card.category != "events", output.ty != to_ty, SocketRef::new(card.id.clone(), output.name.clone())))
                     .collect::<Vec<_>>()
             })
-            .collect()
+            .collect();
+        fitting.sort_by_key(|(not_event, loose, _)| (*not_event, *loose));
+        fitting.into_iter().map(|(_, _, source)| source).collect()
     }
 
     pub fn toggle_plug_menu(&mut self, node: &NodeId, socket: &str) {
