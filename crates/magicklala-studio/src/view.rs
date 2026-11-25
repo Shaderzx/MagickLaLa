@@ -1554,7 +1554,7 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
     } else if succeeded {
         "Brewed"
     } else {
-        "Hexed"
+        "Failed"
     };
     let header = row()
         .w_full()
@@ -1697,7 +1697,7 @@ fn recipe_overview(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         let id = card.id.clone();
         let (word, ink) = match card.status {
             ExecutionStatus::Succeeded => (Some("Brewed"), if light { t.broth_deep } else { t.broth_foam }),
-            ExecutionStatus::Failed => (Some("Hexed"), t.hex),
+            ExecutionStatus::Failed => (Some("Failed"), t.hex),
             ExecutionStatus::Running => (Some("Simmering"), t.ink_2),
             ExecutionStatus::Idle if app.canvas.brewed_clean() && !app.canvas.is_shelved(&card.id) => (Some("Untaken"), t.mute),
             ExecutionStatus::Idle => (None, t.mute),
@@ -2362,7 +2362,7 @@ fn trace_display_kind(kind: &str) -> &str {
         "RunStarted" => "Lit",
         "NodeStarted" => "Simmering",
         "NodeFinished" => "Brewed",
-        "NodeFailed" => "Hexed",
+        "NodeFailed" => "Failed",
         "WireActivated" => "Pour",
         "StreamChunk" => "Sip",
         "VariableSet" => "Spice",
@@ -2683,7 +2683,7 @@ fn log_result(app: &StudioApp, t: &HearthPalette) -> Option<(El, f32)> {
     let first_failed = failed.first().and_then(|line| line.node.clone());
     let (word, name) = match failed.first() {
         Some(line) => (
-            "Hexed".to_owned(),
+            "Failed".to_owned(),
             line.node.as_ref().map_or_else(|| line.detail.split(':').next().unwrap_or_default().to_owned(), |id| app.canvas.display_title(id)),
         ),
         None if last.kind == "RunFinished" && (last.detail == "Succeeded" || last.detail.is_empty()) => {

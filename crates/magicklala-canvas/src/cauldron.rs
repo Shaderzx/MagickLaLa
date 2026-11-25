@@ -381,17 +381,53 @@ fn crosses(a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]) -> bool {
     d1 * d2 < 0.0 && d3 * d4 < 0.0
 }
 
+fn segment_gap(a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]) -> f32 {
+    let gap = |p: [f32; 2], s: [f32; 2], e: [f32; 2]| {
+        let (dx, dy) = (e[0] - s[0], e[1] - s[1]);
+        let along = (((p[0] - s[0]) * dx + (p[1] - s[1]) * dy) / (dx * dx + dy * dy).max(f32::EPSILON)).clamp(0.0, 1.0);
+        (p[0] - s[0] - dx * along).hypot(p[1] - s[1] - dy * along)
+    };
+    if crosses(a, b, c, d) { 0.0 } else { gap(a, c, d).min(gap(b, c, d)).min(gap(c, a, b)).min(gap(d, a, b)) }
+}
+
+pub fn above_broth(points: &[[f32; 2]], surface: f32) -> Vec<[f32; 2]> {
+    let mut kept = Vec::with_capacity(points.len());
+    for pair in points.windows(2) {
+        let (p, q) = (pair[0], pair[1]);
+        if p[1] < surface {
+            kept.push(p);
+        }
+        if (p[1] < surface) != (q[1] < surface) {
+            let along = (surface - p[1]) / (q[1] - p[1]);
+            kept.push([p[0] + (q[0] - p[0]) * along, surface]);
+        }
+    }
+    if let Some(last) = points.last().filter(|last| last[1] < surface) {
+        kept.push(*last);
+    }
+    kept
+}
+
 pub fn ladle_stir(state: &CanvasState, plan: &BrewPlan) -> Option<f32> {
     let pours = pour_paths(state, plan);
     let start = state.toss_count as usize % STIRS.len();
-    let leanings = STIRS.iter().cycle().skip(start).take(STIRS.len()).copied().chain([0.9, 1.25, -0.9, -1.25]);
-    for stir in leanings {
+    let leanings = STIRS
+        .iter()
+        .cycle()
+        .skip(start)
+        .take(STIRS.len())
+        .copied()
+        .chain((0..=56).map(|step| if step % 2 == 0 { step as f32 * 0.025 } else { -(step as f32 + 1.0) * 0.025 }));
+    let clearance = |stir: f32| {
         let (a, b) = ladle_at(plan, stir);
-        if !pours.iter().any(|(_, points)| points.windows(2).any(|pair| crosses(pair[0], pair[1], a, b))) {
-            return Some(stir);
-        }
-    }
-    None
+        pours
+            .iter()
+            .flat_map(|(_, points)| above_broth(points, a[1]).windows(2).map(|pair| segment_gap(pair[0], pair[1], a, b)).collect::<Vec<_>>())
+            .fold(f32::MAX, f32::min)
+    };
+    let u = (plan.pot[2].min(plan.pot[3]) / 240.0).clamp(0.55, 1.35);
+    let air = 4.5 * u + 3.4 + 1.0;
+    leanings.into_iter().find(|stir| clearance(*stir) >= air)
 }
 
 pub fn ladle_line(state: &CanvasState, plan: &BrewPlan) -> Option<([f32; 2], [f32; 2])> {

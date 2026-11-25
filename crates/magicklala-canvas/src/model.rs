@@ -42,7 +42,7 @@ impl ExecutionStatus {
             ExecutionStatus::Idle => "Idle",
             ExecutionStatus::Running => "Simmering",
             ExecutionStatus::Succeeded => "Brewed",
-            ExecutionStatus::Failed => "Hexed",
+            ExecutionStatus::Failed => "Failed",
         }
     }
 }

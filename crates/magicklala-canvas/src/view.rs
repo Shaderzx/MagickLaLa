@@ -275,11 +275,10 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     });
 
     let status_pill = if hexed {
-        let missing_label = card
-            .inputs
-            .iter()
-            .find(|s| s.flagged)
-            .map_or_else(|| "Hexed".to_owned(), |s| if s.mistyped { format!("Wrong type \"{}\"", s.name) } else { format!("Missing \"{}\"", s.name) });
+        let missing_label = card.inputs.iter().find(|s| s.flagged).map_or_else(
+            || (if card.status == ExecutionStatus::Failed { "Failed" } else { "Hexed" }).to_owned(),
+            |s| if s.mistyped { format!("Wrong type \"{}\"", s.name) } else { format!("Missing \"{}\"", s.name) },
+        );
         let pill_room = dims[0] - if step_num.is_some() { legible(11.0) * 1.8 + 2.0 } else { 10.0 } - 10.0 - 12.0;
         let missing_label = if missing_label.chars().count() as f32 * 7.2 * legible(11.0) / 11.0 > pill_room {
             missing_label.split(' ').next().unwrap_or("Hexed").to_owned()
@@ -635,7 +634,7 @@ fn bottle_hex_pill(card: &NodeCardModel, scale: f32, p: &HearthPalette) -> Optio
     let caption = match card.inputs.iter().find(|socket| socket.flagged) {
         Some(socket) if socket.mistyped => format!("Wrong type \"{}\"", socket.name),
         Some(socket) => format!("Missing \"{}\"", socket.name),
-        None if card.status == ExecutionStatus::Failed => "Hexed".to_owned(),
+        None if card.status == ExecutionStatus::Failed => "Failed".to_owned(),
         None => return None,
     };
     Some(
