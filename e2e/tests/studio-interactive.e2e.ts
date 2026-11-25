@@ -1861,6 +1861,7 @@ test('A failed pour aims at the pot: the broken stub of a failed step runs on un
 
   expect(report.upward).toEqual([]);
   expect(report.crowding).toEqual([]);
+  expect(report.hanging).toEqual([]);
 });
 
 test('Variables can drive step settings: a setting written as {{name}} brews with that variable, Check names one that no variable fills, the Support sample binds Search Memory and Generate Text to its variables so none reads Unused, and the temperature dial on a bound step edits the variable', { timeout: 900_000 }, async () => {

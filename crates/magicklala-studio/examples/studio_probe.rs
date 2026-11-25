@@ -2178,6 +2178,7 @@ fn downhill() -> Result<serde_json::Value, String> {
 }
 fn failed_stub() -> Result<serde_json::Value, String> {
     let mut upward: Vec<String> = Vec::new();
+    let mut hanging: Vec<String> = Vec::new();
     let mut crowding: Vec<String> = Vec::new();
     for size in [(960.0_f32, 640.0_f32), (1280.0, 800.0)] {
         let mut app = StudioApp::with_spell(example("parallel_research.json")?, registry_specs());
@@ -2197,6 +2198,11 @@ fn failed_stub() -> Result<serde_json::Value, String> {
             if !heading_down {
                 upward.push(format!("{}@{}", id.0, size.0));
             }
+            let landing = points[points.len() - 1];
+            let above = ((landing[1] - end[1]) / plan.scale).round();
+            if above > 48.0 {
+                hanging.push(format!("{}@{} {above}", id.0, size.0));
+            }
             for (other, line) in paths.iter().filter(|(other, _)| other != id && !failed.contains(other)) {
                 let near = line.iter().map(|point| (point[0] - end[0]).hypot(point[1] - end[1])).fold(f32::MAX, f32::min);
                 if near < 8.0 * plan.scale {
@@ -2205,7 +2211,7 @@ fn failed_stub() -> Result<serde_json::Value, String> {
             }
         }
     }
-    Ok(json!({ "upward": upward, "crowding": crowding }))
+    Ok(json!({ "upward": upward, "crowding": crowding, "hanging": hanging }))
 }
 fn bound_settings() -> Result<serde_json::Value, String> {
     use magicklala_graph::{Value, VariableDef};
