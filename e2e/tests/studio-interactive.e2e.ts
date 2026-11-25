@@ -1897,3 +1897,13 @@ test('Cauldron cards say what they are set to instead of their code name: Genera
   expect(report.switch).toContain('2 cases');
   expect(report.grimoireShowsNote).toBe(false);
 });
+
+test('Variable edits undo and rename cleanly: a bound temperature press, a typed default and a typed rename each undo with one Cmd or Ctrl Z, and a rename carries every {{name}} that uses it so the step stays bound and Check stays clean', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['var-undo']);
+
+  expect(report.dial).toEqual({ after: 'Float(0.5)', undone: 'Float(0.4)' });
+  expect(report.typed).toEqual({ after: 'Int(12)', undone: 'Int(5)' });
+  expect(report.rename.after).toEqual({ name: 'recall_count', limit: '{{recall_count}}', hint: '→ Search Memory' });
+  expect(report.rename.check).toBe('valid');
+  expect(report.rename.undone).toEqual({ name: 'max_memories', limit: '{{max_memories}}' });
+});

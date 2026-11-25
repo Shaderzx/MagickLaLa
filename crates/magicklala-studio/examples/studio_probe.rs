@@ -2329,6 +2329,65 @@ fn card_notes() -> Result<serde_json::Value, String> {
         "grimoireShowsNote": grimoire_llm.iter().any(|line| line == "gpt-4o-mini"),
     }))
 }
+fn var_undo() -> Result<serde_json::Value, String> {
+    let cmd_z = |rt: &mut Runtime<StudioApp>| {
+        rt.key(rune::KeyEvent { key: rune::Key::Command('z'), mods: rune::Mods { cmd: true, ..Default::default() } });
+        rt.frame(0.0);
+    };
+    let default_of = |app: &StudioApp, name: &str| app.spell.variables.iter().find(|variable| variable.name == name).and_then(|variable| variable.default.clone()).map(|value| format!("{value:?}"));
+    let recall_limit = |app: &StudioApp| app.spell.nodes.iter().find(|node| node.id.0 == "recall").and_then(|node| node.config.get("limit").cloned());
+
+    let mut dial = runtime_for(StudioApp::from_registry().spell.clone());
+    dial.on_key = Some(magicklala_studio::studio_key);
+    dial.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("llm")));
+        app.adjust_temperature(0.1);
+    });
+    dial.frame(0.0);
+    let dial_after = default_of(&dial.state, "temperature");
+    cmd_z(&mut dial);
+    let dial_undone = default_of(&dial.state, "temperature");
+
+    let mut typed = runtime_for(StudioApp::from_registry().spell.clone());
+    typed.on_key = Some(magicklala_studio::studio_key);
+    for text in ["1", "12"] {
+        typed.update(move |app, _| {
+            if let Some(edit) = app.var_default_edits.first_mut() {
+                *edit = rune::TextEdit::new(text);
+            }
+            app.sync_edits();
+        });
+        typed.frame(0.0);
+    }
+    let typed_after = default_of(&typed.state, "max_memories");
+    cmd_z(&mut typed);
+    let typed_undone = default_of(&typed.state, "max_memories");
+
+    let mut renamed = runtime_for(StudioApp::from_registry().spell.clone());
+    renamed.on_key = Some(magicklala_studio::studio_key);
+    for text in ["r", "recall_count"] {
+        renamed.update(move |app, _| {
+            if let Some(edit) = app.var_name_edits.first_mut() {
+                *edit = rune::TextEdit::new(text);
+            }
+            app.sync_edits();
+        });
+        renamed.frame(0.0);
+    }
+    let rename_after = json!({
+        "name": renamed.state.spell.variables.first().map(|variable| variable.name.clone()),
+        "limit": recall_limit(&renamed.state),
+        "hint": renamed.state.variable_binding_hint("recall_count").0,
+    });
+    let rename_check = validation_of(&mut renamed)?;
+    cmd_z(&mut renamed);
+    let rename_undone = json!({ "name": renamed.state.spell.variables.first().map(|variable| variable.name.clone()), "limit": recall_limit(&renamed.state) });
+    Ok(json!({
+        "dial": { "after": dial_after, "undone": dial_undone },
+        "typed": { "after": typed_after, "undone": typed_undone },
+        "rename": { "after": rename_after, "check": rename_check["validation"], "undone": rename_undone },
+    }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8570,6 +8629,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("twin-routes") => twin_routes(),
         Some("small-truths") => small_truths(),
         Some("card-notes") => card_notes(),
+        Some("var-undo") => var_undo(),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("pot-rect") => pot_rect(),
         Some("gateway-hint") => gateway_hint(),
