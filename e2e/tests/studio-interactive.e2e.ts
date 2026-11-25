@@ -1887,3 +1887,13 @@ test('Small things stay honest: the Pantry search Clear button is at least 24 by
   expect(report.clash.errors.join(' ')).toMatch(/default is already an output/);
   expect(report.undoKeepsMove).toEqual({ added: true, addUndone: true, replyStays: true });
 });
+
+test('Cauldron cards say what they are set to instead of their code name: Generate Text shows its model, Search Memory how many it recalls, a Switch how many cases it routes, while the Grimoire keeps its own headers', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['card-notes']);
+
+  expect(report.llm).toContain('gpt-4o-mini');
+  expect(report.llm).not.toContain('ai/generate_text');
+  expect(report.recall).toContain('top max_memories');
+  expect(report.switch).toContain('2 cases');
+  expect(report.grimoireShowsNote).toBe(false);
+});

@@ -2310,6 +2310,23 @@ fn small_truths() -> Result<serde_json::Value, String> {
         "undoKeepsMove": { "added": added, "addUndone": moved.state.canvas.nodes.len() == before, "replyStays": reply_at == Some(target) },
     }))
 }
+fn card_notes() -> Result<serde_json::Value, String> {
+    let support = runtime_for(StudioApp::from_registry().spell.clone());
+    let support_lines = |id: &str| text_lines_under(&support, &format!("node-{id}")).into_iter().map(|(line, _)| line).collect::<Vec<_>>();
+    let router = runtime_for(example("webhook_router.json")?);
+    let router_switch = node_of_kind(&router.state, "flow/switch").ok_or("no switch")?;
+    let switch_lines: Vec<String> = text_lines_under(&router, &format!("node-{router_switch}")).into_iter().map(|(line, _)| line).collect();
+    let mut grimoire = runtime_for(StudioApp::from_registry().spell.clone());
+    click(&mut grimoire, "mode-grimoire")?;
+    grimoire.frame(1.0);
+    let grimoire_llm: Vec<String> = text_lines_under(&grimoire, "node-llm").into_iter().map(|(line, _)| line).collect();
+    Ok(json!({
+        "llm": support_lines("llm"),
+        "recall": support_lines("recall"),
+        "switch": switch_lines,
+        "grimoireShowsNote": grimoire_llm.iter().any(|line| line == "gpt-4o-mini"),
+    }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8547,6 +8564,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("bound-settings") => bound_settings(),
         Some("twin-routes") => twin_routes(),
         Some("small-truths") => small_truths(),
+        Some("card-notes") => card_notes(),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("pot-rect") => pot_rect(),
         Some("gateway-hint") => gateway_hint(),
