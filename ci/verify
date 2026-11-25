@@ -14,6 +14,7 @@ run_stage() {
 run_stage fmt cargo fmt -- --check
 run_stage clippy cargo clippy --workspace --all-targets -- -D warnings
 run_stage check cargo check --workspace
+run_stage comments node --experimental-strip-types --no-warnings ci/comments/check.ts --base "$base"
 if [ "$mode" = "--full" ]; then
   run_stage build cargo build -p magicklala-cli
   run_stage landmines node ci/landmines/landmines.mjs --base "$base"
