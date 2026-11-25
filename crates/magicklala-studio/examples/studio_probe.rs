@@ -6799,7 +6799,34 @@ fn tidy_bottles() -> Result<serde_json::Value, String> {
     }
     Ok(json!(report))
 }
-fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
+fn starter_shelf_room() -> Result<serde_json::Value, String> {
+    let scene = |size: (f32, f32), pantry: Option<bool>| -> Result<serde_json::Value, String> {
+        let mut app = StudioApp::with_spell(SpellGraph::new("Fresh"), registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        match pantry {
+            Some(true) if rt.state.left_rail_collapsed() => click(&mut rt, "expand-nodes")?,
+            Some(false) => rt.update(|app, _| app.left_tab = LeftTab::Agents),
+            _ => {}
+        }
+        rt.frame(1.0);
+        let starters: Vec<[f32; 4]> = rt.state.specs.iter().filter(|spec| spec.is_trigger).filter_map(|spec| layout_rect(&rt, &format!("starter-{}", spec.kind.replace('/', "-")))).collect();
+        let pot = pot_body(&rt);
+        let pantry_open = rt.state.left_tab == LeftTab::Palette && !rt.state.left_rail_collapsed();
+        Ok(json!({
+            "pantryOpen": pantry_open,
+            "starters": starters.len(),
+            "coverPot": pot.is_some_and(|pot| starters.iter().any(|starter| rects_overlap(*starter, pot))),
+        }))
+    };
+    Ok(json!({
+        "wideWithPantry": scene((1280.0, 800.0), Some(true))?,
+        "wideWithPotions": scene((1280.0, 800.0), Some(false))?,
+        "compactClosed": scene((960.0, 640.0), None)?,
+        "compactWithPantry": scene((960.0, 640.0), Some(true))?,
+    }))
+}fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),
@@ -7718,6 +7745,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("potion-rack") => potion_rack(),
         Some("true-records") => true_records(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("tidy-bottles") => tidy_bottles(),
+        Some("starter-shelf") => starter_shelf_room(),
         Some("honest-edits") => honest_edits(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),

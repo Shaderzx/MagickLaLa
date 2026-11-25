@@ -1707,3 +1707,11 @@ test('Tidy bottles: after a brew no step number covers a bottle name, no label o
     expect({ scene, cutKinds: bottles.cutKinds }).toEqual({ scene, cutKinds: [] });
   }
 });
+test('Starter shelf: an empty pot offers its glowing trigger vials only while the Pantry is closed, since the open Pantry already lists them, and the vials never cover the pot', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['starter-shelf']);
+
+  expect(report.wideWithPantry).toEqual({ pantryOpen: true, starters: 0, coverPot: false });
+  expect(report.compactWithPantry).toEqual({ pantryOpen: true, starters: 0, coverPot: false });
+  expect(report.wideWithPotions).toEqual({ pantryOpen: false, starters: 6, coverPot: false });
+  expect(report.compactClosed).toEqual({ pantryOpen: false, starters: 6, coverPot: false });
+});
