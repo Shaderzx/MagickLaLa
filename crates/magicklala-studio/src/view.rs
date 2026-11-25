@@ -2408,6 +2408,15 @@ pub(crate) fn plural(count: usize, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
 
+fn log_kind_word(line: &TraceLine) -> &str {
+    match (line.kind, line.detail.as_str()) {
+        ("RunFinished", "Failed") => "Failed",
+        ("RunFinished", "Cancelled") => "Cancelled",
+        ("RunFinished", "TimedOut") => "Timed out",
+        (kind, _) => trace_display_kind(kind),
+    }
+}
+
 fn trace_display_kind(kind: &str) -> &str {
     match kind {
         "RunStarted" => "Lit",
@@ -2829,8 +2838,8 @@ fn log_list(app: &StudioApp, t: &HearthPalette) -> El {
                     .w(44.0),
             )
             .child(el().size(7.0, 7.0).radius(3.5).fill(dot))
-            .child(label(trace_display_kind(line.kind), 11.5, 700.0, if sour { t.hex } else { t.ink }).w(78.0))
-            .child(label(&line.detail, 11.5, 450.0, t.ink_2).wrap().grow(1.0).min_w(0.0));
+            .child(label(log_kind_word(line), 11.5, 700.0, if sour { t.hex } else { t.ink }).w(78.0))
+            .child(label(if line.kind == "RunFinished" { "" } else { line.detail.as_str() }, 11.5, 450.0, t.ink_2).wrap().grow(1.0).min_w(0.0));
         if let Some(node) = line.canvas_node() {
             item = item.on_press(move |app: &mut StudioApp| app.canvas.select(Some(node.clone())));
         }
