@@ -1939,3 +1939,10 @@ test('Parked wires survive undo and reload: undoing a pour-back puts the step ba
   expect(report.repoured).toEqual(report.original);
   expect(report.reloaded).toEqual(report.twoOriginal);
 });
+
+test('Each picker click and dial press is its own undo step: two model picks undo one at a time back to the original model, and two presses of the bound temperature dial undo one press at a time', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['picker-undo']);
+
+  expect(report.models).toEqual(['gpt-4.1', 'gpt-4o', report.original]);
+  expect(report.temperatures).toEqual(['Float(0.6)', 'Float(0.5)', 'Float(0.4)']);
+});

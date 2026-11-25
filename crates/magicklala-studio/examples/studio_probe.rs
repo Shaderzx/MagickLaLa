@@ -2519,6 +2519,44 @@ fn aside_undo_pour() -> Result<serde_json::Value, String> {
         "twoOriginal": two_original,
     }))
 }
+fn picker_undo() -> Result<serde_json::Value, String> {
+    let cmd_z = |rt: &mut Runtime<StudioApp>| {
+        rt.key(rune::KeyEvent { key: rune::Key::Command('z'), mods: rune::Mods { cmd: true, ..Default::default() } });
+        rt.frame(0.0);
+    };
+    let model_of = |app: &StudioApp| app.spell.nodes.iter().find(|node| node.id.0 == "llm").and_then(|node| node.config.get("model").cloned()).unwrap_or_default();
+    let temperature_of = |app: &StudioApp| app.spell.variables.iter().find(|variable| variable.name == "temperature").and_then(|variable| variable.default.clone()).map(|value| format!("{value:?}"));
+    let mut rt = runtime_for(StudioApp::from_registry().spell.clone());
+    rt.on_key = Some(magicklala_studio::studio_key);
+    let original = model_of(&rt.state);
+    for model in ["gpt-4o", "gpt-4.1"] {
+        rt.update(move |app, _| {
+            app.canvas.select(Some(NodeId::from("llm")));
+            app.select_model("openai", model);
+        });
+        rt.frame(0.0);
+    }
+    let mut models = vec![model_of(&rt.state)];
+    for _ in 0..2 {
+        cmd_z(&mut rt);
+        models.push(model_of(&rt.state));
+    }
+    let mut dial = runtime_for(StudioApp::from_registry().spell.clone());
+    dial.on_key = Some(magicklala_studio::studio_key);
+    for _ in 0..2 {
+        dial.update(|app, _| {
+            app.canvas.select(Some(NodeId::from("llm")));
+            app.adjust_temperature(0.1);
+        });
+        dial.frame(0.0);
+    }
+    let mut temperatures = vec![temperature_of(&dial.state)];
+    for _ in 0..2 {
+        cmd_z(&mut dial);
+        temperatures.push(temperature_of(&dial.state));
+    }
+    Ok(json!({ "original": original, "models": models, "temperatures": temperatures }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8780,6 +8818,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("card-notes") => card_notes(),
         Some("var-undo") => var_undo(),
         Some("aside-undo-pour") => aside_undo_pour(),
+        Some("picker-undo") => picker_undo(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
