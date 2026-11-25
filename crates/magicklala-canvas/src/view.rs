@@ -278,12 +278,14 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     let status_pill = if hexed {
         let flagged: Vec<&SocketModel> = card.inputs.iter().filter(|s| s.flagged).collect();
         let more = if flagged.len() > 1 { format!(" +{}", flagged.len() - 1) } else { String::new() };
-        let pill_room = dims[0] - if step_num.is_some() { legible(11.0) * 1.8 + 2.0 } else { 10.0 } - 10.0 - 12.0;
-        let fits = |label: &String| label.chars().count() as f32 * 7.2 * legible(11.0) / 11.0 <= pill_room;
+        let pill_clear = if step_num.is_some() { legible(11.0) * 1.8 + 2.0 } else { 10.0 };
+        let pill_icon = if dense || crammed { 10.0 + badge + 6.0 } else { 10.0 };
+        let pill_room = dims[0] - pill_clear - pill_icon - 12.0;
+        let fits = |label: &String| label.chars().count() as f32 * 0.58 * legible(11.0) <= pill_room;
         let missing_label = match flagged.first() {
             Some(s) => {
-                let verb = if s.mistyped { "Wrong type" } else { "Missing" };
-                let options = [format!("{verb} \"{}\"{more}", s.name), format!("{verb} {}{more}", s.name), format!("{}{more}", s.name)];
+                let (verb, short) = if s.mistyped { ("Wrong type", "Wrong") } else { ("Missing", "No") };
+                let options = [format!("{verb} \"{}\"{more}", s.name), format!("{verb} {}{more}", s.name), format!("{short} {}{more}", s.name)];
                 options.iter().find(|label| fits(label)).cloned().unwrap_or_else(|| options[2].clone())
             }
             None => (if card.status == ExecutionStatus::Failed { "Failed" } else { "Hexed" }).to_owned(),
