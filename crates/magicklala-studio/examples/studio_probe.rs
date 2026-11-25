@@ -6845,9 +6845,18 @@ fn clear_sight() -> Result<serde_json::Value, String> {
     let docked_menu = rect(&last, "context-menu").ok_or("no docked menu")?;
     let inspector = rect(&last, "inspector").ok_or("no inspector")?;
     let in_pane = docked_menu[0] >= inspector[0] - 0.5 && docked_menu[0] + docked_menu[2] <= inspector[0] + inspector[2] + 0.5;
+    let menu_words: Vec<[f32; 4]> = text_lines_under(&last, "context-menu").into_iter().map(|(_, rect)| rect).collect();
+    let hidden_by_menu: Vec<String> = text_lines_under(&last, "inspector")
+        .into_iter()
+        .filter(|(_, rect)| !menu_words.contains(rect))
+        .filter(|(_, rect)| {
+            rect[0] < docked_menu[0] + docked_menu[2] && docked_menu[0] < rect[0] + rect[2] && rect[1] < docked_menu[1] + docked_menu[3] && docked_menu[1] < rect[1] + rect[3]
+        })
+        .map(|(line, _)| line)
+        .collect();
     let before = last.state.canvas.nodes.len();
     click(&mut last, "context-duplicate-node")?;
-    let docked = json!({ "inRecipePane": in_pane, "duplicateWorks": last.state.canvas.nodes.len() == before + 1 });
+    let docked = json!({ "inRecipePane": in_pane, "hiddenByMenu": hidden_by_menu, "duplicateWorks": last.state.canvas.nodes.len() == before + 1 });
     if let Ok(dir) = std::env::var("CLEAR_SIGHT_SHOTS") {
         let mut again = sized_runtime((960.0, 640.0), Theme::Light);
         right_click(&mut again, spot);
