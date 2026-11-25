@@ -2489,7 +2489,9 @@ impl StudioApp {
 
     fn carry_rename(&mut self, old: &str, new: &str) {
         let renamed = format!("{{{{{new}}}}}");
-        for config in self.configs.values_mut() {
+        let fed: std::collections::HashSet<NodeId> =
+            self.canvas.wires.iter().filter(|wire| wire.to_socket == old && !wire.ty.is_flow()).map(|wire| wire.to_node.clone()).collect();
+        for (_, config) in self.configs.iter_mut().filter(|(id, _)| !fed.contains(*id)) {
             for value in config.as_object_mut().into_iter().flat_map(|settings| settings.values_mut()) {
                 if magicklala_graph::bound_variable(value) == Some(old) {
                     *value = serde_json::Value::String(renamed.clone());
@@ -2499,7 +2501,7 @@ impl StudioApp {
             }
         }
         let kinds: BTreeMap<NodeId, String> = self.canvas.nodes.iter().map(|card| (card.id.clone(), card.kind.clone())).collect();
-        for (id, edit) in &mut self.prompts {
+        for (id, edit) in self.prompts.iter_mut().filter(|(id, _)| !fed.contains(*id)) {
             let names_variable = kinds.get(id).is_some_and(|kind| kind.starts_with("var/")) && edit.text.trim() == old;
             if names_variable {
                 *edit = TextEdit::new(new);
@@ -2604,7 +2606,8 @@ impl StudioApp {
         let discrete = std::mem::take(&mut self.discrete_edit);
         let variables_before = self.spell.variables.clone();
         let mut renames: Vec<(String, String)> = Vec::new();
-        let taken: Vec<String> = self.spell.variables.iter().map(|variable| variable.name.clone()).collect();
+        let mut taken: Vec<String> = self.spell.variables.iter().map(|variable| variable.name.clone()).collect();
+        taken.extend(self.canvas.wires.iter().filter(|wire| !wire.ty.is_flow()).map(|wire| wire.to_socket.clone()));
         for (idx, var) in self.spell.variables.iter_mut().enumerate() {
             if let Some(edit) = self.var_name_edits.get(idx) {
                 let next_name = edit.text.trim();
@@ -3347,6 +3350,10 @@ impl StudioApp {
                 Some(format!("Variable {} needs a name", index + 1))
             } else if typed[..index].contains(name) {
                 Some(format!("{name}: two variables share this name"))
+            } else if self.spell.variables.get(index).is_some_and(|variable| &variable.name != name)
+                && self.canvas.wires.iter().any(|wire| !wire.ty.is_flow() && &wire.to_socket == name)
+            {
+                Some(format!("{name}: a step input already uses this name"))
             } else if !magicklala_nodes::is_template_name(name) {
                 Some(format!("{name}: a variable name uses only letters, digits, _ and -"))
             } else {

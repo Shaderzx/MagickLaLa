@@ -3669,11 +3669,25 @@ fn rename_keystrokes() -> Result<serde_json::Value, String> {
         rt.frame(0.0);
     }
     let check = validation_of(&mut rt)?;
-    let setting = |app: &StudioApp, id: &str, key: &str| app.spell.nodes.iter().find(|node| node.id.0 == id).and_then(|node| node.config.get(key).cloned()).unwrap_or_default();
+    let setting = |app: &StudioApp, id: &str, key: &str| {
+        app.spell.nodes.iter().find(|node| node.id.0 == id).and_then(|node| node.config.get(key).cloned()).unwrap_or_default()
+    };
+    let name = rt.state.spell.variables.first().map(|variable| variable.name.clone());
+    let template = setting(&rt.state, "words", "template");
+    let ms = setting(&rt.state, "wait", "ms");
+    rt.update(|app, _| {
+        if let Some(edit) = app.var_name_edits.first_mut() {
+            *edit = rune::TextEdit::new("query");
+        }
+        app.sync_edits();
+    });
+    rt.frame(0.0);
+    let landed = validation_of(&mut rt)?;
     Ok(json!({
-        "name": rt.state.spell.variables.first().map(|variable| variable.name.clone()),
-        "template": setting(&rt.state, "words", "template"),
-        "ms": setting(&rt.state, "wait", "ms"),
+        "landedOnInput": { "check": landed["errors"], "name": rt.state.spell.variables.first().map(|variable| variable.name.clone()) },
+        "name": name,
+        "template": template,
+        "ms": ms,
         "queryWired": rt.state.spell.wires.iter().any(|wire| wire.to_node.0 == "words" && wire.to_socket == "query"),
         "check": check["validation"],
     }))
