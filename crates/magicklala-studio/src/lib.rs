@@ -2406,6 +2406,15 @@ impl StudioApp {
         }
     }
 
+    fn where_they_stand(&self, mut nodes: Vec<NodeCardModel>) -> Vec<NodeCardModel> {
+        for card in &mut nodes {
+            if let Some(now) = self.canvas.card(&card.id) {
+                card.position = now.position;
+            }
+        }
+        nodes
+    }
+
     fn edit_snapshot(&self, typing: Option<NodeId>) -> EditSnapshot {
         EditSnapshot {
             nodes: self.canvas.nodes.clone(),
@@ -2991,10 +3000,25 @@ impl StudioApp {
 
     fn stale_list_findings(&self) -> Vec<HexFinding> {
         let graph = self.brew_graph();
-        graph
-            .wires
-            .iter()
-            .filter_map(|wire| {
+        let clashes = graph.nodes.iter().filter(|node| listed_field(&node.kind)).flat_map(|node| {
+            let fixed = self.specs.iter().find(|spec| spec.kind == node.kind).map(fixed_outputs).unwrap_or_default();
+            editable_field(&node.kind)
+                .and_then(|field| node.config.get(field))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|name| fixed.iter().any(|kept| kept == name))
+                .map(|name| {
+                    let readable = format!("{}: {name} is already an output, pick another name", self.canvas.display_title(&node.id));
+                    HexFinding { node: Some(node.id.clone()), socket: None, readable: readable.clone(), message: readable, mistyped: false }
+                })
+                .collect::<Vec<_>>()
+        });
+        let clashes: Vec<HexFinding> = clashes.collect();
+        clashes
+            .into_iter()
+            .chain(graph.wires.iter().filter_map(|wire| {
                 let node = graph.nodes.iter().find(|node| node.id == wire.from_node && listed_field(&node.kind))?;
                 let names = node.config.get(editable_field(&node.kind)?)?.as_array()?;
                 let spec = self.specs.iter().find(|spec| spec.kind == node.kind)?;
@@ -3003,7 +3027,7 @@ impl StudioApp {
                     let readable = format!("{}: {} is no longer listed but still has a wire", self.canvas.display_title(&node.id), wire.from_socket);
                     HexFinding { node: Some(node.id.clone()), socket: None, readable: readable.clone(), message: readable, mistyped: false }
                 })
-            })
+            }))
             .collect()
     }
 
@@ -3638,8 +3662,12 @@ impl StudioApp {
             }
             UndoEntry::Edit(before) => {
                 let EditSnapshot { nodes, wires, shelved, configs, prompts, versions, subgraphs, .. } = *before;
-                self.canvas.nodes = nodes;
+                self.canvas.nodes = self.where_they_stand(nodes);
                 self.canvas.wires = wires;
+                let spots: Vec<(NodeId, [f32; 2])> = self.canvas.nodes.iter().map(|card| (card.id.clone(), card.position)).collect();
+                for (id, spot) in spots {
+                    self.canvas.move_node(&id, spot);
+                }
                 self.canvas.shelved = shelved;
                 self.configs = configs;
                 self.prompts = prompts;
@@ -3652,8 +3680,12 @@ impl StudioApp {
                 self.sync_spell();
             }
             UndoEntry::Recipe { nodes, wires, shelved } => {
-                self.canvas.nodes = nodes;
+                self.canvas.nodes = self.where_they_stand(nodes);
                 self.canvas.wires = wires;
+                let spots: Vec<(NodeId, [f32; 2])> = self.canvas.nodes.iter().map(|card| (card.id.clone(), card.position)).collect();
+                for (id, spot) in spots {
+                    self.canvas.move_node(&id, spot);
+                }
                 self.canvas.shelved = shelved;
                 self.canvas.select(None);
                 self.validation = ValidationState::Unchecked;

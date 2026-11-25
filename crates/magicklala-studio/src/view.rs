@@ -746,14 +746,15 @@ fn left_rail(app: &StudioApp, t: &HearthPalette) -> El {
                 search_box = search_box.child(
                     row()
                         .key("palette-inline-clear")
-                        .px(6.0)
-                        .h(20.0)
+                        .px(8.0)
+                        .h(24.0)
+                        .min_w(44.0)
                         .radius(6.0)
                         .items_center()
                         .justify_center()
                         .fill(t.wash_2)
                         .border(1.0, t.rule_2)
-                        .child(label("Clear", 10.0, 650.0, if light { t.broth_deep } else { t.broth_foam }))
+                        .child(label("Clear", 11.0, 650.0, if light { t.broth_deep } else { t.broth_foam }))
                         .on_press(|app: &mut StudioApp| {
                             app.palette_query = TextEdit::new("");
                         }),
@@ -2397,8 +2398,8 @@ fn trace_display_kind(kind: &str) -> &str {
         "VariableSet" => "Spice",
         "RunFinished" => "Brewed",
         "RunRejected" => "Hexed",
-        "RunCancelled" => "Quenched",
-        "RunTimedOut" => "Boiled over",
+        "RunCancelled" => "Cancelled",
+        "RunTimedOut" => "Timed out",
         other => other,
     }
 }

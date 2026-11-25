@@ -338,9 +338,19 @@ impl CanvasState {
             whole => whole,
         };
         let generic = |socket: &str| socket == "out" || socket.strip_prefix("out_").is_some_and(|rest| rest.chars().all(|c| c.is_ascii_digit()));
-        let route =
-            self.wires.iter().find(|wire| &wire.to_node == id && wire.ty.is_flow()).map(|wire| wire.from_socket.as_str()).filter(|socket| !generic(socket));
-        match route {
+        let route_of = |node: &NodeId| {
+            self.wires
+                .iter()
+                .find(|wire| &wire.to_node == node && wire.ty.is_flow())
+                .filter(|wire| !generic(&wire.from_socket))
+                .map(|wire| (wire.from_node.clone(), wire.from_socket.clone()))
+        };
+        let route = route_of(id);
+        let same_route: Vec<&&NodeId> = twins.iter().filter(|twin| route.is_some() && route_of(twin) == route).collect();
+        match route.map(|(_, socket)| socket) {
+            Some(route) if same_route.len() > 1 => {
+                format!("{short} · {route} {}", same_route.iter().position(|twin| **twin == id).unwrap_or_default() + 1)
+            }
             Some(route) => format!("{short} · {route}"),
             None => format!("{short} · {}", twins.iter().position(|twin| *twin == id).unwrap_or_default() + 1),
         }
