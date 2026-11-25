@@ -1967,3 +1967,10 @@ test('One brew has one set of step numbers: the canvas badges and the Trace list
     expect(report[status].header).toBe(`Brew #0 · ${word} 3 steps · 7 events · <1ms total`);
   }
 });
+
+test('A newer saved draft never hides the version that is still live: after publishing v1 and saving a different draft, the open potion row says Draft with v1 live, and it still says v1 live after opening another potion', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['live-after-draft']);
+
+  expect(report.openRow).toBe('Tasting Agent 2 ingredients · v1 live Draft');
+  expect(report.elsewhereRow).toBe('Tasting Agent 2 ingredients · v1 live Open ›');
+});

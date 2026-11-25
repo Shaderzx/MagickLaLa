@@ -2646,6 +2646,33 @@ fn step_numbers() -> Result<serde_json::Value, String> {
 fn spell_id_text() -> String {
     "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4d02".to_owned()
 }
+fn live_after_draft() -> Result<serde_json::Value, String> {
+    let db_path = std::env::temp_dir().join(format!("magicklala-live-draft-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&db_path);
+    let config = StudioConfig { db_path: Some(db_path.clone()), ..StudioConfig::default() };
+    let mut app = StudioApp::open(&config).map_err(|error| error.to_string())?;
+    app.load_graph(tasting_spell());
+    let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    click(&mut rt, "publish")?;
+    rt.update(|app, _| {
+        app.prompts.insert(NodeId::from("echo"), rune::TextEdit::new("You said: {{content}}"));
+        app.sync_spell();
+        app.left_tab = LeftTab::Agents;
+    });
+    click(&mut rt, "save")?;
+    rt.frame(1.0);
+    let open_row = texts_under(&mut rt, "spell-tasting-agent");
+    rt.update(|app, _| {
+        app.request_open_sample("Research Agent");
+        app.confirm_switch();
+    });
+    rt.frame(1.0);
+    rt.frame(2.0);
+    let elsewhere = texts_under(&mut rt, "spell-tasting-agent");
+    let _ = std::fs::remove_file(&db_path);
+    Ok(json!({ "openRow": open_row, "elsewhereRow": elsewhere }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8910,6 +8937,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("picker-undo") => picker_undo(),
         Some("split-cleared") => split_cleared(),
         Some("step-numbers") => step_numbers(),
+        Some("live-after-draft") => live_after_draft(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
