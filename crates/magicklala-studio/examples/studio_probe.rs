@@ -6774,10 +6774,14 @@ fn tidy_bottles() -> Result<serde_json::Value, String> {
             }
         }
         clashes.dedup();
-        report.insert(name.to_owned(), json!({ "clashes": clashes.into_iter().take(6).collect::<Vec<_>>(), "cutKinds": cut_kinds.into_iter().take(4).collect::<Vec<_>>() }));
+        report.insert(
+            name.to_owned(),
+            json!({ "clashes": clashes.into_iter().take(6).collect::<Vec<_>>(), "cutKinds": cut_kinds.into_iter().take(4).collect::<Vec<_>>() }),
+        );
     }
     Ok(json!(report))
-}fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
+}
+fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),

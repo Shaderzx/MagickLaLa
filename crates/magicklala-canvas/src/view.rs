@@ -541,9 +541,11 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     };
     let title_col = if untaken { p.untaken_title() } else { p.ink };
     let sub_col = if untaken { p.untaken_sub() } else { p.mute };
+    let badge_room = if step_num.is_some() { (legible(11.0) * 1.55 - 1.0).max(10.0) } else { 10.0 };
     let tag_inner = col()
         .w_full()
-        .px(10.0)
+        .pl(badge_room)
+        .pr(10.0)
         .py(8.0)
         .gap(2.0)
         .radius(12.0)
@@ -681,10 +683,15 @@ pub(crate) fn potion_stand_view<S: 'static>(
         );
     }
 
+    let kind_fits = out_kind.chars().count() as f32 * 6.7 * legible(11.0) / 11.0 <= width - 22.0;
+    let badge_room = if step_num.is_some() { (legible(11.0) * 1.6 - 2.0).max(10.0) } else { 10.0 };
+    let perched = out_brewed || hexed;
     let mut tag_card = col()
         .w_full()
-        .px(10.0)
-        .py(9.0)
+        .pl(badge_room)
+        .pr(10.0)
+        .pt(if perched { (legible(11.0) * 0.9).max(9.0) } else { 9.0 })
+        .pb(9.0)
         .gap(2.0)
         .radius(14.0)
         .continuous_corners()
@@ -702,7 +709,7 @@ pub(crate) fn potion_stand_view<S: 'static>(
         .shadow(3.0, 10.0, p.shadow_card)
         .child(header_row)
         .child(text(&out_title).font(TextStyle::new(legible(12.0), 600.0)).color(p.ink_2).truncate())
-        .children((!terse).then(|| text(out_kind).font(TextStyle::new(legible(11.0), 500.0).mono()).color(p.mute).truncate()));
+        .children((!terse && kind_fits).then(|| text(out_kind).font(TextStyle::new(legible(11.0), 500.0).mono()).color(p.mute)));
     if out_brewed {
         let ms_text = match primary_output.and_then(|c| c.duration_ms) {
             Some(0) => "<1ms".to_owned(),
