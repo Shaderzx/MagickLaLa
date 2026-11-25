@@ -529,7 +529,7 @@ fn plan_with(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, BrewPla
 
     let usable_h = (size.1 - TOP_ROOM - BOTTOM_ROOM).max(120.0);
     let rows_fit = ((usable_h / READABLE + m.row_gap) / (m.vial[1] + m.row_gap)).floor() as usize;
-    let (cols, rows) = shelf_grid(ingredients.len(), rows_fit);
+    let (cols, rows) = if state.nodes.is_empty() { (1, 1) } else { shelf_grid(ingredients.len(), rows_fit) };
     let shelf_w = if cols == 0 { 0.0 } else { cols as f32 * m.vial[0] + (cols - 1) as f32 * m.col_gap };
     let shelf_h = stack_height(rows, m.vial[1], m.row_gap);
     let bottle_size = if bottles.len() > 1 { MULTI_BOTTLE_SIZE } else { SINGLE_BOTTLE_SIZE };

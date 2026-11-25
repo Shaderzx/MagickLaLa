@@ -1399,7 +1399,11 @@ fn capture_surfaces(out_dir: &Path) -> Result<serde_json::Value, String> {
     save("06-variables-1280x800.png", vars)?;
 
     let tasted = |dark: bool, messages: &[&str]| -> Result<StudioApp, String> {
-        let mut rt = runtime_for(tasting_spell());
+        let mut showcase = tasting_spell();
+        if let Some(node) = showcase.nodes.iter_mut().find(|node| node.id.0 == "echo") {
+            node.config = json!({ "template": "On it. I'll pull together \"{{content}}\" from this week's notes and send it back within the hour." });
+        }
+        let mut rt = runtime_for(showcase);
         if dark {
             rt.update(|app, _| app.toggle_theme());
         }
@@ -1410,7 +1414,7 @@ fn capture_surfaces(out_dir: &Path) -> Result<serde_json::Value, String> {
         rt.frame(0.0);
         Ok(std::mem::replace(&mut rt.state, StudioApp::from_registry()))
     };
-    save("07-playground-1280x800.png", tasted(false, &["What did Finance ask for Q3?", "Draft a concise confirmation reply."])?)?;
+    save("07-playground-1280x800.png", tasted(false, &["What did Finance ask for Q3?", "Who signs off the Q3 budget?"])?)?;
 
     let mut executed = StudioApp::with_spell(example("webhook_router.json")?, registry_specs());
     executed.size = (1280.0, 800.0);
@@ -1516,6 +1520,29 @@ fn capture_surfaces(out_dir: &Path) -> Result<serde_json::Value, String> {
     aside.toss(magicklala_canvas::Toss::Aside(NodeId::from("recall")));
     aside.undo_banner = None;
     save("18-set-aside-1280x800.png", aside)?;
+
+    let shelf = |spell: SpellGraph, size: (f32, f32), dark: bool, pantry: bool, brew: bool| -> Result<StudioApp, String> {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        if dark {
+            rt.update(|app, _| app.toggle_theme());
+        }
+        if pantry {
+            click(&mut rt, "expand-nodes")?;
+        }
+        if brew {
+            click(&mut rt, "run-spell")?;
+            live_finish(&mut rt)?;
+        }
+        rt.frame(3.0);
+        Ok(std::mem::replace(&mut rt.state, StudioApp::from_registry()))
+    };
+    save("19-eight-bottles-1280x800.png", shelf(many_bottle_spell(8), (1280.0, 800.0), false, false, true)?)?;
+    save("20-eight-bottles-dark-960x640.png", shelf(many_bottle_spell(8), (960.0, 640.0), true, false, false)?)?;
+    save("21-crowded-kitchen-960x640.png", shelf(crowded_kitchen(), (960.0, 640.0), false, true, false)?)?;
+    save("22-crowded-kitchen-dark-1280x800.png", shelf(crowded_kitchen(), (1280.0, 800.0), true, false, true)?)?;
 
     Ok(json!({ "surfaces": files }))
 }
@@ -5494,18 +5521,14 @@ fn crowded_kitchen() -> SpellGraph {
     let mut previous = (start.clone(), "out".to_owned());
     let chain: Vec<&magicklala_graph::NodeSpec> = specs
         .iter()
-        .filter(|spec| !spec.is_trigger && !spec.kind.starts_with("io/") && spec.kind != "flow/subgraph" && spec.kind.split('/').next() != Some("ai"))
+        .filter(|spec| !spec.is_trigger && spec.kind != "flow/subgraph" && !["io", "ai", "net"].contains(&spec.kind.split('/').next().unwrap_or_default()))
         .filter(|spec| flow(&spec.inputs).is_some() && flow(&spec.outputs).is_some() && wordy(spec))
         .take(11)
         .collect();
     for (index, spec) in chain.iter().enumerate() {
         let id = NodeId::from(format!("step_{index}").as_str());
-        spell.nodes.push(NodeInstance {
-            id: id.clone(),
-            kind: spec.kind.clone(),
-            position: [220.0 * (index + 1) as f32, 0.0],
-            config: serde_json::Value::Null,
-        });
+        let config = if spec.kind == "code/rhai_script" { json!({ "script": "\"stirred\"" }) } else { serde_json::Value::Null };
+        spell.nodes.push(NodeInstance { id: id.clone(), kind: spec.kind.clone(), position: [220.0 * (index + 1) as f32, 0.0], config });
         spell.wires.push(wire(format!("chain_{index}"), (&previous.0, &previous.1), (&id, &flow(&spec.inputs).unwrap_or_default())));
         for socket in spec.inputs.iter().filter(|socket| socket.required && !socket.ty.is_flow()) {
             spell.wires.push(wire(format!("feed_{index}_{}", socket.name), (&start, "content"), (&id, &socket.name)));
@@ -6049,6 +6072,61 @@ fn fair_shelves() -> Result<serde_json::Value, String> {
     });
 
     Ok(json!({ "layouts": layouts, "bends": bends, "tooltip": tooltip, "bottleKinds": kinds, "pillInside": pill_inside, "prompts": prompts }))
+}
+fn last_mile(db_path: &Path) -> Result<serde_json::Value, String> {
+    let mut both = studio_at(db_path)?;
+    both.update(|app, _| {
+        app.new_empty_spell();
+        app.load_graph(tasting_spell());
+    });
+    both.update(|app, _| {
+        app.add_variable();
+        if let Some(edit) = app.var_name_edits.get_mut(0) {
+            *edit = rune::TextEdit::new("");
+        }
+        app.prompts.insert(NodeId::from("echo"), rune::TextEdit::new(""));
+        app.sync_spell();
+    });
+    let published = both.state.publish().is_ok();
+    let errors_of = |app: &StudioApp| match &app.validation {
+        ValidationState::Invalid(errors) => errors.clone(),
+        _ => Vec::new(),
+    };
+    let mut after_publish = errors_of(&both.state);
+    click(&mut both, "validate")?;
+    let mut after_check = errors_of(&both.state);
+    after_publish.sort();
+    after_check.sort();
+    let publish = json!({ "published": published, "publishCount": after_publish.len(), "same": after_publish == after_check, "checkCount": after_check.len() });
+
+    let mut vars = runtime_for(tasting_spell());
+    vars.update(|app, _| app.add_variable());
+    let added = vars.state.spell.variables.len();
+    vars.update(|app, _| app.undo());
+    let variable_undo = json!({ "added": added, "afterUndo": vars.state.spell.variables.len() });
+
+    let mut brewing = slow_runtime(3000, Duration::from_secs(20));
+    brewing.on_key = Some(magicklala_studio::studio_key);
+    brewing.update(|app, _| app.add_variable());
+    let entries = brewing.state.undo_stack.len();
+    click(&mut brewing, "run-spell")?;
+    brewing.frame(1.0);
+    brewing.key(rune::KeyEvent { key: rune::Key::Command('z'), mods: rune::Mods { cmd: true, ..Default::default() } });
+    brewing.frame(1.0);
+    let kept = brewing.state.undo_stack.len() == entries && brewing.state.is_running();
+    brewing.update(|app, _| app.cancel_run());
+
+    let mut empty = runtime_for(SpellGraph::new("Fresh"));
+    empty.frame(1.0);
+    let starters_in_pot: Vec<String> = text_lines_under(&empty, "canvas").into_iter().map(|(line, _)| line).filter(|line| line.starts_with("On ")).collect();
+    let starters_in_panel: Vec<String> =
+        text_lines_under(&empty, "inspector").into_iter().map(|(line, _)| line).filter(|line| line.starts_with("On ")).collect();
+    let canvas_rect = layout_rect(&empty, "canvas").ok_or("no canvas")?;
+    let starter_inside =
+        layout_rect(&empty, "starter-event-on_message").is_some_and(|r| r[0] >= canvas_rect[0] && r[0] + r[2] <= canvas_rect[0] + canvas_rect[2]);
+    let empty_pot = json!({ "inPot": starters_in_pot.len(), "inPanel": starters_in_panel.len(), "starterOnShelf": starter_inside });
+
+    Ok(json!({ "publish": publish, "variableUndo": variable_undo, "undoDuringBrewKept": kept, "emptyPot": empty_pot }))
 }
 fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
@@ -6961,6 +7039,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("agreed-edits") => agreed_edits(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("steady-hands") => steady_hands(),
         Some("fair-shelves") => fair_shelves(),
+        Some("last-mile") => last_mile(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("drawn-truths") => drawn_truths(),

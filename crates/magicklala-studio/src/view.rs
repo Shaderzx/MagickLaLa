@@ -427,10 +427,49 @@ fn empty_canvas_overlay(app: &StudioApp, t: &HearthPalette) -> El {
     col().key("empty-canvas").w(card_w).px(16.0).py(12.0).items_center().gap(8.0).absolute(x, y).child(heading("Start a new potion", 24.0, 800.0, t.ink))
 }
 
+fn starter_shelf(app: &StudioApp, t: &HearthPalette) -> El {
+    let size = app.canvas_size();
+    let pot = magicklala_canvas::brew_plan(&app.canvas, size).pot;
+    let light = app.theme == Theme::Light;
+    let triggers: Vec<&NodeSpec> = app.specs.iter().filter(|spec| spec.is_trigger).collect();
+    let vial = [176.0_f32, 34.0_f32];
+    let gap = 8.0;
+    let stack_h = triggers.len() as f32 * (vial[1] + gap) - gap;
+    let x = (pot[0] - vial[0] - 36.0).max(12.0);
+    let y = (pot[1] + pot[3] * 0.5 - stack_h * 0.5).max(12.0);
+    let tone = category_tone("events", light);
+    triggers.iter().enumerate().fold(el().key("starter-shelf").absolute(0.0, 0.0), |shelf, (index, spec)| {
+        let kind = spec.kind.clone();
+        shelf.child(
+            row()
+                .key(format!("starter-{}", spec.kind.replace('/', "-")))
+                .label(format!("Add {}", spec.title))
+                .size(vial[0], vial[1])
+                .px(10.0)
+                .gap(8.0)
+                .radius(17.0)
+                .continuous_corners()
+                .items_center()
+                .fill(t.card)
+                .border(1.4, tone.border)
+                .shadow(0.0, 14.0, with_alpha(tone.liquid, if light { 0.35 } else { 0.5 }))
+                .absolute(x, y + index as f32 * (vial[1] + gap))
+                .child(canvas(mini_vial_icon(&spec.category, light, 18.0)).size(18.0, 18.0))
+                .child(label(&spec.title, 12.0, 700.0, t.ink).truncate())
+                .on_press(move |app: &mut StudioApp| {
+                    app.spawn(&kind);
+                }),
+        )
+    })
+}
+
 fn canvas_with_menu(app: &StudioApp, t: &HearthPalette) -> El {
     let mut board = interactive_canvas_view::<StudioApp>(&app.canvas, app.canvas_size(), |app| &mut app.canvas, StudioApp::toss);
     if app.canvas.nodes.is_empty() {
         board = board.child(empty_canvas_overlay(app, t));
+        if app.canvas.mode == WorkbenchMode::Cauldron {
+            board = board.child(starter_shelf(app, t));
+        }
     }
     match context_menu(app, t) {
         Some((menu, tether)) => board.children(tether).child(menu),
@@ -1689,31 +1728,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             .items_center()
             .gap(10.0)
             .child(canvas(empty_bottle_mark(light, 42.0)).key("inspector-empty-bobbin").size(42.0, 42.0))
-            .child(heading(if app.canvas.nodes.is_empty() { "Pick a trigger" } else { "No ingredient picked" }, 15.5, 800.0, t.ink))
-            .children(app.canvas.nodes.is_empty().then(|| {
-                app.specs.iter().filter(|spec| spec.is_trigger).fold(col().w_full().gap(6.0).pt(6.0), |list, spec| {
-                    let kind = spec.kind.clone();
-                    list.child(
-                        row()
-                            .key(format!("starter-{}", spec.kind.replace('/', "-")))
-                            .label(format!("Add {}", spec.title))
-                            .w_full()
-                            .h(32.0)
-                            .px(10.0)
-                            .gap(8.0)
-                            .radius(10.0)
-                            .continuous_corners()
-                            .items_center()
-                            .fill(t.card)
-                            .border(1.0, t.rule)
-                            .child(canvas(mini_vial_icon(&spec.category, light, 16.0)).size(16.0, 16.0))
-                            .child(label(&spec.title, 12.0, 650.0, t.ink))
-                            .on_press(move |app: &mut StudioApp| {
-                                app.spawn(&kind);
-                            }),
-                    )
-                })
-            }));
+            .child(heading(if app.canvas.nodes.is_empty() { "Empty pot" } else { "No ingredient picked" }, 15.5, 800.0, t.ink));
     };
     let compact = app.size.1 < COMPACT_INSPECTOR_BELOW;
     let socket_h = if compact { 21.0 } else { 24.0 };

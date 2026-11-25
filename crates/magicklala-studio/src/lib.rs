@@ -795,6 +795,9 @@ pub enum UndoEntry {
         name_edit: TextEdit,
         default_edit: TextEdit,
     },
+    VariableAdded {
+        index: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1206,6 +1209,8 @@ impl StudioApp {
         self.spell.variables.push(VariableDef { name: name.clone(), ty: SocketType::String, default: Some(Value::String(String::new())), exposed: true });
         self.var_name_edits.push(TextEdit::new(&name));
         self.var_default_edits.push(TextEdit::new(""));
+        self.undo_stack.push(UndoEntry::VariableAdded { index: self.spell.variables.len() - 1 });
+        self.undo_banner = Some(format!("Added variable {name}"));
         self.validation = ValidationState::Unchecked;
         self.canvas.validated = false;
         self.dirty = true;
@@ -2514,6 +2519,10 @@ impl StudioApp {
     }
 
     fn hex_findings_for_spell(&self) -> Vec<HexFinding> {
+        self.hex_findings_for_root(self.root_subgraph())
+    }
+
+    fn hex_findings_for_root(&self, root: SubgraphKey) -> Vec<HexFinding> {
         let variable_findings: Vec<HexFinding> = self
             .variable_errors()
             .into_iter()
@@ -2548,7 +2557,7 @@ impl StudioApp {
             Ok(resolver) => resolver,
             Err(error) => return vec![HexFinding::loose(error.to_string())],
         };
-        match resolve_subgraphs_from(&self.brew_graph(), self.root_subgraph(), &resolver, &validator) {
+        match resolve_subgraphs_from(&self.brew_graph(), root, &resolver, &validator) {
             Ok(_) => Vec::new(),
             Err(error) => vec![HexFinding::loose(error.to_string())],
         }
@@ -2599,25 +2608,8 @@ impl StudioApp {
     }
 
     fn check_spell_with_root(&self, root: SubgraphKey) -> Result<(), Vec<String>> {
-        let variable_errors = self.variable_errors();
-        if !variable_errors.is_empty() {
-            return Err(variable_errors);
-        }
-        let version_errors = self.release_version_errors();
-        if !version_errors.is_empty() {
-            return Err(version_errors);
-        }
-        let blank_fields: Vec<String> = self.blank_field_findings().into_iter().chain(self.unfilled_word_findings()).map(|finding| finding.message).collect();
-        if !blank_fields.is_empty() {
-            return Err(blank_fields);
-        }
-        let validator = SpellValidator::new(self.specs.clone());
-        validator.validate(&self.brew_graph()).map_err(|errors| errors.iter().map(ToString::to_string).collect::<Vec<_>>())?;
-        if self.spell.subgraphs.is_empty() {
-            return Ok(());
-        }
-        let resolver = self.subgraph_resolver().map_err(|error| vec![error.to_string()])?;
-        resolve_subgraphs_from(&self.brew_graph(), root, &resolver, &validator).map(drop).map_err(|error| vec![error.to_string()])
+        let findings = self.hex_findings_for_root(root);
+        if findings.is_empty() { Ok(()) } else { Err(findings.into_iter().map(|finding| finding.message).collect()) }
     }
 
     pub fn validate(&mut self) -> &ValidationState {
@@ -3188,6 +3180,23 @@ impl StudioApp {
                 self.dirty = true;
                 self.sync_spell();
             }
+            UndoEntry::VariableAdded { index } => {
+                if index < self.spell.variables.len() {
+                    self.spell.variables.remove(index);
+                    if index < self.var_name_edits.len() {
+                        self.var_name_edits.remove(index);
+                    }
+                    if index < self.var_default_edits.len() {
+                        self.var_default_edits.remove(index);
+                    }
+                    self.open_var_type = None;
+                    self.pending_type_reset = None;
+                    self.variables_touched = true;
+                    self.validation = ValidationState::Unchecked;
+                    self.dirty = true;
+                    self.sync_spell();
+                }
+            }
             UndoEntry::Variable { index, variable, name_edit, default_edit } => {
                 let at = index.min(self.spell.variables.len());
                 self.spell.variables.insert(at, variable);
@@ -3440,7 +3449,7 @@ pub fn studio_key(app: &mut StudioApp, key: &rune::KeyEvent, _: &mut rune::Tx) -
             app.delete_selected_node();
             true
         }
-        _ if on_workbench && key.is_command('z') && !key.mods.shift && !app.undo_stack.is_empty() => {
+        _ if on_workbench && key.is_command('z') && !key.mods.shift && !app.undo_stack.is_empty() && !app.is_running() => {
             app.undo();
             true
         }

@@ -1599,3 +1599,16 @@ test('Fair shelves: a short recipe with four or eight bottles keeps the pot cent
   expect(report.pillInside).toBe(true);
   expect(report.prompts).toEqual({ seededTokens: 0, unfilledCheck: 'invalid', namesWord: true, filledCheck: 'valid' });
 });
+test('The last mile: a refused Publish lists every problem Check lists, adding a variable can be undone, Cmd or Ctrl Z waits out a brew, and an empty pot offers its triggers on the shelf beside it instead of repeating the Pantry in the Recipe panel', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-last-mile-'));
+  try {
+    const report = await studioProbe(['last-mile', join(dir, 'studio.sqlite')]);
+
+    expect(report.publish).toEqual({ published: false, publishCount: 2, same: true, checkCount: 2 });
+    expect(report.variableUndo).toEqual({ added: 1, afterUndo: 0 });
+    expect(report.undoDuringBrewKept).toBe(true);
+    expect(report.emptyPot).toEqual({ inPot: 6, inPanel: 0, starterOnShelf: true });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
