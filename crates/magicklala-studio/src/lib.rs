@@ -2519,9 +2519,6 @@ impl StudioApp {
             .into_iter()
             .map(|message| HexFinding { node: None, socket: None, readable: message.clone(), message, mistyped: false })
             .collect();
-        if !variable_findings.is_empty() {
-            return variable_findings;
-        }
         let version_findings: Vec<HexFinding> = self
             .brew_graph()
             .nodes
@@ -2534,17 +2531,14 @@ impl StudioApp {
                 })
             })
             .collect();
-        if !version_findings.is_empty() {
-            return version_findings;
-        }
-        let field_findings = self.blank_field_findings();
-        if !field_findings.is_empty() {
-            return field_findings;
-        }
+        let mut findings: Vec<HexFinding> = variable_findings.into_iter().chain(version_findings).chain(self.blank_field_findings()).collect();
         let validator = SpellValidator::new(self.specs.clone());
         if let Err(errors) = validator.validate(&self.brew_graph()) {
             let title_of = |id: &NodeId| self.canvas.display_title(id);
-            return errors.iter().map(|error| HexFinding::from_validation(error, &self.spell, &title_of)).collect();
+            findings.extend(errors.iter().map(|error| HexFinding::from_validation(error, &self.spell, &title_of)));
+        }
+        if !findings.is_empty() {
+            return findings;
         }
         if self.spell.subgraphs.is_empty() {
             return Vec::new();
@@ -2947,6 +2941,40 @@ impl StudioApp {
         self.canvas.invalid_brew = matches!(self.validation, ValidationState::Invalid(_));
         self.canvas.running_brew = self.is_running();
         true
+    }
+
+    pub fn has_open_popover(&self) -> bool {
+        self.pantry_drag.is_some()
+            || self.canvas.context_menu.is_some()
+            || self.model_menu_open
+            || self.open_var_type.is_some()
+            || self.pending_type_reset.is_some()
+            || self.pending_restore_version.is_some()
+            || self.pending_switch.is_some()
+    }
+
+    pub fn dismiss_topmost(&mut self) -> bool {
+        if self.pantry_drag.take().is_some() {
+            return true;
+        }
+        if self.canvas.context_menu.is_some() {
+            self.close_context_menu();
+            return true;
+        }
+        if std::mem::take(&mut self.model_menu_open) {
+            return true;
+        }
+        if self.open_var_type.take().is_some() || self.pending_type_reset.take().is_some() {
+            return true;
+        }
+        if self.pending_restore_version.take().is_some() || self.pending_switch.take().is_some() {
+            return true;
+        }
+        if self.canvas.selection.is_some() {
+            self.canvas.select(None);
+            return true;
+        }
+        false
     }
 
     pub fn close_context_menu(&mut self) {
@@ -3375,20 +3403,16 @@ fn remember_size(size: (f32, f32)) {
 }
 
 pub fn studio_key(app: &mut StudioApp, key: &rune::KeyEvent, _: &mut rune::Tx) -> bool {
+    if key.key == rune::Key::Escape {
+        return app.dismiss_topmost();
+    }
+    let on_workbench = matches!(app.right_tab, RightTab::Inspector | RightTab::Trace) && !app.has_open_popover();
     match &key.key {
-        rune::Key::Escape if app.canvas.context_menu.is_some() => {
-            app.close_context_menu();
-            true
-        }
-        rune::Key::Escape if app.canvas.selection.is_some() => {
-            app.canvas.select(None);
-            true
-        }
-        rune::Key::Delete | rune::Key::Backspace if app.canvas.selection.is_some() && !app.is_running() => {
+        rune::Key::Delete | rune::Key::Backspace if on_workbench && app.canvas.selection.is_some() && !app.is_running() => {
             app.delete_selected_node();
             true
         }
-        _ if key.is_command('z') && !key.mods.shift && !app.undo_stack.is_empty() => {
+        _ if on_workbench && key.is_command('z') && !key.mods.shift && !app.undo_stack.is_empty() => {
             app.undo();
             true
         }

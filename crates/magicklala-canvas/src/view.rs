@@ -317,7 +317,11 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     let title_room = dims[0] - 24.0 - 6.0 - 30.0;
     let wraps = narrow && state.display_title(&card.id).chars().count() as f32 * 7.4 * title_size / 13.0 > title_room;
     let top_row = col().w_full().min_w(0.0).child({
-        let title = text(state.display_title(&card.id)).font(TextStyle::new(title_size, 750.0)).color(if dimmed { untaken_title } else { p.ink });
+        let title = text(state.display_title(&card.id).replace(" · ", "\u{a0}·\u{a0}")).font(TextStyle::new(title_size, 750.0)).color(if dimmed {
+            untaken_title
+        } else {
+            p.ink
+        });
         if title_size > 13.0 { title.truncate() } else { title.wrap() }
     });
 

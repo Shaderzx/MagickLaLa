@@ -138,12 +138,12 @@ fn menu_item(spec: MenuItemSpec<'_>, t: &HearthPalette, action: fn(&mut StudioAp
     if spec.enabled { item.on_press(action) } else { item.role("button").label(spec.caption).disabled(true) }
 }
 
-fn context_tether(card: [f32; 4], menu: [f32; 2], t: &HearthPalette) -> Option<El> {
+fn context_tether(card: [f32; 4], menu: [f32; 4], t: &HearthPalette) -> Option<El> {
     let below = menu[1] >= card[1] + card[3];
-    let above = menu[1] + CONTEXT_MENU_SIZE.1 <= card[1];
+    let above = menu[1] + menu[3] <= card[1];
     if below || above {
-        let x = (card[0] + card[2] * 0.5).clamp(menu[0] + 24.0, menu[0] + CONTEXT_MENU_SIZE.0 - 24.0).clamp(card[0] + 12.0, card[0] + card[2] - 12.0);
-        let (card_y, menu_y) = if below { (card[1] + card[3], menu[1]) } else { (card[1], menu[1] + CONTEXT_MENU_SIZE.1) };
+        let x = (card[0] + card[2] * 0.5).clamp(menu[0] + 24.0, menu[0] + menu[2] - 24.0).clamp(card[0] + 12.0, card[0] + card[2] - 12.0);
+        let (card_y, menu_y) = if below { (card[1] + card[3], menu[1]) } else { (card[1], menu[1] + menu[3]) };
         let top = card_y.min(menu_y) - 4.0;
         let from = [4.0, card_y - top];
         let to = [4.0, menu_y - top];
@@ -154,7 +154,7 @@ fn context_tether(card: [f32; 4], menu: [f32; 2], t: &HearthPalette) -> Option<E
     }
     let on_right = menu[0] >= card[0] + card[2];
     let card_edge = if on_right { card[0] + card[2] } else { card[0] };
-    let menu_edge = if on_right { menu[0] } else { menu[0] + CONTEXT_MENU_SIZE.0 };
+    let menu_edge = if on_right { menu[0] } else { menu[0] + menu[2] };
     let menu_y = (card[1] + card[3] * 0.5).clamp(menu[1] + 20.0, menu[1] + 64.0);
     let card_y = menu_y.clamp(card[1] + card[3] * 0.3, card[1] + card[3] * 0.7);
     let left = card_edge.min(menu_edge) - 4.0;
@@ -192,29 +192,48 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<(El, Option<El>)> 
         (false, _) => 2.0,
     };
     let (menu_w, menu_h) = (CONTEXT_MENU_SIZE.0, (10.0 + 24.0 + 2.0 + rows * 29.0 + (rows + 2.0) * 2.0).min(CONTEXT_MENU_SIZE.1));
-    let plaque_top = plan.as_ref().map_or(view.1, |plan| plan.plaque_top);
-    let covers_pot = |[x, y]: [f32; 2]| {
-        plan.as_ref().is_some_and(|plan| x < plan.pot[0] + plan.pot[2] && x + menu_w > plan.pot[0] && y < plan.pot[1] + plan.pot[3] && y + menu_h > plan.pot[1])
+    let overlap_beyond = |[x, y]: [f32; 2], r: [f32; 4], slack: f32| {
+        let w = (x + menu_w).min(r[0] + r[2]) - x.max(r[0]);
+        let h = (y + menu_h).min(r[1] + r[3]) - y.max(r[1]);
+        if w > slack && h > slack { w * h } else { 0.0 }
     };
-    let clamp = |[x, y]: [f32; 2]| [x.min(view.0 - menu_w - 12.0).max(12.0), y.min(view.1 - menu_h - 12.0).min(plaque_top - menu_h - 8.0).max(12.0)];
+    let overlap = |spot: [f32; 2], r: [f32; 4]| overlap_beyond(spot, r, 4.0);
+    let pot_zone = plan.as_ref().map(|plan| [plan.pot[0], plan.pot[1], plan.pot[2], (plan.plaque_top + 34.0 * plan.scale.max(0.6)) - plan.pot[1]]);
+    let picked = app.canvas.selection.clone();
+    let others: Vec<[f32; 4]> = match &plan {
+        Some(plan) => plan.cards.iter().filter(|card| Some(&card.id) != picked.as_ref()).map(|card| card.rect).collect(),
+        None => app
+            .canvas
+            .nodes
+            .iter()
+            .filter(|card| Some(&card.id) != picked.as_ref())
+            .map(|card| {
+                let [x, y] = app.canvas.camera.world_to_screen(card.position);
+                [x, y, card.size[0] * app.canvas.camera.zoom, card.size[1] * app.canvas.camera.zoom]
+            })
+            .collect(),
+    };
+    let clamp = |[x, y]: [f32; 2]| [x.min(view.0 - menu_w - 12.0).max(12.0), y.min(view.1 - menu_h - 12.0).max(12.0)];
     let beside = app.canvas.context_card.filter(|_| app.canvas.selection.is_some()).map(|card| {
-        let column = card[0].min(view.0 - menu_w - 12.0).max(12.0);
-        let shy = plan.as_ref().map_or(column, |plan| column.min(plan.pot[0] - menu_w - 6.0));
         let below = card[1] + card[3] + 10.0;
         let above = card[1] - menu_h - 10.0;
-        let spots =
-            [[card[0] + card[2] + 10.0, card[1]], [card[0] - menu_w - 10.0, card[1]], [column, below], [column, above], [shy, below], [shy, above]].map(clamp);
-        let hides_card =
-            |[x, y]: [f32; 2]| x < card[0] + card[2] - 4.0 && x + menu_w > card[0] + 4.0 && y < card[1] + card[3] - 4.0 && y + menu_h > card[1] + 4.0;
-        spots
-            .iter()
-            .find(|spot| !covers_pot(**spot) && !hides_card(**spot))
-            .or_else(|| spots.iter().find(|spot| !covers_pot(**spot)))
-            .copied()
-            .unwrap_or(spots[0])
+        let mut columns = vec![card[0], card[0] + (card[2] - menu_w) * 0.5, card[0] + card[2] - menu_w];
+        if let Some(zone) = pot_zone {
+            columns.push(zone[0] - menu_w - 8.0);
+            columns.push(zone[0] + zone[2] + 8.0);
+        }
+        let mut spots = vec![[card[0] + card[2] + 10.0, card[1]], [card[0] - menu_w - 10.0, card[1]]];
+        spots.extend(columns.iter().flat_map(|column| [[*column, below], [*column, above]]));
+        let cost = |spot: [f32; 2]| {
+            let pot = pot_zone.map_or(0.0, |zone| overlap_beyond(spot, zone, 0.0));
+            let own = overlap(spot, card);
+            let crowd: f32 = others.iter().map(|other| overlap(spot, *other)).sum();
+            (pot > 0.0, own > 0.0, crowd.round() as i64)
+        };
+        spots.into_iter().map(clamp).enumerate().min_by_key(|(order, spot)| (cost(*spot), *order)).map_or(clamp(anchor), |(_, spot)| spot)
     });
     let [x, y] = beside.unwrap_or_else(|| clamp(anchor));
-    let tether = app.canvas.context_card.filter(|_| beside.is_some()).and_then(|card| context_tether(card, [x, y], t));
+    let tether = app.canvas.context_card.filter(|_| beside.is_some()).and_then(|card| context_tether(card, [x, y, menu_w, menu_h], t));
     let selected_card = app.canvas.selected_card();
     let selected_title = selected_card.map(|card| app.canvas.display_title(&card.id));
     let quick_add_title = app.specs.iter().find(|spec| spec.kind == QUICK_ADD_KIND).map_or(QUICK_ADD_KIND, |spec| spec.title.as_str());
@@ -1241,7 +1260,7 @@ fn variables_table(app: &StudioApp, t: &HearthPalette) -> El {
     app.spell.variables.iter().enumerate().fold(list, |list, (idx, variable)| {
         let menu_open = app.open_var_type == Some(idx);
         let pending_reset = app.pending_type_reset.filter(|(open, _)| *open == idx).map(|(_, ty)| ty);
-        let (bound_hint, bound_active) = app.variable_binding_hint(&variable.name);
+        let (bound_hint, bound_active) = app.variable_binding_hint(app.var_name_edits.get(idx).map_or(variable.name.as_str(), |edit| edit.text.trim()));
         let name_widget = if let Some(name_edit) = app.var_name_edits.get(idx) {
             text_input(name_edit, font(12.0, 700.0).mono())
                 .single_line()

@@ -6489,7 +6489,9 @@ fn geometry_and_polish(db_path: &Path) -> Result<serde_json::Value, String> {
     let mut twin_rt = sized(twins, (1280.0, 800.0));
     let vial_titles: Vec<String> = ["first", "second"]
         .iter()
-        .filter_map(|id| text_lines_under(&twin_rt, &format!("node-{id}")).into_iter().map(|(line, _)| line).find(|line| line.starts_with("Delay")))
+        .filter_map(|id| {
+            text_lines_under(&twin_rt, &format!("node-{id}")).into_iter().map(|(line, _)| line.replace('\u{a0}', " ")).find(|line| line.starts_with("Delay"))
+        })
         .collect();
     let trigger_names = [twin_rt.state.canvas.display_title(&NodeId::from("trigger")), twin_rt.state.canvas.display_title(&NodeId::from("again"))];
     twin_rt.update(|app, _| {
