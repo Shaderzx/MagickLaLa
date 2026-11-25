@@ -1911,19 +1911,28 @@ impl StudioApp {
             return;
         }
         self.plug_menu = None;
+        let was_hexed = matches!(self.validation, ValidationState::Invalid(_));
+        let before = self.edit_snapshot(None);
         match self.canvas.connect_sockets(from, to) {
             Ok(_) => {
+                self.undo_stack.push(UndoEntry::Edit(Box::new(before)));
+                self.redo_stack.clear();
                 self.wire_error = None;
                 self.sync_spell();
+                if was_hexed {
+                    self.validate();
+                }
             }
             Err(error) => self.wire_error = Some(error.to_string()),
         }
     }
 
     pub fn unplug_wire(&mut self, wire: &magicklala_graph::WireId) {
-        if self.is_running() {
+        if self.is_running() || !self.canvas.wires.iter().any(|candidate| &candidate.id == wire) {
             return;
         }
+        self.undo_stack.push(UndoEntry::Edit(Box::new(self.edit_snapshot(None))));
+        self.redo_stack.clear();
         let cut = self
             .canvas
             .wires
@@ -3725,6 +3734,7 @@ impl StudioApp {
             || self.pending_type_reset.is_some()
             || self.pending_restore_version.is_some()
             || self.pending_switch.is_some()
+            || self.plug_menu.is_some()
     }
 
     pub fn dismiss_topmost(&mut self) -> bool {
@@ -3741,7 +3751,7 @@ impl StudioApp {
         if self.open_var_type.take().is_some() || self.pending_type_reset.take().is_some() {
             return true;
         }
-        if self.pending_restore_version.take().is_some() || self.pending_switch.take().is_some() {
+        if self.pending_restore_version.take().is_some() || self.pending_switch.take().is_some() || self.plug_menu.take().is_some() {
             return true;
         }
         if self.canvas.selection.is_some() {
@@ -3944,6 +3954,7 @@ impl StudioApp {
             return;
         }
         let Some(after) = self.redo_stack.pop() else { return };
+        self.plug_menu = None;
         let now = self.edit_snapshot(None);
         self.restoring = true;
         self.restore_edit(after);
@@ -3958,6 +3969,7 @@ impl StudioApp {
             return;
         }
         let Some(entry) = self.undo_stack.pop() else { return };
+        self.plug_menu = None;
         let now = self.edit_snapshot(None);
         self.undo_banner = None;
         self.restoring = true;

@@ -1844,7 +1844,13 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             right_meta = right_meta
                 .child(label(if socket.mistyped { "Wrong type" } else { "Missing" }, 10.5, 700.0, t.hex).key(format!("socket-missing-{}", socket.name)));
         }
-        let has_plug_button = is_input && !socket.ty.is_flow() && !supplied && !app.is_running();
+        let fed_from = app
+            .canvas
+            .wires
+            .iter()
+            .find(|w| is_input && !socket.ty.is_flow() && w.to_node == card.id && w.to_socket == socket.name)
+            .map(|w| format!("from {} · {}", app.canvas.display_title(&w.from_node), w.from_socket));
+        let has_plug_button = is_input && !socket.ty.is_flow() && !app.is_running();
         if has_plug_button {
             let name = socket.name.clone();
             let node = card.id.clone();
@@ -1892,15 +1898,19 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             .border_sides([0.0, 0.0, 1.0, 0.0], if flagged { with_alpha(t.hex, 0.42) } else { t.rule })
             .child(
                 row().grow(1.0).min_w(0.0).gap(8.0).items_center().child(marker).child(
-                    label(
-                        &socket.name,
-                        if compact { 11.5 } else { 12.0 },
-                        if socket.ty.is_flow() || flagged { 650.0 } else { 500.0 },
-                        if flagged { t.hex } else { t.ink },
-                    )
-                    .wrap_anywhere()
-                    .grow(1.0)
-                    .min_w(0.0),
+                    col()
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .child(
+                            label(
+                                &socket.name,
+                                if compact { 11.5 } else { 12.0 },
+                                if socket.ty.is_flow() || flagged { 650.0 } else { 500.0 },
+                                if flagged { t.hex } else { t.ink },
+                            )
+                            .wrap_anywhere(),
+                        )
+                        .children(fed_from.map(|source| label(source, 10.0, 500.0, t.mute).key(format!("plug-source-{}", socket.name)).wrap_anywhere())),
                 ),
             )
             .child(right_meta)
