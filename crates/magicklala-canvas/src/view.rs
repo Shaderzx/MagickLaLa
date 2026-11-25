@@ -586,16 +586,14 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     let long_tag = crate::brew::potion_ends(state).len() <= 3;
     let crowded_tag = legible(11.0) > 11.0 * 1.15;
     let inline_badge = !long_tag || crowded_tag;
-    let side = legible(11.0) * 1.55;
+    let side = if inline_badge { legible(9.5) * 1.45 } else { legible(11.0) * 1.55 };
     let step_badge = step_num.map(|num| {
         el().key(format!("step-badge-{}", card.id.0)).child(
-            row()
-                .size(side, side)
-                .radius(side * 0.5)
-                .items_center()
-                .justify_center()
-                .fill(if hexed { p.hex } else { p.primary_bg })
-                .child(text(num.to_string()).font(TextStyle::new(legible(10.5), 750.0).features("'tnum' 1")).color(p.primary_ink)),
+            row().size(side, side).radius(side * 0.5).items_center().justify_center().fill(if hexed { p.hex } else { p.primary_bg }).child(
+                text(num.to_string())
+                    .font(TextStyle::new(if inline_badge { legible(9.0) } else { legible(10.5) }, 750.0).features("'tnum' 1"))
+                    .color(p.primary_ink),
+            ),
         )
     });
     let tag_inner = col()
@@ -626,7 +624,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     let tag_wrap = el()
         .w_full()
         .child(tag_inner)
-        .children((!(crowded_tag && taken)).then(|| row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(pill)))
+        .children((!(inline_badge && taken)).then(|| row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(pill)))
         .children(step_badge.clone().filter(|_| !inline_badge).map(|badge| badge.absolute(-6.0, -side - 3.0)));
     let tag = col().w_full().child(tag_wrap);
     let select_id = card.id.clone();
@@ -638,7 +636,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
         .absolute(pos_x, pos_y)
         .child(bottle_art)
         .child(tag)
-        .children(step_badge.filter(|_| inline_badge).map(|badge| badge.absolute(width * 0.5 + 4.0, bottle_h - side - 2.0)))
+        .children(step_badge.filter(|_| inline_badge).map(|badge| badge.absolute(width * 0.5 + 5.0, 1.0)))
         .on_press(move |s: &mut S| lens(s).select(Some(select_id.clone())))
 }
 
