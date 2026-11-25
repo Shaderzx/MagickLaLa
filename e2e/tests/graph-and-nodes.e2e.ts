@@ -1212,3 +1212,20 @@ test('distinct pinned releases of one spell are distinct snapshots, so A@2 -> B 
     expect(run.events).toEqual([]);
   }
 });
+
+test('a setting bound to a variable that holds no value fails its step with the variable named instead of running on the default, and the same step runs once a Set gives the variable a value', async () => {
+  const unset = [spellNode('start', 'event/on_start'), spellNode('wait', 'time/delay', { ms: '{{ms}}' })];
+  const finished = (run: SpellRun, node: string) => run.events.some((event) => event.event === 'node_finished' && event.node_id === node);
+  await withSpellFile(unset, [spellWire('w1', 'start', 'out', 'wait', 'in')], async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(1);
+    expect(finished(run, 'wait')).toBe(false);
+    expect(failureOf(run, 'wait')).toContain('the variable ms has no value');
+  }, { variables: [{ name: 'ms', ty: 'int' }] });
+  const set = [...unset, spellNode('set', 'var/set', { name: 'ms', value: 5 })];
+  await withSpellFile(set, [spellWire('w1', 'start', 'out', 'set', 'in'), spellWire('w2', 'set', 'out', 'wait', 'in')], async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(0);
+    expect(finished(run, 'wait')).toBe(true);
+  }, { variables: [{ name: 'ms', ty: 'int' }] });
+});

@@ -3477,6 +3477,45 @@ fn set_before_read() -> Result<serde_json::Value, String> {
         link("c", ("set", "out"), ("wait", "in")),
         link("d", ("fork", "false"), ("wait", "in")),
     ];
+    let mut reset_between = route(&["start", "set", "wait"]);
+    reset_between.nodes.push(studio_node("clear", "var/reset", 390.0, json!({ "name": "ms" })));
+    reset_between.wires =
+        vec![link("a", ("start", "out"), ("set", "in")), link("b", ("set", "out"), ("clear", "in")), link("c", ("clear", "out"), ("wait", "in"))];
+    let mut reset_rt = runtime_for(reset_between);
+    let reset_check = validation_of(&mut reset_rt)?;
+    report.insert(
+        "resetBetween".to_owned(),
+        json!(
+            reset_check["errors"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|error| error.as_str().is_some_and(|text| text.contains("variable ms")))
+                .collect::<Vec<_>>()
+        ),
+    );
+    let mut flagged = SpellGraph::new("Flag Unset");
+    flagged.nodes = vec![
+        studio_node("start", "event/on_start", 0.0, serde_json::Value::Null),
+        studio_node("pretty", "json/stringify", 260.0, json!({ "pretty": "{{fancy}}" })),
+    ];
+    flagged.wires = vec![link("a", ("start", "out"), ("pretty", "in"))];
+    flagged.variables = vec![VariableDef { name: "fancy".to_owned(), ty: SocketType::Bool, default: None, exposed: true }];
+    let mut flag_rt = runtime_for(flagged);
+    let flag_check = validation_of(&mut flag_rt)?;
+    report.insert(
+        "unsetFlag".to_owned(),
+        json!(
+            flag_check["errors"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|error| error.as_str().is_some_and(|text| text.contains("variable fancy")))
+                .count()
+        ),
+    );
     let mut one_arm = runtime_for(forked);
     let check = validation_of(&mut one_arm)?;
     report.insert(
