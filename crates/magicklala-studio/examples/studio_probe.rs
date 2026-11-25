@@ -3606,7 +3606,10 @@ fn kitchen_brewed_tidy() -> Result<serde_json::Value, String> {
                 }
             }
         }
-        report.insert(format!("{}", size.0), json!({ "coveredNames": covered_names, "looseBadges": loose_badges, "coveredIcons": covered_icons, "coveredTitles": covered_titles }));
+        report.insert(
+            format!("{}", size.0),
+            json!({ "coveredNames": covered_names, "looseBadges": loose_badges, "coveredIcons": covered_icons, "coveredTitles": covered_titles }),
+        );
     }
     Ok(serde_json::Value::Object(report))
 }
