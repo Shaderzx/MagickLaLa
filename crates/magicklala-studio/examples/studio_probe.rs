@@ -2706,6 +2706,23 @@ fn bound_checks() -> Result<serde_json::Value, String> {
     let worded = validation_of(&mut rt)?;
     Ok(json!({ "clean": clean["validation"], "ranged": ranged["errors"], "worded": worded["errors"] }))
 }
+fn spawned_notes() -> Result<serde_json::Value, String> {
+    let kinds = ["ai/generate_text", "ai/stream_text", "ai/structured_json", "memory/search", "knowledge/search", "time/delay", "flow/split", "flow/switch"];
+    let mut rt = runtime_for(SpellGraph::new("Fresh Steps"));
+    let spawned: Vec<(String, Option<NodeId>)> = kinds
+        .iter()
+        .map(|kind| {
+            let kind = kind.to_string();
+            let mut made = None;
+            rt.update(|app, _| made = app.spawn(&kind));
+            (kind, made)
+        })
+        .collect();
+    rt.frame(0.0);
+    let notes: serde_json::Map<String, serde_json::Value> =
+        spawned.into_iter().map(|(kind, id)| (kind, json!(id.and_then(|id| rt.state.canvas.notes.get(&id).cloned())))).collect();
+    Ok(serde_json::Value::Object(notes))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8972,6 +8989,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("step-numbers") => step_numbers(),
         Some("live-after-draft") => live_after_draft(),
         Some("bound-checks") => bound_checks(),
+        Some("spawned-notes") => spawned_notes(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),

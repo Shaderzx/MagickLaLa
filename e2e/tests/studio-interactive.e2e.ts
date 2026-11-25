@@ -1980,8 +1980,23 @@ test('Check holds a bound setting to the same rules as a typed one: a temperatur
 
   expect(report.clean).toBe('valid');
   expect(report.ranged).toEqual([
-    'Generate Text: temperature needs a number from 0 to 2, but the variable temperature is 5',
     'Search Memory: limit needs a number from 1 to 100, but the variable max_memories is 500',
+    'Generate Text: temperature needs a number from 0 to 2, but the variable temperature is 5',
   ]);
   expect(report.worded).toEqual(['Generate Text: temperature needs a number from 0 to 2, but the variable temperature is "hot"']);
+});
+
+test('A step fresh from the Pantry shows the settings it will really use: model steps name the default model, Delay shows 1000 ms, Split counts its two default outputs, searches show top 5, and a Switch with no cases shows no note', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['spawned-notes']);
+
+  expect(report).toEqual({
+    'ai/generate_text': 'gpt-4o-mini',
+    'ai/stream_text': 'gpt-4o-mini',
+    'ai/structured_json': 'gpt-4o-mini',
+    'memory/search': 'top 5',
+    'knowledge/search': 'top 5',
+    'time/delay': '1000 ms',
+    'flow/split': '2 outputs',
+    'flow/switch': null,
+  });
 });
