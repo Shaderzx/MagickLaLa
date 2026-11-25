@@ -6334,7 +6334,64 @@ fn honest_edits(db_path: &Path) -> Result<serde_json::Value, String> {
         "undeclaredNamed": undeclared_named,
     }))
 }
-fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
+fn legible_shelves() -> Result<serde_json::Value, String> {
+    let scene = |spell: SpellGraph, size: (f32, f32), pantry: bool, brew: bool, zoom_out: usize| -> Result<Runtime<StudioApp>, String> {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        if pantry {
+            click(&mut rt, "expand-nodes")?;
+        }
+        if brew {
+            click(&mut rt, "run-spell")?;
+            live_finish(&mut rt)?;
+        }
+        for _ in 0..zoom_out {
+            click(&mut rt, "zoom-out")?;
+        }
+        rt.frame(3.0);
+        Ok(rt)
+    };
+    let reference = {
+        let rt = scene(tasting_spell(), (1280.0, 800.0), false, false, 0)?;
+        rt.elements().iter().filter(|element| element.text.as_deref() == Some("Not brewed yet")).map(|element| element.rect[3]).next().unwrap_or(0.0)
+    };
+    let cases = [
+        ("kitchen-pantry@960", crowded_kitchen(), (960.0_f32, 640.0_f32), true, false, 0usize),
+        ("kitchen-brewed@1280", crowded_kitchen(), (1280.0, 800.0), false, true, 0),
+        ("kitchen-brewed@960", crowded_kitchen(), (960.0, 640.0), false, true, 0),
+        ("eight@960", many_bottle_spell(8), (960.0, 640.0), false, true, 0),
+        ("router-brewed@960", example("webhook_router.json")?, (960.0, 640.0), false, true, 0),
+        ("single-min-zoom@1280", tasting_spell(), (1280.0, 800.0), false, true, 12),
+        ("dozen@960", dozen_ingredient_spell(), (960.0, 640.0), false, false, 0),
+    ];
+    let mut report = serde_json::Map::new();
+    for (name, spell, size, pantry, brew, zoom_out) in cases {
+        let rt = scene(spell, size, pantry, brew, zoom_out)?;
+        let canvas = rt.presented("canvas").map(|(rect, _)| rect).ok_or("no canvas")?;
+        let lines = text_lines_under(&rt, "canvas");
+        let mut small: Vec<(String, f32)> = lines
+            .iter()
+            .filter(|(line, rect)| !line.trim().is_empty() && rect[3] < reference * 10.5 / 12.0 - 0.1 && inside(canvas, *rect))
+            .map(|(line, rect)| (line.clone(), (rect[3] * 10.0).round() / 10.0))
+            .collect();
+        small.sort_by(|a, b| a.1.total_cmp(&b.1));
+        small.dedup();
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let vialless: Vec<String> = plan
+            .with_role(magicklala_canvas::BrewRole::Ingredient)
+            .filter(|card| rt.presented(&format!("vial-{}", card.id.0)).is_none())
+            .map(|card| card.id.0.clone())
+            .collect();
+        let pot = rt.presented("cauldron-center").map(|(rect, _)| rect[2]).unwrap_or(0.0);
+        report.insert(
+            name.to_owned(),
+            json!({ "tooSmall": small.iter().take(6).map(|(line, h)| format!("{line} {h}")).collect::<Vec<_>>(), "vialless": vialless.len(), "potWidth": pot.round() }),
+        );
+    }
+    Ok(json!({ "reference": reference, "cases": report }))
+}fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),
@@ -7246,6 +7303,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("steady-hands") => steady_hands(),
         Some("fair-shelves") => fair_shelves(),
         Some("last-mile") => last_mile(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("legible-shelves") => legible_shelves(),
         Some("honest-edits") => honest_edits(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),

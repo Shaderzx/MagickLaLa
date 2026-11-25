@@ -1638,3 +1638,13 @@ test('Honest edits: a second bottle on a Branch takes the free way, a cut shortc
     await rm(dir, { recursive: true, force: true });
   }
 });
+test('Legible shelves: in crowded, brewed, eight-bottle, compact and zoomed-out cauldrons every word on the canvas stays at 10.5px or larger, every ingredient keeps its vial, and the pot never shrinks below 140px', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['legible-shelves']);
+
+  expect(report.reference).toBe(15);
+  for (const [scene, measured] of Object.entries<any>(report.cases)) {
+    expect({ scene, tooSmall: measured.tooSmall }).toEqual({ scene, tooSmall: [] });
+    expect({ scene, vialless: measured.vialless }).toEqual({ scene, vialless: 0 });
+    expect(measured.potWidth, scene).toBeGreaterThanOrEqual(140);
+  }
+});
