@@ -2531,7 +2531,8 @@ impl StudioApp {
                 })
             })
             .collect();
-        let mut findings: Vec<HexFinding> = variable_findings.into_iter().chain(version_findings).chain(self.blank_field_findings()).collect();
+        let mut findings: Vec<HexFinding> =
+            variable_findings.into_iter().chain(version_findings).chain(self.blank_field_findings()).chain(self.unfilled_word_findings()).collect();
         let validator = SpellValidator::new(self.specs.clone());
         if let Err(errors) = validator.validate(&self.brew_graph()) {
             let title_of = |id: &NodeId| self.canvas.display_title(id);
@@ -2551,6 +2552,33 @@ impl StudioApp {
             Ok(_) => Vec::new(),
             Err(error) => vec![HexFinding::loose(error.to_string())],
         }
+    }
+
+    fn unfilled_word_findings(&self) -> Vec<HexFinding> {
+        let graph = self.brew_graph();
+        let fed = |node: &NodeId, socket: &str| graph.wires.iter().any(|wire| &wire.to_node == node && wire.to_socket == socket);
+        graph
+            .nodes
+            .iter()
+            .flat_map(|node| {
+                let words = |field: &str| node.config.get(field).and_then(serde_json::Value::as_str).map(template_roots).unwrap_or_default();
+                let (missing, why): (Vec<String>, &str) = match editable_field(&node.kind) {
+                    Some("template") => (
+                        words("template")
+                            .into_iter()
+                            .filter(|root| !fed(&node.id, root) && !graph.variables.iter().any(|variable| &variable.name == root))
+                            .collect(),
+                        "no wire or variable has that name",
+                    ),
+                    Some(field) if node.kind.starts_with("ai/") && !fed(&node.id, field) => (words(field), "AI steps send it exactly as typed"),
+                    _ => (Vec::new(), ""),
+                };
+                missing.into_iter().map(move |root| {
+                    let readable = format!("{}: nothing fills {{{{{root}}}}}, {why}", self.canvas.display_title(&node.id));
+                    HexFinding { node: Some(node.id.clone()), socket: None, readable: readable.clone(), message: readable, mistyped: false }
+                })
+            })
+            .collect()
     }
 
     fn blank_field_findings(&self) -> Vec<HexFinding> {
@@ -2579,7 +2607,7 @@ impl StudioApp {
         if !version_errors.is_empty() {
             return Err(version_errors);
         }
-        let blank_fields: Vec<String> = self.blank_field_findings().into_iter().map(|finding| finding.message).collect();
+        let blank_fields: Vec<String> = self.blank_field_findings().into_iter().chain(self.unfilled_word_findings()).map(|finding| finding.message).collect();
         if !blank_fields.is_empty() {
             return Err(blank_fields);
         }
@@ -3481,9 +3509,24 @@ fn trace_line(event: &TraceEvent, at_ms: u64, canvas: &CanvasState) -> TraceLine
     TraceLine { at_ms, kind, detail, status, node }
 }
 
+fn template_roots(text: &str) -> Vec<String> {
+    let mut roots = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find("{{") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else { break };
+        let root = after[..close].trim().split('.').next().unwrap_or_default().to_owned();
+        if !root.is_empty() && root.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') && !roots.contains(&root) {
+            roots.push(root);
+        }
+        rest = &after[close + 2..];
+    }
+    roots
+}
+
 fn default_prompt(kind: &str) -> String {
     match kind {
-        "ai/generate_text" => "You are a helpful agent.\n\nMemory:\n{{memory}}\n\nKnowledge:\n{{knowledge}}\n\nUser: {{content}}".to_owned(),
+        "ai/generate_text" => "You are a helpful agent. Answer the user clearly and kindly.".to_owned(),
         "memory/search" => "Recall the 5 most relevant memories for {{content}}".to_owned(),
         "knowledge/search" => "Search the knowledge base for {{content}}".to_owned(),
         "code/rhai_script" => "content.to_upper()".to_owned(),

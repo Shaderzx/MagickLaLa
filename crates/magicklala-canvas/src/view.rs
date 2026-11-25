@@ -427,7 +427,6 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     lens: fn(&mut S) -> &mut CanvasState,
 ) -> El {
     let legible = |size: f32| legible_size(size, scale);
-    let terse = terse || legible(11.0) > 11.0;
     let [pos_x, pos_y, width] = frame;
     let taken = card.status == ExecutionStatus::Succeeded;
     let simmering = card.status == ExecutionStatus::Running;
@@ -505,7 +504,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
             }
             None => col().w_full().min_w(0.0).child(text(title).font(TextStyle::new(legible(12.5), 750.0)).color(title_col).wrap_anywhere().max_lines(2)),
         })
-        .children((!terse).then(|| text(&card.kind).font(TextStyle::new(11.0, 500.0).mono()).color(sub_col).truncate()));
+        .children((!terse).then(|| text(&card.kind).font(TextStyle::new(legible(11.0), 500.0).mono()).color(sub_col).truncate()));
     let mut tag_wrap = el().w_full().child(tag_inner).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(pill));
     if let Some(num) = step_num {
         let side = legible(11.0) * 1.55;
@@ -772,6 +771,26 @@ fn grimoire_graph_view<S: 'static>(state: &CanvasState, size: (f32, f32), lens: 
         .child(wires);
 
     let mut board = state.nodes.iter().fold(board, |board, card| board.child(grimoire_card_view(state, card, &p, palette, lens)));
+    if let Some((id, name, output)) = state.hover_socket.clone().filter(|_| state.camera.zoom < LABEL_ZOOM)
+        && let Some((world, _)) = state.card(&id).and_then(|card| card.socket_world(&name, output))
+    {
+        let [sx, sy] = state.camera.world_to_screen(world);
+        let tip = row()
+            .key("socket-tip")
+            .px(6.0)
+            .py(2.0)
+            .radius(6.0)
+            .fill(p.card)
+            .border(1.0, p.rule_2)
+            .shadow(2.0, 6.0, p.shadow_card)
+            .child(text(&name).font(TextStyle::new(11.5, 650.0)).color(p.ink));
+        let room = 220.0;
+        board = board.child(if output || sx < room * 0.5 {
+            el().absolute(sx + 9.0, sy - 10.0).child(tip)
+        } else {
+            row().w(room).justify_end().absolute(sx - 9.0 - room, sy - 10.0).child(tip)
+        });
+    }
     board = board.child(mode_switcher(state, &p, lens, size));
 
     board
@@ -1092,7 +1111,6 @@ fn socket_port<S: 'static>(
         (p.data_wire, p.card, 2.0 * zoom)
     };
     let hovered = (card.id.clone(), socket.name.clone(), output);
-    let shows_tip = zoom < LABEL_ZOOM && state.hover_socket.as_ref() == Some(&hovered);
     let mut port = el()
         .key(format!("socket-{}-{side}-{}", card.id.0, socket.name))
         .size(size * zoom, size * zoom)
@@ -1110,18 +1128,6 @@ fn socket_port<S: 'static>(
                 canvas.hover_socket = None;
             }
         });
-    }
-    if shows_tip {
-        let tip = row()
-            .key("socket-tip")
-            .px(6.0)
-            .py(2.0)
-            .radius(6.0)
-            .fill(p.card)
-            .border(1.0, p.rule_2)
-            .child(text(&socket.name).font(TextStyle::new(11.5, 650.0)).color(p.ink));
-        let gap = size * zoom + 4.0;
-        port = port.child(if output { tip.absolute(gap, -6.0) } else { tip.absolute(-gap - 6.0 * socket.name.chars().count() as f32 - 12.0, -6.0) });
     }
     if !output {
         if !wired {

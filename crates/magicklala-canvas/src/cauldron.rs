@@ -267,31 +267,64 @@ fn grid_ribbons(plan: &BrewPlan, bottles: &[&BrewCard]) -> Option<Vec<Vec<[f32; 
             (above[1] + above[3] + below[1]) * 0.5
         }
     };
-    let radius = 8.0 * s;
+    let radius = 22.0 * s;
     let routes = (0..bottles.len())
         .map(|index| {
             let neck = bottle_neck(bottles[index], true);
             let column = columns.iter().position(|column| column.contains(&index)).unwrap_or(0);
             let row = columns[column].iter().position(|other| *other == index).unwrap_or(0);
             let turn = turn_y(column, row);
-            let corners = if column == 0 {
-                vec![tap, [trunk_x, tap[1]], [trunk_x, turn], [neck[0], turn], neck]
+            let trunk_room = (trunk_x - tap[0]).min(left(0) - trunk_x - 4.0 * s).max(2.0 * s);
+            let (corners, radii) = if column == 0 && (turn - tap[1]).abs() < radius.min(trunk_room) * 2.0 {
+                let reach = (left(0) - trunk_x - 4.0 * s).max(8.0 * s);
+                let mut bend = vec![tap];
+                bend.extend(s_bend([trunk_x - radius.min(trunk_room), tap[1]], [trunk_x + reach, turn]));
+                bend.extend([[neck[0], turn], neck]);
+                let radii = vec![0.0; bend.len().saturating_sub(2)];
+                (bend, radii)
+            } else if column == 0 {
+                (vec![tap, [trunk_x, tap[1]], [trunk_x, turn], [neck[0], turn], neck], vec![radius.min(trunk_room); 3])
+            } else if row == 0 && turn - ceiling < radius * 2.0 {
+                (vec![tap, [trunk_x, tap[1]], [trunk_x, ceiling], [neck[0], ceiling], neck], vec![radius.min(trunk_room), radius, radius])
             } else {
                 let lane = (right(column - 1) + left(column)) * 0.5;
-                vec![tap, [trunk_x, tap[1]], [trunk_x, ceiling], [lane, ceiling], [lane, turn], [neck[0], turn], neck]
+                let gap_x = left(column) - right(column - 1);
+                let snug = radius.min((gap_x * 0.5 - 2.0 * s).max(2.0 * s));
+                (
+                    vec![tap, [trunk_x, tap[1]], [trunk_x, ceiling], [lane, ceiling], [lane, turn], [neck[0], turn], neck],
+                    vec![radius.min(trunk_room), radius, snug, snug, snug],
+                )
             };
-            rounded_route(&corners, radius, 4.0 * s)
+            rounded_route(&corners, &radii, 4.0 * s)
         })
         .collect();
     Some(routes)
 }
-fn rounded_route(corners: &[[f32; 2]], radius: f32, spacing: f32) -> Vec<[f32; 2]> {
+fn s_bend(from: [f32; 2], to: [f32; 2]) -> Vec<[f32; 2]> {
+    let middle = (from[0] + to[0]) * 0.5;
+    (0..=8)
+        .map(|step| {
+            let t = step as f32 / 8.0;
+            let mt = 1.0 - t;
+            let (c1, c2) = ([middle, from[1]], [middle, to[1]]);
+            [
+                mt * mt * mt * from[0] + 3.0 * mt * mt * t * c1[0] + 3.0 * mt * t * t * c2[0] + t * t * t * to[0],
+                mt * mt * mt * from[1] + 3.0 * mt * mt * t * c1[1] + 3.0 * mt * t * t * c2[1] + t * t * t * to[1],
+            ]
+        })
+        .collect()
+}
+
+fn rounded_route(corners: &[[f32; 2]], radii: &[f32], spacing: f32) -> Vec<[f32; 2]> {
     let mut bent = vec![corners[0]];
-    for window in corners.windows(3) {
+    let last = corners.len().saturating_sub(1);
+    for (index, window) in corners.windows(3).enumerate() {
         let (a, b, c) = (window[0], window[1], window[2]);
         let into = (b[0] - a[0]).hypot(b[1] - a[1]);
         let out = (c[0] - b[0]).hypot(c[1] - b[1]);
-        let r = radius.min(into).min(out);
+        let into_room = if index == 0 { into } else { into * 0.5 };
+        let out_room = if index + 2 == last { out } else { out * 0.5 };
+        let r = radii.get(index).copied().unwrap_or(0.0).min(into_room).min(out_room);
         if r < 0.5 || into < 0.01 || out < 0.01 {
             bent.push(b);
             continue;
@@ -945,20 +978,9 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         let natural = if multi { MULTI_BOTTLE_SIZE } else { SINGLE_BOTTLE_SIZE };
         let origin = card_frame(placed.rect, natural, plan.scale, [0.0, 0.0]);
         let view = if multi {
-            branch_bottle_view(
-                state,
-                card,
-                step,
-                [0.0, 0.0, natural[0]],
-                bottle_tint(state, &plan, &placed.id),
-                has_run,
-                plan.vial[1] < 50.0,
-                plan.scale,
-                &p,
-                lens,
-            )
+            branch_bottle_view(state, card, step, [0.0, 0.0, natural[0]], bottle_tint(state, &plan, &placed.id), has_run, false, plan.scale, &p, lens)
         } else {
-            potion_stand_view(state, card, step, [0.0, 0.0, natural[0]], potion_tint(state, &plan), mood, plan.vial[1] < 50.0, &p, lens)
+            potion_stand_view(state, card, step, [0.0, 0.0, natural[0]], potion_tint(state, &plan), mood, false, &p, lens)
         };
         board =
             board.child(el().key(format!("node-{}", placed.id.0)).size(natural[0], natural[1]).absolute(origin[0], origin[1]).child(view).scale(plan.scale));

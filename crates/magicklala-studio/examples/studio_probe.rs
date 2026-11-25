@@ -5586,13 +5586,15 @@ fn crowded_bottles(args: &[String]) -> Result<serde_json::Value, String> {
                 .iter()
                 .filter_map(|ribbon| {
                     let tap = ribbon.first().copied()?;
-                    ribbon
-                        .iter()
-                        .find(|point| point[0] < shelf_left - 2.0 * s && (point[1] - tap[1]).abs() > 3.0 * s)
-                        .map(|point| (point[0] / (3.0 * s)).round() as i64)
+                    let turned = ribbon.iter().position(|point| (point[1] - tap[1]).abs() > 3.0 * s)?;
+                    (ribbon[turned][0] < shelf_left - 2.0 * s).then_some(())?;
+                    let leaves = ribbon.iter().position(|point| (point[1] - tap[1]).abs() > 0.2 * s)?;
+                    Some(ribbon[leaves.saturating_sub(1)][0])
                 })
-                .collect::<std::collections::BTreeSet<_>>()
-                .len();
+                .collect::<Vec<f32>>();
+            let mut departures = tap_row;
+            departures.sort_by(f32::total_cmp);
+            let tap_row = departures.windows(2).filter(|pair| pair[1] - pair[0] > 6.0 * s).count() + usize::from(!departures.is_empty());
             let smallest_label = plan
                 .cards
                 .iter()
