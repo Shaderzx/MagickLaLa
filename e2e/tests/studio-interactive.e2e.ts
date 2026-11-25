@@ -2119,3 +2119,10 @@ test('Picking Gemini in the model menu saves a provider the step accepts: gemini
   expect(report.provider).toBe('gemini');
   expect(report.allowed).toContain(report.provider);
 });
+
+test('Undo after redo walks straight back: two model picks, undo, redo, then two undos land on gpt-4o and then the original model with no dead press, and the step you were editing stays selected throughout', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['redo-then-undo']);
+
+  expect(report.seen).toEqual(['gpt-4o', 'gpt-4.1', 'gpt-4o', report.original]);
+  expect(report.selected).toBe('llm');
+});

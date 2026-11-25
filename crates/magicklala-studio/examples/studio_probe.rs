@@ -3304,6 +3304,26 @@ fn gemini_pick() -> Result<serde_json::Value, String> {
         .unwrap_or_default();
     Ok(json!({ "provider": config.get("provider"), "model": config.get("model"), "allowed": providers }))
 }
+fn redo_then_undo() -> Result<serde_json::Value, String> {
+    let model_of = |app: &StudioApp| app.spell.nodes.iter().find(|node| node.id.0 == "llm").and_then(|node| node.config.get("model").cloned()).unwrap_or_default();
+    let mut rt = runtime_for(StudioApp::from_registry().spell.clone());
+    let original = model_of(&rt.state);
+    for model in ["gpt-4o", "gpt-4.1"] {
+        rt.update(move |app, _| {
+            app.canvas.select(Some(NodeId::from("llm")));
+            app.select_model("openai", model);
+        });
+        rt.frame(0.0);
+    }
+    let mut seen = Vec::new();
+    for step in ["undo", "redo", "undo", "undo"] {
+        rt.update(move |app, _| if step == "undo" { app.undo() } else { app.redo() });
+        rt.frame(0.0);
+        seen.push(model_of(&rt.state));
+    }
+    let still_selected = rt.state.canvas.selection.as_ref().map(|id| id.0.clone());
+    Ok(json!({ "original": original, "seen": seen, "selected": still_selected }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9586,6 +9606,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("waiting-not-untaken") => waiting_not_untaken(),
         Some("lit-strand") => lit_strand(),
         Some("gemini-pick") => gemini_pick(),
+        Some("redo-then-undo") => redo_then_undo(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
