@@ -2058,3 +2058,9 @@ test('Redo never crosses potions: after undoing an edit in one potion and openin
 
   expect(report).toEqual({ name: 'Research Agent', redoWaiting: false, unchanged: true });
 });
+
+test('Publishing ships every trigger that was not set aside: a recipe with a wired On Start and a standalone On Webhook releases both, so which trigger you test with never changes what ships', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['lone-trigger-ships']);
+
+  expect([...report.shipped].sort()).toEqual(['hook', 'say', 'start']);
+});

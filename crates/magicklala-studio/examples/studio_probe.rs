@@ -3052,6 +3052,26 @@ fn redo_across() -> Result<serde_json::Value, String> {
     rt.frame(0.0);
     Ok(json!({ "name": rt.state.spell.name, "redoWaiting": redo_waiting, "unchanged": before == ids(&rt.state) }))
 }
+fn lone_trigger_ships() -> Result<serde_json::Value, String> {
+    let db_path = std::env::temp_dir().join(format!("magicklala-lone-trigger-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&db_path);
+    let mut spell = SpellGraph::new("Two Doors");
+    spell.nodes = vec![
+        studio_node("start", "event/on_start", 0.0, serde_json::Value::Null),
+        studio_node("hook", "event/on_webhook", 0.0, serde_json::Value::Null),
+        studio_node("say", "io/send_message", 260.0, json!({ "content": "hi" })),
+    ];
+    spell.wires = vec![Wire { id: WireId::from("w1"), from_node: NodeId::from("start"), from_socket: "out".to_owned(), to_node: NodeId::from("say"), to_socket: "in".to_owned() }];
+    let config = StudioConfig { db_path: Some(db_path.clone()), ..StudioConfig::default() };
+    let mut app = StudioApp::open(&config).map_err(|error| error.to_string())?;
+    app.load_graph(spell);
+    let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let version = rt.state.publish().map_err(|error| error.to_string())?;
+    let shipped: Vec<String> = rt.state.release_graphs.get(&version).map(|graph| graph.nodes.iter().map(|node| node.id.0.clone()).collect()).unwrap_or_default();
+    let _ = std::fs::remove_file(&db_path);
+    Ok(json!({ "shipped": shipped }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9326,6 +9346,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("menu-fan") => menu_fan(),
         Some("twin-switch-names") => twin_switch_names(),
         Some("redo-across") => redo_across(),
+        Some("lone-trigger-ships") => lone_trigger_ships(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
