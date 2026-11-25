@@ -2245,12 +2245,13 @@ test('The live release keeps its Live mark while the draft changes: v1 says Live
   expect(report.newest).not.toMatch(/Restore/);
 });
 
-test('A number variable set earlier on the route can be read by a later step: On Start, Set ms, then Delay {{ms}} passes Check even though ms has no starting value, while a Delay that reads ms before any Set still says it has no value', { timeout: 900_000 }, async () => {
+test('A number variable set earlier on the route can be read by a later step: On Start, Set ms, then Delay {{ms}} passes Check even though ms has no starting value, while a Delay that reads ms before any Set, or after a Set on only one arm of a Branch, still says it has no value', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['set-before-read']);
 
   expect(report.setFirst).toEqual([]);
   expect(report.neverSet).toEqual(['Delay: ms needs a whole number of at least 0, but the variable ms has no value']);
   expect(report.setAfter).toEqual(report.neverSet);
+  expect(report.setOnOneArm).toEqual(report.neverSet);
 });
 
 test('A long route name fits its Recipe socket row at both window sizes: urgent_customer_reconciliation_notification shows whole, wrapping if it must, and its Flow label stays inside the panel', { timeout: 900_000 }, async () => {

@@ -3469,6 +3469,28 @@ fn set_before_read() -> Result<serde_json::Value, String> {
         spell
     };
     let mut report = serde_json::Map::new();
+    let mut forked = route(&["start", "set", "wait"]);
+    forked.nodes.push(studio_node("fork", "flow/branch", 130.0, json!({})));
+    forked.wires = vec![
+        link("a", ("start", "out"), ("fork", "in")),
+        link("b", ("fork", "true"), ("set", "in")),
+        link("c", ("set", "out"), ("wait", "in")),
+        link("d", ("fork", "false"), ("wait", "in")),
+    ];
+    let mut one_arm = runtime_for(forked);
+    let check = validation_of(&mut one_arm)?;
+    report.insert(
+        "setOnOneArm".to_owned(),
+        json!(
+            check["errors"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|error| error.as_str().is_some_and(|text| text.contains("variable ms")))
+                .collect::<Vec<_>>()
+        ),
+    );
     for (name, order) in [("setFirst", vec!["start", "set", "wait"]), ("neverSet", vec!["start", "wait"]), ("setAfter", vec!["start", "wait", "set"])] {
         let mut rt = runtime_for(route(&order));
         let check = validation_of(&mut rt)?;
