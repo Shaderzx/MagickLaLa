@@ -2168,6 +2168,24 @@ fn publish_plaque(db_path: &Path) -> Result<serde_json::Value, String> {
     Ok(json!({ "published": published, "brewed": brewed, "edited": edited }))
 }
 
+fn shelf_seals(db_path: &Path) -> Result<serde_json::Value, String> {
+    let config = StudioConfig { db_path: Some(db_path.to_path_buf()), ..StudioConfig::default() };
+    let mut app = StudioApp::open(&config).map_err(|error| error.to_string())?;
+    app.load_graph(tasting_spell());
+    let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    click(&mut rt, "publish")?;
+    rt.update(|app, _| {
+        app.left_tab = LeftTab::Agents;
+        app.request_open_sample("Research Agent");
+        app.confirm_switch();
+    });
+    rt.frame(1.0);
+    rt.frame(2.0);
+    let elsewhere = texts_under(&mut rt, "spell-tasting-agent");
+    let research = texts_under(&mut rt, "spell-research-agent");
+    Ok(json!({ "openSpell": rt.state.spell.name, "publishedRow": elsewhere, "draftRow": research }))
+}
 fn wires_of(app: &StudioApp, id: &str) -> usize {
     app.spell.wires.iter().filter(|wire| wire.from_node.0 == id || wire.to_node.0 == id).count()
 }
@@ -7917,6 +7935,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("variable-defaults") => variable_defaults(),
         Some("publish-plaque") => publish_plaque(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("toss-safety") => toss_safety(),
+        Some("shelf-seals") => shelf_seals(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("recipe-honesty") => recipe_honesty(),
         Some("potion-colours") => potion_colours(),
         Some("grimoire-place") => grimoire_place(),

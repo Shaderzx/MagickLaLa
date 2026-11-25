@@ -1768,3 +1768,16 @@ test('An empty pot shows its recipe card in the Recipe tab, naming the potion, c
   expect(report.texts).toEqual(expect.arrayContaining(['Fresh Potion', '0 ingredients · 0 bottles', 'In the pot', 'Bottles']));
   expect(report.texts.filter((line: string) => line === 'None yet')).toHaveLength(2);
 });
+
+test('A published potion keeps saying which version is live in the Potions list after another potion is opened', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-seals-'));
+  try {
+    const report = await studioProbe(['shelf-seals', join(dir, 'studio.sqlite')]);
+
+    expect(report.openSpell).toBe('Research Agent');
+    expect(report.publishedRow).toContain('v1 live');
+    expect(report.draftRow).not.toContain('live');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
