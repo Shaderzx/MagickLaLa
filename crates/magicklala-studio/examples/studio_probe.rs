@@ -4482,6 +4482,18 @@ fn fix_fits() -> Result<serde_json::Value, String> {
     }
     Ok(json!({ "sizes": sizes }))
 }
+fn literal_braces() -> Result<serde_json::Value, String> {
+    let spell_with = |variables: Vec<magicklala_graph::VariableDef>| {
+        let mut spell = SpellGraph::new("Literal Braces");
+        spell.nodes = vec![studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null), studio_node("reply", "io/send_message", 260.0, json!({ "content": "{{note}}" }))];
+        spell.wires = vec![studio_wire("w1", ("trigger", "out"), ("reply", "in"))];
+        spell.variables = variables;
+        spell
+    };
+    let mut bare = runtime_for(spell_with(Vec::new()));
+    let undeclared = validation_of(&mut bare)?;
+    Ok(json!({ "undeclared": undeclared["validation"], "errors": undeclared["errors"] }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11251,6 +11263,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("recipe-chip-details") => recipe_chip_details(),
         Some("quiet-hex") => quiet_hex(),
         Some("fix-fits") => fix_fits(),
+        Some("literal-braces") => literal_braces(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

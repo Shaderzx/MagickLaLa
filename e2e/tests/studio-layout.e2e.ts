@@ -800,3 +800,10 @@ test('The red box keeps its buttons inside it: at 1280 and at 960 the Plug in fi
     { width: 960, fix: true, grimoire: true },
   ]);
 });
+
+test('typed braces in an input are text, not a variable: Check passes a Send Message whose content is {{note}} with no variable named note', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['literal-braces']);
+
+  expect(report.errors).toEqual([]);
+  expect(report.undeclared).toBe('valid');
+});

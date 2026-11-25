@@ -1267,3 +1267,12 @@ test('a bound setting whose variable holds a value the setting cannot take fails
     expect(Date.now() - started).toBeLessThan(15_000);
   }, { variables: [{ name: 'ms', ty: 'any' }] });
 });
+
+test('typed braces in a Send Message content are sent as typed even when a variable of that name exists without a value', async () => {
+  const nodes = [spellNode('start', 'event/on_start'), spellNode('reply', 'io/send_message', { content: '{{note}}' })];
+  await withSpellFile(nodes, [spellWire('w1', 'start', 'out', 'reply', 'in')], async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(0);
+    expect(summaryOf(run)?.replies).toEqual(['{{note}}']);
+  }, { variables: [{ name: 'note', ty: 'string' }] });
+});
