@@ -1118,7 +1118,7 @@ test('Dropping a pantry ingredient on the set-aside tray adds it set aside with 
   expect(report).toEqual({ added: 1, role: 'Aside', wires: 0 });
 });
 
-test('Every step keeps one name and every card keeps its words: ingredient titles never run under their vial at 960 by 640 or 1280 by 800, the cauldron, Grimoire and Cauldron Log name each branch bottle by its route, look-alike bottles without routes are numbered, the log icon sits clear of the first step, and the empty pot has its heading centred beneath it while its triggers are offered in one place only', { timeout: 900_000 }, async () => {
+test('Every step keeps one name and every card keeps its words: ingredient titles never run under their vial at 960 by 640 or 1280 by 800, the cauldron, Grimoire and Cauldron Log name each branch bottle by its route, look-alike bottles without routes are numbered, the log icon sits clear of the first step, and the empty pot offers its triggers in one place only', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['one-name']);
 
   expect(report.titleMisfits).toEqual([]);
@@ -1129,18 +1129,14 @@ test('Every step keeps one name and every card keeps its words: ingredient title
   expect(report.twinNames).toEqual({ first_reply: 'Send · 1', second_reply: 'Send · 2' });
   expect(report.logGap).toBeGreaterThanOrEqual(4);
   expect(report.logIcons).toEqual([[34, 28], [34, 28]]);
-  expect(report.empty.headingOffset).toBeLessThanOrEqual(2);
   expect(report.empty.secondAdd).toBe(false);
-  expect(report.empty.belowPot).toBeGreaterThanOrEqual(24);
 });
-test('Studio fits and counts honestly at 960 by 640: variable names keep their own line, the hex card keeps its buttons inside, the empty pot leaves room for its heading, the opened pantry can be folded away again, the Grimoire draws its checkmarks and chevrons instead of font glyphs, the recipe panel uses the same bottle name as the cauldron, the plaque counts ingredients and set-aside cards the way the pot does, and a Check before any brew never reads Brew #0', { timeout: 900_000 }, async () => {
+test('Studio fits and counts honestly at 960 by 640: variable names keep their own line, the hex card keeps its buttons inside, the opened pantry can be folded away again, the Grimoire draws its checkmarks and chevrons instead of font glyphs, the recipe panel uses the same bottle name as the cauldron, the plaque counts ingredients and set-aside cards the way the pot does, and a Check before any brew never reads Brew #0', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['compact-fit']);
 
   expect(report.varLabelWidths.length).toBeGreaterThan(0);
   for (const width of report.varLabelWidths) expect(width).toBeGreaterThanOrEqual(150);
   expect(report.errorSpill).toEqual([]);
-  expect(report.emptyCompact.belowPot).toBeGreaterThanOrEqual(16);
-  expect(report.emptyCompact.insideCanvas).toBe(true);
   expect(report.rail).toEqual({ opened: true, collapsed: true });
   expect(report.grimoireGlyphs).toEqual([]);
   expect(report.recipeTitle).toBe('Send · orders');
@@ -1837,4 +1833,12 @@ test('Every Pantry name shows whole at 960 and 1280: a long name wraps onto a se
     expect(report[width].seen).toBeGreaterThan(30);
     expect({ width, cut: report[width].cut }).toEqual({ width, cut: [] });
   }
+});
+
+test('An empty pot offers only things you can press: no lone heading, the triggers glow in the Pantry when it is open and stand beside the pot as starters when it is not, never both', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['empty-start']);
+
+  expect(report['wide-pantry']).toEqual({ inertHeading: false, offered: 6, glowing: 6, starters: 0, pantryRows: 6 });
+  expect(report['wide-potions']).toEqual({ inertHeading: false, offered: 6, glowing: 0, starters: 6, pantryRows: 0 });
+  expect(report.compact).toEqual({ inertHeading: false, offered: 6, glowing: 0, starters: 6, pantryRows: 0 });
 });

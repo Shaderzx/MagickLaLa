@@ -2088,6 +2088,34 @@ fn pantry_whole() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn empty_start() -> Result<serde_json::Value, String> {
+    let mut report = serde_json::Map::new();
+    for (name, size, potions) in [("wide-pantry", (1280.0_f32, 800.0_f32), false), ("wide-potions", (1280.0, 800.0), true), ("compact", (960.0, 640.0), false)] {
+        let mut app = StudioApp::with_spell(SpellGraph::new("New Potion"), registry_specs());
+        app.size = size;
+        if potions {
+            app.left_tab = LeftTab::Agents;
+        }
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(1.0);
+        rt.frame(3.0);
+        let triggers: Vec<String> = rt.state.specs.iter().filter(|spec| spec.is_trigger).map(|spec| spec.kind.replace('/', "-")).collect();
+        let starters = triggers.iter().filter(|kind| rt.find(&format!("starter-{kind}")).is_some()).count();
+        let glowing = triggers.iter().filter(|kind| rt.find(&format!("pantry-glow-{kind}")).is_some()).count();
+        let pantry_rows = triggers.iter().filter(|kind| rt.find(&format!("palette-{kind}")).is_some()).count();
+        report.insert(
+            name.to_owned(),
+            json!({
+                "inertHeading": all_texts(&rt).iter().any(|line| line == "Start a new potion"),
+                "offered": starters.max(glowing),
+                "glowing": glowing,
+                "starters": starters,
+                "pantryRows": pantry_rows,
+            }),
+        );
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -2933,12 +2961,7 @@ fn one_name_per_step() -> Result<serde_json::Value, String> {
 
     let mut empty = headless(StudioApp::with_spell(SpellGraph::new("New Potion"), registry_specs()));
     empty.frame(1.0);
-    let pot = layout_rect(&empty, "cauldron-center").ok_or("no pot")?;
-    let overlay = layout_rect(&empty, "empty-canvas").ok_or("no empty overlay")?;
-    let empty_heading =
-        text_lines_under(&empty, "empty-canvas").into_iter().find(|(line, _)| line == "Start a new potion").map(|(_, rect)| rect).ok_or("no heading")?;
     let second_add = layout_rect(&empty, "empty-add-trigger").is_some();
-    let centre = |rect: [f32; 4]| rect[0] + rect[2] * 0.5;
 
     Ok(json!({
         "titleMisfits": title_misfits,
@@ -2948,11 +2971,7 @@ fn one_name_per_step() -> Result<serde_json::Value, String> {
         "twinNames": twin_names,
         "logGap": log_gap,
         "logIcons": log_icons,
-        "empty": {
-            "headingOffset": (centre(empty_heading) - centre(pot)).abs().round(),
-            "secondAdd": second_add,
-            "belowPot": (overlay[1] - (pot[1] + pot[3])).round(),
-        },
+        "empty": { "secondAdd": second_add },
     }))
 }
 fn all_texts(rt: &Runtime<StudioApp>) -> Vec<String> {
@@ -2989,11 +3008,6 @@ fn compact_fit() -> Result<serde_json::Value, String> {
         .map(|key| (*key).to_owned())
         .collect();
 
-    let mut empty = compact(SpellGraph::new("New Potion"));
-    empty.frame(1.0);
-    let pot = layout_rect(&empty, "cauldron-center").ok_or("no pot")?;
-    let overlay = layout_rect(&empty, "empty-canvas").ok_or("no empty overlay")?;
-    let board = layout_rect(&empty, "canvas").ok_or("no canvas")?;
 
     let mut rail = compact(demo.clone());
     click(&mut rail, "expand-nodes")?;
@@ -3053,7 +3067,6 @@ fn compact_fit() -> Result<serde_json::Value, String> {
     Ok(json!({
         "varLabelWidths": var_widths,
         "errorSpill": spilled,
-        "emptyCompact": { "belowPot": (overlay[1] - (pot[1] + pot[3])).round(), "insideCanvas": inside(board, overlay) },
         "rail": { "opened": opened, "collapsed": collapsed },
         "grimoireGlyphs": glyphs,
         "recipeTitle": recipe_title,
@@ -8308,6 +8321,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("one-step-undo") => one_step_undo(),
         Some("wire-return") => wire_return(),
         Some("pantry-whole") => pantry_whole(),
+        Some("empty-start") => empty_start(),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("pot-rect") => pot_rect(),
         Some("gateway-hint") => gateway_hint(),
