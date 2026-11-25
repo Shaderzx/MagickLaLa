@@ -3619,6 +3619,55 @@ fn two_failures_strip() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn small_rack_rows() -> Result<serde_json::Value, String> {
+    let mut report = serde_json::Map::new();
+    for (name, size, pantry) in
+        [("router-pantry@960", (960.0_f32, 640.0_f32), true), ("router@960", (960.0, 640.0), false), ("router@1280", (1280.0, 800.0), false)]
+    {
+        let mut app = StudioApp::with_spell(example("webhook_router.json")?, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        if pantry {
+            click(&mut rt, "expand-nodes")?;
+        }
+        click(&mut rt, "run-spell")?;
+        live_finish(&mut rt)?;
+        rt.frame(3.0);
+        rt.frame(6.0);
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let origin = rt.presented("canvas").map(|(rect, _)| [rect[0], rect[1]]).ok_or("no canvas")?;
+        let tags: Vec<(String, [f32; 4])> = plan
+            .with_role(magicklala_canvas::BrewRole::Bottle)
+            .filter_map(|card| rt.presented(&format!("node-{}-header", card.id.0)).map(|(rect, _)| (rt.state.canvas.display_title(&card.id), rect)))
+            .collect();
+        let mut crossings: Vec<String> = Vec::new();
+        for pipe in magicklala_canvas::cauldron::rack_glass(&plan) {
+            for pair in pipe.windows(2) {
+                let (a, b) = ([pair[0][0] + origin[0], pair[0][1] + origin[1]], [pair[1][0] + origin[0], pair[1][1] + origin[1]]);
+                if (a[1] - b[1]).abs() > 0.5 {
+                    continue;
+                }
+                let (left, right) = (a[0].min(b[0]), a[0].max(b[0]));
+                for (title, rect) in &tags {
+                    let beside = rect[0] < right && left < rect[0] + rect[2];
+                    let behind = a[1] > rect[1] && a[1] < rect[1] + rect[3];
+                    let grazing = a[1] >= rect[1] + rect[3] && a[1] - (rect[1] + rect[3]) < 8.0 * plan.scale;
+                    if beside && (behind || grazing) {
+                        crossings.push(format!("{title} {:.1}", a[1] - (rect[1] + rect[3])));
+                    }
+                }
+            }
+        }
+        crossings.sort();
+        crossings.dedup();
+        let mut tops: Vec<f32> = plan.with_role(magicklala_canvas::BrewRole::Bottle).map(|card| card.rect[1]).collect();
+        tops.sort_by(f32::total_cmp);
+        tops.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+        report.insert(name.to_owned(), json!({ "bottles": tags.len(), "rows": tops.len(), "crossings": crossings }));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -10295,6 +10344,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("twin-tails") => twin_tails(),
         Some("skipped-solo") => skipped_solo(),
         Some("two-failures-strip") => two_failures_strip(),
+        Some("small-rack-rows") => small_rack_rows(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

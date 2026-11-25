@@ -2285,3 +2285,12 @@ test('Two failures fit the collapsed Cauldron Log strip: when both parallel rese
     expect(report[size].shown.join(' ')).toMatch(/Generate Text|Research/);
   }
 });
+
+test('A small rack that wraps to two rows keeps its pipes clear of the tags above: the webhook router brewed at 960 with the Pantry open, and at both sizes without it, runs no shelf pipe behind or within a hair of any bottle tag', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['small-rack-rows']);
+
+  for (const [scene, rack] of Object.entries<any>(report)) {
+    expect({ scene, bottles: rack.bottles }).toEqual({ scene, bottles: 3 });
+    expect({ scene, crossings: rack.crossings }).toEqual({ scene, crossings: [] });
+  }
+});
