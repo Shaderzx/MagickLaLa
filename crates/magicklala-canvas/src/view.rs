@@ -317,6 +317,16 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
                 .border(1.0, p.gold)
                 .child(text("Simmering").font(TextStyle::new(legible(11.0), 750.0)).color(p.simmer_ink())),
         )
+    } else if state.stopped.contains(&card.id) {
+        Some(
+            row()
+                .px(5.5)
+                .py(1.5)
+                .radius(7.0)
+                .fill(p.untaken_pill_fill())
+                .border(1.0, p.untaken_border())
+                .child(text("Stopped").font(TextStyle::new(legible(11.0), 700.0)).color(p.untaken_pill_ink())),
+        )
     } else if dimmed && state.brew_completed() {
         let branch = |socket: &str| !(socket == "out" || socket.starts_with("out_") || socket == "in");
         let untaken_label = state
@@ -530,14 +540,14 @@ pub(crate) fn branch_bottle_view<S: 'static>(
             .fill(p.card)
             .border(1.0, p.gold)
             .child(text("Simmering").font(TextStyle::new(legible(11.0), 750.0)).color(p.simmer_ink()))
-    } else if untaken {
+    } else if untaken || state.stopped.contains(&card.id) {
         row()
             .px(5.5)
             .py(1.5)
             .radius(7.0)
             .fill(p.untaken_pill_fill())
             .border(1.0, p.untaken_border())
-            .child(text("Untaken").font(TextStyle::new(legible(11.0), 700.0)).color(p.untaken_title()))
+            .child(text(if untaken { "Untaken" } else { "Stopped" }).font(TextStyle::new(legible(11.0), 700.0)).color(p.untaken_title()))
     } else if let Some(vintage) = state.release_badge.as_ref().filter(|_| sealed) {
         row()
             .px(5.0)

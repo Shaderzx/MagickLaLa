@@ -3424,7 +3424,8 @@ fn stopped_not_failed() -> Result<serde_json::Value, String> {
         studio_node("broken", "code/rhai_script", 520.0, json!({ "script": "x" })),
         studio_node("slow", "time/delay", 520.0, json!({ "ms": 900 })),
     ];
-    spell.wires = vec![link("a", ("trigger", "out"), ("fork", "in")), link("b", ("fork", "out_0"), ("broken", "in")), link("c", ("fork", "out_1"), ("slow", "in"))];
+    spell.wires =
+        vec![link("a", ("trigger", "out"), ("fork", "in")), link("b", ("fork", "out_0"), ("broken", "in")), link("c", ("fork", "out_1"), ("slow", "in"))];
     let run = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4d41";
     let at = "2026-11-25T10:00:00Z";
     let spell_id = spell.id.0.to_string();

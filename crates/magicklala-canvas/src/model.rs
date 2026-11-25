@@ -258,6 +258,7 @@ pub struct CanvasState {
     pub hover_socket: Option<(NodeId, String, bool)>,
     pub brew_total_ms: Option<u64>,
     pub toss_count: u32,
+    pub stopped: Vec<NodeId>,
     pub pot_hover: bool,
     pub shelved: Vec<NodeId>,
     next_id: u64,
@@ -527,6 +528,7 @@ impl CanvasState {
     }
 
     pub fn reset_execution(&mut self) {
+        self.stopped.clear();
         self.nodes.iter_mut().for_each(|card| {
             card.status = ExecutionStatus::Idle;
             card.duration_ms = None;
@@ -560,7 +562,10 @@ impl CanvasState {
             TraceEvent::RunFinished { summary, .. } if summary.status == RunStatus::Succeeded => self.last_brew = Some(RunStatus::Succeeded),
             TraceEvent::RunFinished { summary, .. } => {
                 self.last_brew = Some(summary.status);
-                self.nodes.iter_mut().filter(|card| card.status == ExecutionStatus::Running).for_each(|card| card.status = ExecutionStatus::Failed);
+                for card in self.nodes.iter_mut().filter(|card| card.status == ExecutionStatus::Running) {
+                    card.status = ExecutionStatus::Idle;
+                    self.stopped.push(card.id.clone());
+                }
             }
             TraceEvent::StreamChunk { .. } | TraceEvent::VariableSet { .. } => {}
         }
@@ -637,6 +642,7 @@ impl CanvasState {
     }
 
     pub fn clear_run_marks(&mut self) {
+        self.stopped.clear();
         self.wires.iter_mut().for_each(|wire| wire.active = false);
         for card in &mut self.nodes {
             card.status = ExecutionStatus::Idle;
