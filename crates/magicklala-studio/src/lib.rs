@@ -642,7 +642,8 @@ pub fn editable_field(kind: &str) -> Option<&'static str> {
     }
 }
 
-fn card_note(kind: &str, config: &serde_json::Value, variables: &[VariableDef]) -> Option<String> {
+fn card_note(kind: &str, config: &serde_json::Value, spec: Option<&NodeSpec>, variables: &[VariableDef]) -> Option<String> {
+    let read = |key: &str| config.get(key).or_else(|| spec?.config.iter().find(|field| field.key == key)?.default.as_ref());
     let bound = |name: &str| {
         let value = variables.iter().find(|variable| variable.name == name).and_then(|variable| variable.default.as_ref()).map(|value| value.to_json());
         match value {
@@ -652,14 +653,15 @@ fn card_note(kind: &str, config: &serde_json::Value, variables: &[VariableDef]) 
         }
     };
     let setting = |key: &str| {
-        config.get(key).and_then(|value| match value {
+        read(key).and_then(|value| match value {
             serde_json::Value::String(text) => Some(magicklala_graph::bound_variable(value).map_or_else(|| text.clone(), bound)),
             serde_json::Value::Number(number) => Some(number.to_string()),
             _ => None,
         })
     };
-    let count =
-        |key: &str, one: &str, many: &str| config.get(key).and_then(serde_json::Value::as_array).map(|items| crate::view::plural(items.len(), one, many));
+    let count = |key: &str, one: &str, many: &str| {
+        read(key).and_then(serde_json::Value::as_array).filter(|items| !items.is_empty()).map(|items| crate::view::plural(items.len(), one, many))
+    };
     match kind {
         "ai/generate_text" | "ai/stream_text" | "ai/structured_json" => setting("model").filter(|model| !model.is_empty()),
         "memory/search" | "knowledge/search" => Some(format!("top {}", setting("limit").unwrap_or_else(|| "5".to_owned()))),
@@ -2447,7 +2449,10 @@ impl StudioApp {
         self.canvas
             .nodes
             .iter()
-            .filter_map(|card| card_note(&card.kind, &self.node_config(&card.id, &card.kind), &self.spell.variables).map(|note| (card.id.clone(), note)))
+            .filter_map(|card| {
+                let spec = self.specs.iter().find(|spec| spec.kind == card.kind);
+                card_note(&card.kind, &self.node_config(&card.id, &card.kind), spec, &self.spell.variables).map(|note| (card.id.clone(), note))
+            })
             .collect()
     }
 
@@ -3028,6 +3033,7 @@ impl StudioApp {
             .chain(self.blank_field_findings())
             .chain(self.stale_list_findings())
             .chain(self.undeclared_variable_findings())
+            .chain(self.bound_setting_findings())
             .chain(self.unfilled_word_findings())
             .collect();
         let validator = SpellValidator::new(self.specs.clone());
@@ -3095,6 +3101,60 @@ impl StudioApp {
         });
         let bound: Vec<HexFinding> = bound.collect();
         bound.into_iter().chain(self.undeclared_variable_steps()).collect()
+    }
+
+    fn bound_setting_findings(&self) -> Vec<HexFinding> {
+        use magicklala_graph::FieldKind;
+        let graph = self.brew_graph();
+        let mut findings = Vec::new();
+        for node in &graph.nodes {
+            let Some(spec) = self.specs.iter().find(|spec| spec.kind == node.kind) else { continue };
+            for (key, setting) in node.config.as_object().into_iter().flatten() {
+                let Some(name) = magicklala_graph::bound_variable(setting) else { continue };
+                let Some(field) = spec.config.iter().find(|field| &field.key == key) else { continue };
+                let Some(value) = self
+                    .spell
+                    .variables
+                    .iter()
+                    .find(|variable| variable.name == name)
+                    .and_then(|variable| variable.default.as_ref())
+                    .map(|value| value.to_json())
+                else {
+                    continue;
+                };
+                if value.is_null() {
+                    continue;
+                }
+                let need = match &field.kind {
+                    FieldKind::Number { min, max } => {
+                        let fits = value.as_f64().is_some_and(|number| min.is_none_or(|min| number >= min) && max.is_none_or(|max| number <= max));
+                        (!fits).then(|| match (min, max) {
+                            (Some(min), Some(max)) => format!("a number from {min} to {max}"),
+                            (Some(min), None) => format!("a number of at least {min}"),
+                            (None, Some(max)) => format!("a number of at most {max}"),
+                            (None, None) => "a number".to_owned(),
+                        })
+                    }
+                    FieldKind::Boolean => (!value.is_boolean()).then(|| "true or false".to_owned()),
+                    FieldKind::Select { options } => {
+                        (!value.as_str().is_some_and(|text| options.iter().any(|option| option == text))).then(|| format!("one of {}", options.join(", ")))
+                    }
+                    FieldKind::Json => None,
+                    FieldKind::Text | FieldKind::TextArea | FieldKind::Code { .. } | FieldKind::Credential { .. } | FieldKind::Model { .. } => {
+                        (!value.is_string()).then(|| "text".to_owned())
+                    }
+                };
+                if let Some(need) = need {
+                    let shown = match value.as_f64().filter(|number| value.is_f64() && number.fract() == 0.0) {
+                        Some(whole) => format!("{whole}"),
+                        None => value.to_string(),
+                    };
+                    let readable = format!("{}: {} needs {need}, but the variable {name} is {shown}", self.canvas.display_title(&node.id), field.label);
+                    findings.push(HexFinding { node: Some(node.id.clone()), socket: None, readable: readable.clone(), message: readable, mistyped: false });
+                }
+            }
+        }
+        findings
     }
 
     fn undeclared_variable_steps(&self) -> Vec<HexFinding> {

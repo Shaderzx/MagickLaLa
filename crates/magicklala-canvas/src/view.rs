@@ -714,7 +714,20 @@ pub(crate) fn potion_stand_view<S: 'static>(
     }
 
     let kind_fits = out_kind.chars().count() as f32 * 6.7 * legible(11.0) / 11.0 <= width - 22.0;
-    let badge_room = if step_num.is_some() { (legible(11.0) * 1.6 - 2.0).max(10.0) } else { 10.0 };
+    let shown_step = step_num.filter(|_| out_brewed || output.status == ExecutionStatus::Failed);
+    let badge_room = if shown_step.is_some() { (legible(11.0) * 1.6 - 2.0).max(10.0) } else { 10.0 };
+    let step_badge = shown_step.map(|num| {
+        let side = legible(11.0) * 1.6;
+        el().key(format!("step-badge-{}", output.id.0)).absolute(-5.0, -7.0).child(
+            row()
+                .size(side, side)
+                .radius(side * 0.5)
+                .items_center()
+                .justify_center()
+                .fill(if output.status == ExecutionStatus::Failed { p.hex } else { p.primary_bg })
+                .child(text(num.to_string()).font(TextStyle::new(legible(11.0), 750.0).features("'tnum' 1")).color(p.primary_ink)),
+        )
+    });
     let perched = out_brewed || hexed;
     let mut tag_card = col()
         .w_full()
@@ -751,21 +764,14 @@ pub(crate) fn potion_stand_view<S: 'static>(
                 text(ms_text).font(TextStyle::new(legible(11.0), 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam }),
             ),
         );
-        let mut wrapped = el().w_full().child(tag_card).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(timing_pill));
-        if let Some(num) = step_num {
-            let side = legible(11.0) * 1.6;
-            let step_badge = row()
-                .size(side, side)
-                .radius(side * 0.5)
-                .items_center()
-                .justify_center()
-                .fill(p.primary_bg)
-                .child(text(num.to_string()).font(TextStyle::new(legible(11.0), 750.0).features("'tnum' 1")).color(p.primary_ink));
-            wrapped = wrapped.child(el().absolute(-5.0, -7.0).child(step_badge));
-        }
-        tag_card = col().w_full().child(wrapped);
+        let wrapped = el().w_full().child(tag_card).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(timing_pill));
+        tag_card = col().w_full().child(wrapped.children(step_badge));
     } else if let Some(pill) = hex_pill {
-        tag_card = col().w_full().child(el().w_full().child(tag_card).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(pill)));
+        tag_card = col()
+            .w_full()
+            .child(el().w_full().child(tag_card).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(pill)).children(step_badge));
+    } else if let Some(badge) = step_badge {
+        tag_card = col().w_full().child(el().w_full().child(tag_card).child(badge));
     }
 
     let stand = col().key("potion-stand").w(width).gap(4.0).items_center().absolute(pos[0], pos[1]);

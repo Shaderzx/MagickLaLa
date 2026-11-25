@@ -827,19 +827,8 @@ fn left_rail(app: &StudioApp, t: &HearthPalette) -> El {
                         let title_el = if !query.is_empty()
                             && let Some(pos) = spec.title.to_ascii_lowercase().find(&query)
                         {
-                            let end = pos + query.len();
-                            let pre = &spec.title[..pos];
-                            let hit = &spec.title[pos..end];
-                            let post = &spec.title[end..];
-                            let mut pieces = row().grow(1.0).min_w(0.0).items_center();
-                            if !pre.is_empty() {
-                                pieces = pieces.child(label(pre, 12.0, 500.0, t.ink));
-                            }
-                            pieces = pieces.child(label(hit, 12.0, 800.0, if light { t.broth_deep } else { t.broth_foam }));
-                            if !post.is_empty() {
-                                pieces = pieces.child(label(post, 12.0, 500.0, t.ink).truncate());
-                            }
-                            pieces
+                            let hit = rune::Span::new(pos, pos + query.len()).weight(800.0).color(if light { t.broth_deep } else { t.broth_foam });
+                            label(&spec.title, 12.0, 550.0, t.ink).spans(vec![hit]).wrap().max_lines(2).shrink().min_w(0.0)
                         } else {
                             label(&spec.title, 12.0, 550.0, t.ink).wrap().max_lines(2).shrink().min_w(0.0)
                         };

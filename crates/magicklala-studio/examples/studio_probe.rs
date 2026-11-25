@@ -2796,7 +2796,9 @@ fn stand_badge() -> Result<serde_json::Value, String> {
     failed.frame(1.0);
     failed.frame(2.0);
     let failed_badge = failed.presented("step-badge-reply").map(|_| words_of(&failed, "step-badge-reply"));
-    Ok(json!({ "idleInset": idle_inset, "idleBadge": idle_badge, "failedBadge": failed_badge, "failedStep": failed.state.canvas.card(&NodeId::from("reply")).and_then(|card| card.step_order) }))
+    Ok(
+        json!({ "idleInset": idle_inset, "idleBadge": idle_badge, "failedBadge": failed_badge, "failedStep": failed.state.canvas.card(&NodeId::from("reply")).and_then(|card| card.step_order) }),
+    )
 }
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
