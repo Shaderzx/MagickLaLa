@@ -233,6 +233,26 @@ pub fn template_roots(source: &str) -> Vec<String> {
     })
 }
 
+pub fn rename_template_root(source: &str, old: &str, new: &str) -> String {
+    let Ok(pattern) = placeholder_pattern() else { return source.to_owned() };
+    pattern
+        .replace_all(source, |captures: &regex::Captures<'_>| {
+            let whole = captures.get(0).map_or("", |whole| whole.as_str());
+            match captures.get(1).filter(|root| root.as_str() == old) {
+                Some(root) => {
+                    let start = root.start() - captures.get(0).map_or(0, |whole| whole.start());
+                    format!("{}{new}{}", &whole[..start], &whole[start + old.len()..])
+                }
+                None => whole.to_owned(),
+            }
+        })
+        .into_owned()
+}
+
+pub fn is_template_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
 fn placeholder_pattern() -> Result<&'static Regex, NodeError> {
     PLACEHOLDER_PATTERN.as_ref().map_err(|error| NodeError::Other(error.clone()))
 }

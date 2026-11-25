@@ -177,7 +177,8 @@ fn recipe_from(spell: &SpellGraph, canvas: &CanvasState, specs: &[NodeSpec]) -> 
     graph.shelf.clear();
     let recipe = magicklala_canvas::recipe_nodes(canvas);
     let known = |kind: &str| specs.iter().any(|spec| spec.kind == kind);
-    graph.nodes.retain(|node| recipe.contains(&node.id) || !known(&node.kind));
+    let open_trigger = |node: &NodeInstance| !canvas.is_shelved(&node.id) && specs.iter().any(|spec| spec.kind == node.kind && spec.is_trigger);
+    graph.nodes.retain(|node| recipe.contains(&node.id) || open_trigger(node) || !known(&node.kind));
     let kept: Vec<NodeId> = graph.nodes.iter().map(|node| node.id.clone()).collect();
     graph.wires.retain(|wire| kept.contains(&wire.from_node) && kept.contains(&wire.to_node));
     graph.subgraphs.retain(|reference| kept.contains(&reference.node_id));
@@ -1525,6 +1526,7 @@ impl StudioApp {
         self.pending_restore_version = None;
         self.pending_switch = None;
         self.undo_stack.clear();
+        self.redo_stack.clear();
         self.undo_banner = None;
         self.validation = ValidationState::Unchecked;
         let nodes: Vec<(NodeId, String, serde_json::Value)> =
@@ -2483,14 +2485,13 @@ impl StudioApp {
     }
 
     fn carry_rename(&mut self, old: &str, new: &str) {
-        let token = format!("{{{{{old}}}}}");
         let renamed = format!("{{{{{new}}}}}");
         for config in self.configs.values_mut() {
             for value in config.as_object_mut().into_iter().flat_map(|settings| settings.values_mut()) {
                 if magicklala_graph::bound_variable(value) == Some(old) {
                     *value = serde_json::Value::String(renamed.clone());
-                } else if let Some(text) = value.as_str().filter(|text| text.contains(&token)) {
-                    *value = serde_json::Value::String(text.replace(&token, &renamed));
+                } else if let Some(text) = value.as_str().filter(|text| template_roots(text).iter().any(|root| root == old)) {
+                    *value = serde_json::Value::String(magicklala_nodes::rename_template_root(text, old, new));
                 }
             }
         }
@@ -2499,8 +2500,8 @@ impl StudioApp {
             let names_variable = kinds.get(id).is_some_and(|kind| kind.starts_with("var/")) && edit.text.trim() == old;
             if names_variable {
                 *edit = TextEdit::new(new);
-            } else if edit.text.contains(&token) {
-                *edit = TextEdit::new(edit.text.replace(&token, &renamed));
+            } else if template_roots(&edit.text).iter().any(|root| root == old) {
+                *edit = TextEdit::new(magicklala_nodes::rename_template_root(&edit.text, old, new));
             }
         }
     }
@@ -2600,10 +2601,12 @@ impl StudioApp {
         let discrete = std::mem::take(&mut self.discrete_edit);
         let variables_before = self.spell.variables.clone();
         let mut renames: Vec<(String, String)> = Vec::new();
+        let taken: Vec<String> = self.spell.variables.iter().map(|variable| variable.name.clone()).collect();
         for (idx, var) in self.spell.variables.iter_mut().enumerate() {
             if let Some(edit) = self.var_name_edits.get(idx) {
                 let next_name = edit.text.trim();
-                if !next_name.is_empty() && next_name != var.name {
+                let free = magicklala_nodes::is_template_name(next_name) && !taken.iter().any(|name| name == next_name);
+                if free && next_name != var.name {
                     renames.push((var.name.clone(), next_name.to_owned()));
                     var.name = next_name.to_owned();
                     vars_changed = true;
@@ -3333,6 +3336,8 @@ impl StudioApp {
                 Some(format!("Variable {} needs a name", index + 1))
             } else if typed[..index].contains(name) {
                 Some(format!("{name}: two variables share this name"))
+            } else if !magicklala_nodes::is_template_name(name) {
+                Some(format!("{name}: a variable name uses only letters, digits, _ and -"))
             } else {
                 None
             }
@@ -3680,6 +3685,7 @@ impl StudioApp {
         self.pending_restore_version = None;
         self.pending_switch = None;
         self.undo_stack.clear();
+        self.redo_stack.clear();
         self.undo_banner = None;
         self.validation = ValidationState::Unchecked;
         self.sync_var_edits_from_spell();

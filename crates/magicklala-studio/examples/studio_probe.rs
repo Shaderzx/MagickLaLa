@@ -3061,23 +3061,33 @@ fn lone_trigger_ships() -> Result<serde_json::Value, String> {
         studio_node("hook", "event/on_webhook", 0.0, serde_json::Value::Null),
         studio_node("say", "io/send_message", 260.0, json!({ "content": "hi" })),
     ];
-    spell.wires = vec![Wire { id: WireId::from("w1"), from_node: NodeId::from("start"), from_socket: "out".to_owned(), to_node: NodeId::from("say"), to_socket: "in".to_owned() }];
+    spell.wires = vec![Wire {
+        id: WireId::from("w1"),
+        from_node: NodeId::from("start"),
+        from_socket: "out".to_owned(),
+        to_node: NodeId::from("say"),
+        to_socket: "in".to_owned(),
+    }];
     let config = StudioConfig { db_path: Some(db_path.clone()), ..StudioConfig::default() };
     let mut app = StudioApp::open(&config).map_err(|error| error.to_string())?;
     app.load_graph(spell);
     let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
     rt.frame(0.0);
     let version = rt.state.publish().map_err(|error| error.to_string())?;
-    let shipped: Vec<String> = rt.state.release_graphs.get(&version).map(|graph| graph.nodes.iter().map(|node| node.id.0.clone()).collect()).unwrap_or_default();
+    let shipped: Vec<String> =
+        rt.state.release_graphs.get(&version).map(|graph| graph.nodes.iter().map(|node| node.id.0.clone()).collect()).unwrap_or_default();
     let _ = std::fs::remove_file(&db_path);
     Ok(json!({ "shipped": shipped }))
 }
 fn rename_safe() -> Result<serde_json::Value, String> {
-    let setting = |app: &StudioApp, id: &str, key: &str| app.spell.nodes.iter().find(|node| node.id.0 == id).and_then(|node| node.config.get(key).cloned()).unwrap_or_default();
+    let setting = |app: &StudioApp, id: &str, key: &str| {
+        app.spell.nodes.iter().find(|node| node.id.0 == id).and_then(|node| node.config.get(key).cloned()).unwrap_or_default()
+    };
     let type_name = |rt: &mut Runtime<StudioApp>, text: &'static str| {
         rt.update(move |app, _| {
-            if let Some(index) = app.spell.variables.iter().position(|variable| variable.name == "max_memories" || variable.name.starts_with("temperature") && variable.name != "temperature" || variable.name == "recall")
-                && let Some(edit) = app.var_name_edits.get_mut(index)
+            if let Some(index) = app.spell.variables.iter().position(|variable| {
+                variable.name == "max_memories" || variable.name.starts_with("temperature") && variable.name != "temperature" || variable.name == "recall"
+            }) && let Some(edit) = app.var_name_edits.get_mut(index)
             {
                 *edit = rune::TextEdit::new(text);
             }
@@ -3100,7 +3110,11 @@ fn rename_safe() -> Result<serde_json::Value, String> {
     let names_mid: Vec<String> = through.state.spell.variables.iter().map(|variable| variable.name.clone()).collect();
     type_name(&mut through, "temperaturex");
     let names_after: Vec<String> = through.state.spell.variables.iter().map(|variable| variable.name.clone()).collect();
+    let mut spaced = runtime_for(StudioApp::from_registry().spell.clone());
+    type_name(&mut spaced, "max memories");
+    let spaced_check = validation_of(&mut spaced)?;
     Ok(json!({
+        "spaced": { "check": spaced_check["errors"], "name": spaced.state.spell.variables.first().map(|variable| variable.name.clone()) },
         "pathedPrompt": pathed_prompt,
         "clashCheck": clash_check["validation"],
         "namesMid": names_mid,

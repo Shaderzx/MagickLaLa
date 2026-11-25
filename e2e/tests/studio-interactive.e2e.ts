@@ -2074,4 +2074,5 @@ test('A variable rename only lands on a valid unused name and carries every use:
   expect(report.namesAfter).toEqual(['temperaturex', 'temperature']);
   expect(report.limit).toBe('{{temperaturex}}');
   expect(report.temperature).toBe('{{temperature}}');
+  expect(report.spaced).toEqual({ check: ['max memories: a variable name uses only letters, digits, _ and -'], name: 'max_memories' });
 });
