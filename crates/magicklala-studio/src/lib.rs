@@ -837,6 +837,12 @@ pub struct TraceLine {
     pub path: Vec<NodeId>,
 }
 
+impl TraceLine {
+    pub fn canvas_node(&self) -> Option<NodeId> {
+        self.path.first().cloned().or_else(|| self.node.clone())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatMessage {
     pub from_user: bool,

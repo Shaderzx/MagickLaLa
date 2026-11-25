@@ -1631,7 +1631,7 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
         crate::numbered_steps(&app.trace)
     };
     let steps = listed.iter().enumerate().fold(col().gap(5.0), |list, (index, (number, line))| {
-        let target = line.node.clone();
+        let target = line.canvas_node();
         let mut item = row()
             .key(if checked_only { format!("trace-issue-{index}") } else { format!("trace-step-{index}") })
             .w_full()
@@ -2587,7 +2587,7 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
                     .justify_center()
                     .fill(if line.status == ExecutionStatus::Failed { t.hex } else { t.primary_bg })
                     .child(figure(number, 9.5, 750.0, t.primary_ink));
-                if let Some(target_node) = line.node.clone() {
+                if let Some(target_node) = line.canvas_node() {
                     dot = dot.on_press(move |app: &mut StudioApp| app.canvas.select(Some(target_node.clone())));
                 }
                 return list.child(link(dot));
@@ -2692,7 +2692,7 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
                 entry = entry.child(label("→", 11.5, 700.0, t.hex));
             }
         }
-        if let Some(target_node) = line.node.clone() {
+        if let Some(target_node) = line.canvas_node() {
             entry = entry.on_press(move |app: &mut StudioApp| {
                 app.canvas.select(Some(target_node.clone()));
             });
@@ -2751,7 +2751,7 @@ fn log_result(app: &StudioApp, t: &HearthPalette) -> Option<(El, f32)> {
     let failed: Vec<&TraceLine> = app.trace.iter().filter(|line| line.kind == "NodeFailed").collect();
     let light = t.light;
     let time = if last.at_ms == 0 { "<1ms".to_owned() } else { format!("{}ms", last.at_ms) };
-    let first_failed = failed.first().and_then(|line| line.node.clone());
+    let first_failed = failed.first().and_then(|line| line.canvas_node());
     let (word, name) = match failed.first() {
         Some(line) => (
             "Failed".to_owned(),
@@ -2826,7 +2826,7 @@ fn log_list(app: &StudioApp, t: &HearthPalette) -> El {
             .child(el().size(7.0, 7.0).radius(3.5).fill(dot))
             .child(label(trace_display_kind(line.kind), 11.5, 700.0, if sour { t.hex } else { t.ink }).w(78.0))
             .child(label(&line.detail, 11.5, 450.0, t.ink_2).wrap().grow(1.0).min_w(0.0));
-        if let Some(node) = line.node.clone() {
+        if let Some(node) = line.canvas_node() {
             item = item.on_press(move |app: &mut StudioApp| app.canvas.select(Some(node.clone())));
         }
         list.child(item)

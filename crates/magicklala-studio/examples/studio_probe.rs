@@ -2650,7 +2650,7 @@ fn step_numbers() -> Result<serde_json::Value, String> {
         }
         let log = texts_under(&mut rt, "trace-scroll");
         rt.update(|app, _| app.canvas.select(None));
-        click(&mut rt, "trace-step-2")?;
+        click_at(&mut rt, "trace-step-2", 3.0)?;
         let inspected = rt.state.canvas.selection.as_ref().map(|id| id.0.clone());
         report.insert(status.to_owned(), json!({ "badges": badges, "steps": steps, "log": log, "inspectedChild": inspected, "header": texts_under(&mut rt, "inspector-trace").split(" Brewing sequence").next().unwrap_or_default().to_owned() }));
     }
