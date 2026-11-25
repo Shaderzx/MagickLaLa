@@ -1845,6 +1845,80 @@ fn toss() -> Result<serde_json::Value, String> {
     Ok(json!({ "built": built_report, "pantryDrop": pantry_drop, "pantryFull": pantry_full, "setAside": set_aside }))
 }
 
+fn router_spell() -> SpellGraph {
+    let mut spell = SpellGraph::new("Router Agent");
+    spell.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("switch", "flow/switch", 280.0, serde_json::Value::Null),
+        studio_node("refund_text", "text/template", 560.0, json!({ "template": "Refunds desk" })),
+        studio_node("other_text", "text/template", 560.0, json!({ "template": "Front desk" })),
+        studio_node("refund_reply", "io/send_message", 840.0, serde_json::Value::Null),
+        studio_node("other_reply", "io/send_message", 840.0, serde_json::Value::Null),
+    ];
+    spell.wires = vec![
+        studio_wire("w1", ("trigger", "out"), ("switch", "in")),
+        studio_wire("w2", ("trigger", "content"), ("switch", "value")),
+        studio_wire("w3", ("switch", "default"), ("other_reply", "in")),
+        studio_wire("w4", ("other_text", "text"), ("other_reply", "content")),
+        studio_wire("w5", ("refund_text", "text"), ("refund_reply", "content")),
+    ];
+    spell
+}
+
+fn outputs_of(app: &StudioApp, id: &str) -> Vec<String> {
+    app.canvas.card(&NodeId::from(id)).map(|card| card.outputs.iter().map(|socket| socket.name.clone()).collect()).unwrap_or_default()
+}
+
+fn pantry_settings() -> Result<serde_json::Value, String> {
+    let mut rt = runtime_for(router_spell());
+    let switch = NodeId::from("switch");
+    rt.update(|app, _| app.canvas.select(Some(NodeId::from("switch"))));
+    rt.frame(0.0);
+    let field_shown = rt.find("prompt-field").is_some();
+    type_prompt(&mut rt, &switch, "refund, billing")?;
+    rt.update(|app, _| app.sync_spell());
+    rt.frame(0.0);
+    let typed_outputs = outputs_of(&rt.state, "switch");
+    connect(&mut rt, ("switch", "refund"), ("refund_reply", "in"))?;
+    let saved = rt.state.spell.nodes.iter().find(|node| node.id == switch).and_then(|node| node.config.get("cases").cloned());
+    let check = validation_of(&mut rt)?;
+    let refund_reply = type_chat(&mut rt, "refund")?;
+    let other_reply = type_chat(&mut rt, "hello")?;
+    let reopened = StudioApp::with_spell(rt.state.spell.clone(), registry_specs());
+    let reopened_outputs = outputs_of(&reopened, "switch");
+    let reopened_text = reopened.prompts.get(&switch).map(|edit| edit.text.clone());
+
+    let mut trimmed = runtime_for(rt.state.spell.clone());
+    type_prompt(&mut trimmed, &switch, "refund")?;
+    trimmed.update(|app, _| app.sync_spell());
+    let trimmed_outputs = outputs_of(&trimmed.state, "switch");
+
+    let mut keys_spell = SpellGraph::new("Keys Agent");
+    keys_spell.nodes = vec![studio_node("pick", "json/destructure", 0.0, serde_json::Value::Null)];
+    let mut keys = runtime_for(keys_spell);
+    let pick = NodeId::from("pick");
+    keys.update(|app, _| app.canvas.select(Some(NodeId::from("pick"))));
+    keys.frame(0.0);
+    let keys_field = keys.find("prompt-field").is_some();
+    type_prompt(&mut keys, &pick, "name, age")?;
+    keys.update(|app, _| app.sync_spell());
+    let key_outputs = outputs_of(&keys.state, "pick");
+    let key_config = keys.state.spell.nodes.iter().find(|node| node.id == pick).and_then(|node| node.config.get("keys").cloned());
+    Ok(json!({
+        "fieldShown": field_shown,
+        "typedOutputs": typed_outputs,
+        "saved": saved,
+        "check": check["validation"],
+        "refundReply": refund_reply,
+        "otherReply": other_reply,
+        "reopenedOutputs": reopened_outputs,
+        "reopenedText": reopened_text,
+        "trimmedOutputs": trimmed_outputs,
+        "keysField": keys_field,
+        "keyOutputs": key_outputs,
+        "keyConfig": key_config,
+    }))
+}
 fn pantry_toss(rt: &mut Runtime<StudioApp>, kind: &str, query: &str) -> Result<serde_json::Value, String> {
     rt.update(|app, _| app.palette_query = rune::TextEdit::new(query));
     rt.frame(1.0);
@@ -5568,7 +5642,11 @@ fn crowded_kitchen() -> SpellGraph {
         .collect();
     for (index, spec) in chain.iter().enumerate() {
         let id = NodeId::from(format!("step_{index}").as_str());
-        let config = if spec.kind == "code/rhai_script" { json!({ "script": "\"stirred\"" }) } else { serde_json::Value::Null };
+        let config = match spec.kind.as_str() {
+            "code/rhai_script" => json!({ "script": "\"stirred\"" }),
+            "flow/switch" => json!({ "cases": ["stir"] }),
+            _ => serde_json::Value::Null,
+        };
         spell.nodes.push(NodeInstance { id: id.clone(), kind: spec.kind.clone(), position: [220.0 * (index + 1) as f32, 0.0], config });
         spell.wires.push(wire(format!("chain_{index}"), (&previous.0, &previous.1), (&id, &flow(&spec.inputs).unwrap_or_default())));
         for socket in spec.inputs.iter().filter(|socket| socket.required && !socket.ty.is_flow()) {
@@ -7847,6 +7925,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("close-quarters") => close_quarters(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("true-runs") => true_runs(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("clear-signals") => clear_signals(),
+        Some("pantry-settings") => pantry_settings(),
         Some("pot-rect") => pot_rect(),
         Some("gateway-hint") => gateway_hint(),
         Some("honest-dials") => honest_dials(Path::new(args.get(1).ok_or("missing database path")?)),

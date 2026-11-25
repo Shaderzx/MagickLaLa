@@ -1742,3 +1742,20 @@ test('Log counts: a brew where one template feeds eight bottles counts each step
 
   expect(report).toEqual({ distinct: 10, saysSteps: true });
 });
+
+test('Pantry steps that need a list can be set up: a Switch takes its cases as plain words, grows one output per case before default, routes a matching message down its case and anything else to default, keeps its cases after reopening, drops an unwired case when it is removed, and Destructure JSON grows one output per key', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['pantry-settings']);
+
+  expect(report.fieldShown).toBe(true);
+  expect(report.typedOutputs).toEqual(['refund', 'billing', 'default']);
+  expect(report.saved).toEqual(['refund', 'billing']);
+  expect(report.check).toBe('valid');
+  expect(report.refundReply).toBe('Refunds desk');
+  expect(report.otherReply).toBe('Front desk');
+  expect(report.reopenedOutputs).toEqual(['refund', 'billing', 'default']);
+  expect(report.reopenedText).toBe('refund, billing');
+  expect(report.trimmedOutputs).toEqual(['refund', 'default']);
+  expect(report.keysField).toBe(true);
+  expect(report.keyOutputs).toEqual(['name', 'age']);
+  expect(report.keyConfig).toEqual(['name', 'age']);
+});
