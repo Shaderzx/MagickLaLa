@@ -1448,7 +1448,7 @@ test('Studio keeps its promises: a prompt typed over a shelf shortcut stays type
   expect(report.ladleBrushes).toBe(false);
   expect(report.everydayLadle).toBe(true);
   expect(report.pulledWires).toBe(0);
-});test('Every dial tells the truth: a step with no temperature reads Auto and the first press writes one, the model tile names its provider properly, only real variable links are shown and a changed default changes the brew, the 960 Grimoire names every socket at fit or on hover, after a brew every cauldron step badge shows the number the log gives that step, lane pours turn on wide curves, the first log chip keeps its name, the header counts bottles, big whole numbers keep their meaning, and a missing AI gateway says where to set one', { timeout: 900_000 }, async () => {
+});test('Every dial tells the truth: a step with no temperature reads Auto and the first press writes one, the model tile names its provider properly, only real variable links are shown and a changed default changes the brew, the 960 Grimoire names every socket at fit or on hover, step badges match the log after a brew, lane pours turn on wide curves, the first log chip keeps its name, the header counts bottles, big whole numbers keep their meaning, and a missing AI gateway says where to set one', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-dials-'));
   try {
     const report = await studioProbe(['honest-dials', join(dir, 'studio.sqlite')]);
@@ -1668,14 +1668,16 @@ test('Mixed shelves: six or eight ingredients with two to six bottles never hide
     expect({ case: shelf.case, through: shelf.through }).toEqual({ case: shelf.case, through: [] });
   }
 });
-test('Undo keeps time in order: after a newer untracked edit such as a new wire or a typed prompt, Cmd or Ctrl Z no longer reaches back to an older removal or variable, so the newer work survives, while undo right after a removal still brings the step back', { timeout: 900_000 }, async () => {
+test('Undo keeps time in order and reaches every edit: Cmd or Ctrl Z first takes back a new wire and then the older removed step, a typed prompt undoes as one step before the variable added earlier, a Switch case list undoes to its old outputs, and undo right after a removal still brings the step back', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['undo-order']);
 
   expect(report.removed).toBe(true);
-  expect(report.newWireKept).toBe(true);
-  expect(report.olderStepRestored).toBe(false);
+  expect(report.wireUndone).toBe(true);
+  expect(report.stepKeptAfterFirst).toBe(true);
+  expect(report.stepBackAfterSecond).toBe(true);
   expect(report.undoAfterTracked).toBe(true);
-  expect(report.typedThenUndo).toEqual({ variables: 1, undoLeft: 0 });
+  expect(report.typed).toEqual({ promptAfterOne: 'You asked: {{content}}', variablesAfterOne: 1, variablesAfterTwo: 0 });
+  expect(report.listed).toEqual({ before: ['refund', 'billing', 'default'], after: ['default'] });
 });
 test('Potion rack: four or more bottles stand in rows on shelf planks fed by one glass pipe per row instead of a branch per bottle, and crowded ingredient names stay whole instead of being cut', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['potion-rack']);

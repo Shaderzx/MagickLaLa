@@ -5267,7 +5267,6 @@ fn honest_dials(db_path: &Path) -> Result<serde_json::Value, String> {
             }
         }
     }
-    let parallel = shelves.swap_remove(0);
 
     let mut lanes = open(example("webhook_router.json")?, (960.0, 640.0));
     run_once(&mut lanes)?;
@@ -6711,8 +6710,10 @@ fn undo_order() -> Result<serde_json::Value, String> {
     });
     later.frame(0.0);
     cmd_z(&mut later);
-    let new_wire_kept = fed_by_trigger(&later.state);
-    let older_step_restored = later.state.canvas.card(&NodeId::from("echo")).is_some();
+    let wire_undone = !fed_by_trigger(&later.state);
+    let step_kept_after_first = later.state.canvas.card(&NodeId::from("echo")).is_none();
+    cmd_z(&mut later);
+    let step_back_after_second = later.state.canvas.card(&NodeId::from("echo")).is_some();
 
     let mut tracked = runtime_for(tasting_spell());
     tracked.on_key = Some(magicklala_studio::studio_key);
@@ -6723,19 +6724,38 @@ fn undo_order() -> Result<serde_json::Value, String> {
     let mut typed = runtime_for(tasting_spell());
     typed.on_key = Some(magicklala_studio::studio_key);
     typed.update(|app, _| app.add_variable());
-    typed.update(|app, _| {
-        app.prompts.insert(NodeId::from("echo"), rune::TextEdit::new("Changed: {{content}}"));
+    for draft in ["C", "Ch", "Changed: {{content}}"] {
+        typed.update(move |app, _| {
+            app.prompts.insert(NodeId::from("echo"), rune::TextEdit::new(draft));
+            app.sync_edits();
+        });
+        typed.frame(0.0);
+    }
+    cmd_z(&mut typed);
+    let prompt_after_one = typed.state.prompts.get(&NodeId::from("echo")).map(|edit| edit.text.clone());
+    let variables_after_one = typed.state.spell.variables.len();
+    cmd_z(&mut typed);
+    let variables_after_two = typed.state.spell.variables.len();
+
+    let mut listed = runtime_for(router_spell());
+    listed.on_key = Some(magicklala_studio::studio_key);
+    listed.update(|app, _| {
+        app.prompts.insert(NodeId::from("switch"), rune::TextEdit::new("refund, billing"));
         app.sync_edits();
     });
-    cmd_z(&mut typed);
-    let typed_then_undo = json!({ "variables": typed.state.spell.variables.len(), "undoLeft": typed.state.undo_stack.len() });
+    listed.frame(0.0);
+    let cases_before_undo = outputs_of(&listed.state, "switch");
+    cmd_z(&mut listed);
+    let cases_after_undo = outputs_of(&listed.state, "switch");
 
     Ok(json!({
         "removed": removed,
-        "newWireKept": new_wire_kept,
-        "olderStepRestored": older_step_restored,
+        "wireUndone": wire_undone,
+        "stepKeptAfterFirst": step_kept_after_first,
+        "stepBackAfterSecond": step_back_after_second,
         "undoAfterTracked": undo_after_tracked,
-        "typedThenUndo": typed_then_undo,
+        "typed": { "promptAfterOne": prompt_after_one, "variablesAfterOne": variables_after_one, "variablesAfterTwo": variables_after_two },
+        "listed": { "before": cases_before_undo, "after": cases_after_undo },
     }))
 }
 fn potion_rack() -> Result<serde_json::Value, String> {
