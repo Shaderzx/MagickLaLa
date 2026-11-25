@@ -709,7 +709,7 @@ impl RunState {
         let (fired, outputs) = self.execute_flow_node(&node, &socket, &scope).await?;
         let next_scope = with_outputs(&scope, &node, outputs);
         if self.kind_of(&node) == WHILE_LOOP_KIND && fired.iter().any(|fired_socket| fired_socket == "body") {
-            let max_iterations = self.max_iterations(&node);
+            let max_iterations = self.max_iterations(&node).map_err(|error| self.fail_node(&node, error))?;
             let iterations = iterations + 1;
             if iterations > max_iterations {
                 return Err(self.fail_node(&node, NodeError::Other(format!("while loop exceeded max_iterations {max_iterations}"))));
@@ -723,13 +723,23 @@ impl RunState {
         self.instances.get(node).map_or("", |instance| instance.kind.as_str())
     }
 
-    fn max_iterations(&self, node: &NodeId) -> u64 {
-        self.instances
-            .get(node)
-            .and_then(|instance| instance.config.get("max_iterations"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(DEFAULT_WHILE_LOOP_MAX_ITERATIONS)
-            .max(1)
+    fn max_iterations(&self, node: &NodeId) -> Result<u64, NodeError> {
+        let Some(setting) = self.instances.get(node).and_then(|instance| instance.config.get("max_iterations")) else {
+            return Ok(DEFAULT_WHILE_LOOP_MAX_ITERATIONS);
+        };
+        let Some(name) = bound_variable(setting) else {
+            return Ok(setting.as_u64().unwrap_or(DEFAULT_WHILE_LOOP_MAX_ITERATIONS).max(1));
+        };
+        let value = locked(&self.variables).get(name).map(Value::to_json);
+        let whole = match &value {
+            Some(serde_json::Value::String(text)) => text.trim().parse::<u64>().ok(),
+            Some(number) => number.as_u64(),
+            None => None,
+        };
+        whole.filter(|limit| *limit >= 1).ok_or_else(|| {
+            let shown = value.map_or_else(|| "nothing".to_owned(), |value| value.to_string());
+            NodeError::Other(format!("while loop max_iterations must be a whole number of at least 1, but {{{{{name}}}}} is {shown}"))
+        })
     }
 
     fn fail_node(&self, node: &NodeId, error: NodeError) -> SpellError {

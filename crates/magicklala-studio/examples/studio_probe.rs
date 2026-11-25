@@ -2455,11 +2455,7 @@ fn redo_order() -> Result<serde_json::Value, String> {
 }
 fn aside_undo_pour() -> Result<serde_json::Value, String> {
     let records = |app: &StudioApp| -> Vec<String> {
-        app.spell
-            .wires
-            .iter()
-            .map(|wire| format!("{}:{}.{}>{}.{}", wire.id.0, wire.from_node.0, wire.from_socket, wire.to_node.0, wire.to_socket))
-            .collect()
+        app.spell.wires.iter().map(|wire| format!("{}:{}.{}>{}.{}", wire.id.0, wire.from_node.0, wire.from_socket, wire.to_node.0, wire.to_socket)).collect()
     };
     let parked_of = |app: &StudioApp, id: &str| -> usize { app.spell.shelf.iter().find(|entry| entry.node.0 == id).map_or(0, |entry| entry.parked.len()) };
     let toss = |rt: &mut Runtime<StudioApp>, toss: magicklala_canvas::Toss| {
@@ -2499,7 +2495,8 @@ fn aside_undo_pour() -> Result<serde_json::Value, String> {
     for id in &middles {
         toss(&mut two, magicklala_canvas::Toss::Aside(id.clone()));
     }
-    let saved: SpellGraph = serde_json::from_str(&serde_json::to_string(&two.state.spell).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+    let saved: SpellGraph =
+        serde_json::from_str(&serde_json::to_string(&two.state.spell).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
     let mut reloaded = runtime_for(StudioApp::from_registry().spell.clone());
     reloaded.update(move |app, _| app.load_graph(saved.clone()));
     reloaded.frame(0.0);
@@ -2524,8 +2521,16 @@ fn picker_undo() -> Result<serde_json::Value, String> {
         rt.key(rune::KeyEvent { key: rune::Key::Command('z'), mods: rune::Mods { cmd: true, ..Default::default() } });
         rt.frame(0.0);
     };
-    let model_of = |app: &StudioApp| app.spell.nodes.iter().find(|node| node.id.0 == "llm").and_then(|node| node.config.get("model").cloned()).unwrap_or_default();
-    let temperature_of = |app: &StudioApp| app.spell.variables.iter().find(|variable| variable.name == "temperature").and_then(|variable| variable.default.clone()).map(|value| format!("{value:?}"));
+    let model_of =
+        |app: &StudioApp| app.spell.nodes.iter().find(|node| node.id.0 == "llm").and_then(|node| node.config.get("model").cloned()).unwrap_or_default();
+    let temperature_of = |app: &StudioApp| {
+        app.spell
+            .variables
+            .iter()
+            .find(|variable| variable.name == "temperature")
+            .and_then(|variable| variable.default.clone())
+            .map(|value| format!("{value:?}"))
+    };
     let mut rt = runtime_for(StudioApp::from_registry().spell.clone());
     rt.on_key = Some(magicklala_studio::studio_key);
     let original = model_of(&rt.state);
@@ -2628,8 +2633,7 @@ fn step_numbers() -> Result<serde_json::Value, String> {
             app.right_tab = RightTab::Trace;
         });
         rt.frame(0.0);
-        let badges: serde_json::Map<String, serde_json::Value> =
-            rt.state.canvas.nodes.iter().map(|card| (card.id.0.clone(), json!(card.step_order))).collect();
+        let badges: serde_json::Map<String, serde_json::Value> = rt.state.canvas.nodes.iter().map(|card| (card.id.0.clone(), json!(card.step_order))).collect();
         let mut steps = Vec::new();
         for index in 0..8 {
             let words = texts_under(&mut rt, &format!("trace-step-{index}"));

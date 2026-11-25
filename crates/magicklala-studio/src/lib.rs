@@ -831,6 +831,7 @@ pub struct TraceLine {
     pub detail: String,
     pub status: ExecutionStatus,
     pub node: Option<NodeId>,
+    pub path: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -904,6 +905,11 @@ pub struct EditSnapshot {
     variables: Vec<VariableDef>,
     var_name_edits: Vec<TextEdit>,
     var_default_edits: Vec<TextEdit>,
+    aside_wires: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
+    aside_bridges: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
+    aside_refused: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
+    wire_homes: Vec<((SocketRef, SocketRef), (WireId, usize))>,
+    wire_ledger: Vec<WireId>,
     typing: Option<String>,
 }
 
@@ -945,6 +951,7 @@ pub struct StudioApp {
     pub wire_error: Option<String>,
     wire_homes: Vec<((SocketRef, SocketRef), (WireId, usize))>,
     wire_ledger: Vec<WireId>,
+    discrete_edit: bool,
     var_problems: Vec<String>,
     pub saved_potions: Vec<(String, String)>,
     pub saved_live: Vec<(String, u32)>,
@@ -1077,6 +1084,7 @@ impl StudioApp {
             wire_error: None,
             wire_homes: Vec::new(),
             wire_ledger: Vec::new(),
+            discrete_edit: false,
             var_problems: Vec::new(),
             saved_potions: Vec::new(),
             saved_live: Vec::new(),
@@ -1483,6 +1491,7 @@ impl StudioApp {
             map.insert("provider".to_owned(), serde_json::Value::String(provider.to_owned()));
             map.insert("model".to_owned(), serde_json::Value::String(model.to_owned()));
         }
+        self.discrete_edit = true;
         self.sync_spell();
     }
 
@@ -1653,11 +1662,7 @@ impl StudioApp {
                 store
                     .saved_spells()
                     .into_iter()
-                    .filter_map(|record| {
-                        let releases = store.releases_of_record(record.id);
-                        let name = record.name.clone();
-                        StudioWorkspace::of(record, releases).active_release.map(|version| (name, version))
-                    })
+                    .filter_map(|record| store.releases_of_record(record.id).last().map(|release| (record.name.clone(), release.version)))
                     .collect()
             })
             .unwrap_or_default();
@@ -1786,6 +1791,7 @@ impl StudioApp {
         }
         let current = self.selected_temperature().unwrap_or(0.7);
         let next = ((current + delta).clamp(0.0, 2.0) * 10.0).round() / 10.0;
+        self.discrete_edit = true;
         let bound = self
             .canvas
             .selection
@@ -1964,9 +1970,11 @@ impl StudioApp {
                     })
                     .filter(|pair| !shortcuts.contains(pair))
                     .collect();
-                for (index, wire) in self.canvas.wires.iter().enumerate() {
+                self.order_wires();
+                for wire in &self.canvas.wires {
                     let pair = (SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()), SocketRef::new(wire.to_node.clone(), wire.to_socket.clone()));
                     if removed.contains(&pair) {
+                        let index = self.wire_ledger.iter().position(|known| known == &wire.id).unwrap_or(usize::MAX);
                         let home = (pair, (wire.id.clone(), index));
                         self.wire_homes.retain(|(known, _)| known != &home.0);
                         self.wire_homes.push(home);
@@ -2394,7 +2402,15 @@ impl StudioApp {
         let (Some(field), Some(edit)) = (editable_field(kind), self.prompts.get(id)) else { return config };
         let present = config.get(field).is_some();
         if edit.text.trim().is_empty() {
-            if let Some(map) = config.as_object_mut().filter(|_| present) {
+            let cleared_list = listed_field(kind) && (present || self.listed_default(kind, field) != json!([]));
+            if cleared_list {
+                if !config.is_object() {
+                    config = json!({});
+                }
+                if let Some(map) = config.as_object_mut() {
+                    map.insert(field.to_owned(), json!([]));
+                }
+            } else if let Some(map) = config.as_object_mut().filter(|_| present) {
                 map.remove(field);
             }
             return config;
@@ -2503,6 +2519,11 @@ impl StudioApp {
             variables: self.spell.variables.clone(),
             var_name_edits: self.var_name_edits.clone(),
             var_default_edits: self.var_default_edits.clone(),
+            aside_wires: self.aside_wires.clone(),
+            aside_bridges: self.aside_bridges.clone(),
+            aside_refused: self.aside_refused.clone(),
+            wire_homes: self.wire_homes.clone(),
+            wire_ledger: self.wire_ledger.clone(),
             typing,
         }
     }
@@ -2569,6 +2590,7 @@ impl StudioApp {
         }
         self.aside_bridges.retain(|_, bridges| !bridges.is_empty());
         let mut vars_changed = std::mem::take(&mut self.variables_touched);
+        let discrete = std::mem::take(&mut self.discrete_edit);
         let variables_before = self.spell.variables.clone();
         let mut renames: Vec<(String, String)> = Vec::new();
         for (idx, var) in self.spell.variables.iter_mut().enumerate() {
@@ -2641,7 +2663,11 @@ impl StudioApp {
             self.redo_stack.clear();
         }
         if recipe_changed && self.undo_stack.len() == self.undo_seen {
-            let typing = edited_variable.clone().or_else(|| self.typed_node(&nodes, &wires, &subgraphs, &shelf).map(|id| format!("node:{}", id.0)));
+            let typing = if discrete {
+                None
+            } else {
+                edited_variable.clone().or_else(|| self.typed_node(&nodes, &wires, &subgraphs, &shelf).map(|id| format!("node:{}", id.0)))
+            };
             let same_typing = typing.is_some() && matches!(self.undo_stack.last(), Some(UndoEntry::Edit(kept)) if kept.typing == typing);
             match self.last_synced.take() {
                 Some(_) if same_typing => {}
@@ -3212,6 +3238,7 @@ impl StudioApp {
                         detail: finding.readable.clone(),
                         status: ExecutionStatus::Failed,
                         node: finding.node.clone(),
+                        path: Vec::new(),
                     });
                 }
                 self.canvas.brew_summary = Some(hex_plaque(&findings, &self.canvas));
@@ -3338,7 +3365,14 @@ impl StudioApp {
             }
             Err(error) => {
                 if self.trace.is_empty() {
-                    self.trace.push(TraceLine { at_ms: 0, kind: "RunRejected", detail: error.clone(), status: ExecutionStatus::Failed, node: None });
+                    self.trace.push(TraceLine {
+                        at_ms: 0,
+                        kind: "RunRejected",
+                        detail: error.clone(),
+                        status: ExecutionStatus::Failed,
+                        node: None,
+                        path: Vec::new(),
+                    });
                 }
                 self.conclude(RunReport::invalid(error), reply_to_chat);
                 false
@@ -3458,7 +3492,7 @@ impl StudioApp {
 
     fn close_run(&mut self, kind: &'static str, detail: String, report: RunReport) {
         let at_ms = self.elapsed_ms();
-        self.trace.push(TraceLine { at_ms, kind, detail, status: ExecutionStatus::Failed, node: None });
+        self.trace.push(TraceLine { at_ms, kind, detail, status: ExecutionStatus::Failed, node: None, path: Vec::new() });
         let left = if kind == "RunCancelled" { ExecutionStatus::Idle } else { ExecutionStatus::Failed };
         self.canvas.nodes.iter_mut().filter(|card| card.status == ExecutionStatus::Running).for_each(|card| card.status = left);
         let reply_to_chat = self.release_active();
@@ -3687,7 +3721,29 @@ impl StudioApp {
     }
 
     fn restore_edit(&mut self, before: EditSnapshot) {
-        let EditSnapshot { nodes, wires, shelved, configs, prompts, versions, subgraphs, variables, var_name_edits, var_default_edits, .. } = before;
+        let EditSnapshot {
+            nodes,
+            wires,
+            shelved,
+            configs,
+            prompts,
+            versions,
+            subgraphs,
+            variables,
+            var_name_edits,
+            var_default_edits,
+            aside_wires,
+            aside_bridges,
+            aside_refused,
+            wire_homes,
+            wire_ledger,
+            ..
+        } = before;
+        self.aside_wires = aside_wires;
+        self.aside_bridges = aside_bridges;
+        self.aside_refused = aside_refused;
+        self.wire_homes = wire_homes;
+        self.wire_ledger = wire_ledger;
         self.spell.variables = variables;
         self.var_name_edits = var_name_edits;
         self.var_default_edits = var_default_edits;
@@ -4159,7 +4215,46 @@ fn trace_line(event: &TraceEvent, at_ms: u64, canvas: &CanvasState) -> TraceLine
             None,
         ),
     };
-    TraceLine { at_ms, kind, detail, status, node }
+    TraceLine { at_ms, kind, detail, status, node, path: path.to_vec() }
+}
+
+pub fn numbered_steps(trace: &[TraceLine]) -> Vec<(String, &TraceLine)> {
+    let steps: Vec<&TraceLine> = trace.iter().filter(|line| line.kind == "NodeFinished" || line.kind == "NodeFailed").collect();
+    let mut tops: Vec<&NodeId> = Vec::new();
+    for line in &steps {
+        let Some(node) = line.node.as_ref() else { continue };
+        let top = line.path.first().filter(|_| !line.path.is_empty());
+        if top.is_none() && !tops.contains(&node) {
+            tops.push(node);
+        }
+    }
+    for line in &steps {
+        if let Some(parent) = line.path.first()
+            && !tops.contains(&parent)
+        {
+            tops.push(parent);
+        }
+    }
+    let mut numbered = Vec::new();
+    for (index, top) in tops.iter().enumerate() {
+        let number = index + 1;
+        numbered.extend(steps.iter().filter(|line| line.path.is_empty() && line.node.as_ref() == Some(top)).map(|line| (number.to_string(), *line)));
+        let mut children: Vec<(&[NodeId], &NodeId)> = Vec::new();
+        for line in steps.iter().filter(|line| line.path.first() == Some(top)) {
+            let Some(node) = line.node.as_ref() else { continue };
+            let key = (line.path.as_slice(), node);
+            if !children.contains(&key) {
+                children.push(key);
+            }
+            let child = children.iter().position(|known| known == &key).unwrap_or(0) + 1;
+            numbered.push((format!("{number}.{child}"), *line));
+        }
+    }
+    numbered
+}
+
+pub fn top_step_count(trace: &[TraceLine]) -> usize {
+    numbered_steps(trace).iter().filter(|(number, _)| !number.contains('.')).map(|(number, _)| number.clone()).collect::<std::collections::BTreeSet<_>>().len()
 }
 
 pub fn template_roots(text: &str) -> Vec<String> {

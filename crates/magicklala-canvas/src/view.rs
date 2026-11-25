@@ -1143,7 +1143,7 @@ fn grimoire_card_view<S: 'static>(
             .radius(step_sz * 0.5)
             .items_center()
             .justify_center()
-            .fill(p.primary_bg)
+            .fill(if card.status == ExecutionStatus::Failed { p.hex } else { p.primary_bg })
             .child(text(step.to_string()).font(TextStyle::new((10.0 * zoom).clamp(9.4, 11.0), 750.0).features("'tnum' 1")).color(p.primary_ink));
         shell = shell.child(el().absolute(-6.0 * zoom, -(18.5 * zoom).clamp(16.5, 20.0)).child(step_badge));
     }

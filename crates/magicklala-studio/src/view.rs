@@ -1005,7 +1005,10 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             )
         } else if active {
             (
-                format!("{ingr_count} {ingr_word}"),
+                match app.last_published.as_ref() {
+                    Some(release) => format!("{ingr_count} {ingr_word} · v{} live", release.version),
+                    None => format!("{ingr_count} {ingr_word}"),
+                },
                 "Draft",
                 with_alpha(t.gold, if light { 0.14 } else { 0.22 }),
                 t.gold,
@@ -1566,12 +1569,17 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
     let total_label = if total_ms == 0 { "<1ms total".to_owned() } else { format!("{total_ms}ms total") };
     let succeeded = !app.trace.iter().any(|line| line.status == ExecutionStatus::Failed);
     let checked_only = !app.is_running() && finished.is_empty() && app.trace.iter().all(|line| line.kind == "RunRejected");
+    let outcome = app.trace.iter().rev().find(|line| line.kind == "RunFinished").map(|line| line.detail.as_str());
     let status_label = if checked_only {
         "Hexed"
     } else if app.is_running() {
         "Brewing"
     } else if app.canvas.last_brew.is_none() && app.last_run.is_some() {
         "Last brew"
+    } else if outcome == Some("Cancelled") {
+        "Cancelled"
+    } else if outcome == Some("TimedOut") {
+        "Timed out"
     } else if succeeded {
         "Brewed"
     } else {
@@ -1602,15 +1610,23 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
                     if checked_only {
                         plural(app.trace.len(), "issue", "issues")
                     } else {
-                        format!("{} · {} · {total_label}", plural(finished.len(), "step", "steps"), plural(app.trace.len(), "event", "events"))
+                        format!(
+                            "{} · {} · {total_label}",
+                            plural(crate::top_step_count(&app.trace), "step", "steps"),
+                            plural(app.trace.len(), "event", "events")
+                        )
                     },
                     11.0,
                     500.0,
                     t.summary_ink(),
                 )),
         );
-    let listed: Vec<&TraceLine> = if checked_only { app.trace.iter().filter(|line| line.kind == "RunRejected").collect() } else { finished.clone() };
-    let steps = listed.iter().enumerate().fold(col().gap(5.0), |list, (index, line)| {
+    let listed: Vec<(String, &TraceLine)> = if checked_only {
+        app.trace.iter().filter(|line| line.kind == "RunRejected").enumerate().map(|(index, line)| ((index + 1).to_string(), line)).collect()
+    } else {
+        crate::numbered_steps(&app.trace)
+    };
+    let steps = listed.iter().enumerate().fold(col().gap(5.0), |list, (index, (number, line))| {
         let target = line.node.clone();
         let mut item = row()
             .key(if checked_only { format!("trace-issue-{index}") } else { format!("trace-step-{index}") })
@@ -1632,13 +1648,15 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
                     .items_center()
                     .child(
                         row()
-                            .size(18.0, 18.0)
+                            .min_w(18.0)
+                            .h(18.0)
+                            .px(if number.len() > 1 { 4.0 } else { 0.0 })
                             .radius(6.0)
                             .fill(if checked_only || line.status == ExecutionStatus::Failed { t.hex } else { t.primary_bg })
                             .items_center()
                             .justify_center()
                             .child(figure(
-                                (index + 1).to_string(),
+                                number.clone(),
                                 10.0,
                                 750.0,
                                 if checked_only || line.status == ExecutionStatus::Failed { t.card } else { t.primary_ink },
@@ -2469,7 +2487,7 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
         }
         return bar;
     }
-    let finished_steps = first_finishes(app.trace.iter().filter(|line| line.kind == "NodeFinished" || line.kind == "NodeFailed")).len();
+    let finished_steps = crate::top_step_count(&app.trace);
     let blocked_pre_run = !app.is_running() && finished_steps == 0 && app.trace.iter().all(|line| line.kind == "RunRejected");
     let show_expand_chip = !app.is_running() && finished_steps > 0 && count > 1;
     let step_word = if finished_steps == 1 { "step" } else { "steps" };

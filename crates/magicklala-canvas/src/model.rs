@@ -541,21 +541,28 @@ impl CanvasState {
             TraceEvent::RunStarted { .. } => self.reset_execution(),
             TraceEvent::NodeStarted { node_id, .. } => self.set_status(node_id, ExecutionStatus::Running),
             TraceEvent::NodeFinished { node_id, duration_ms, .. } => {
-                let next_step = self.nodes.iter().filter_map(|card| card.step_order).max().unwrap_or(0) + 1;
+                self.number_step(node_id);
                 if let Some(card) = self.card_mut(node_id) {
                     card.status = ExecutionStatus::Succeeded;
                     card.duration_ms = Some(*duration_ms);
-                    if card.step_order.is_none() {
-                        card.step_order = Some(next_step);
-                    }
                 }
             }
-            TraceEvent::NodeFailed { node_id, .. } => self.set_status(node_id, ExecutionStatus::Failed),
+            TraceEvent::NodeFailed { node_id, .. } => {
+                self.number_step(node_id);
+                self.set_status(node_id, ExecutionStatus::Failed);
+            }
             TraceEvent::WireActivated { wire_id, .. } => self.wires.iter_mut().filter(|wire| &wire.id == wire_id).for_each(|wire| wire.active = true),
             TraceEvent::RunFinished { summary, .. } if summary.status != RunStatus::Succeeded => {
                 self.nodes.iter_mut().filter(|card| card.status == ExecutionStatus::Running).for_each(|card| card.status = ExecutionStatus::Failed);
             }
             TraceEvent::RunFinished { .. } | TraceEvent::StreamChunk { .. } | TraceEvent::VariableSet { .. } => {}
+        }
+    }
+
+    fn number_step(&mut self, id: &NodeId) {
+        let next_step = self.nodes.iter().filter_map(|card| card.step_order).max().unwrap_or(0) + 1;
+        if let Some(card) = self.card_mut(id).filter(|card| card.step_order.is_none()) {
+            card.step_order = Some(next_step);
         }
     }
 
