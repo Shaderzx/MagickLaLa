@@ -3436,6 +3436,42 @@ fn live_mark_kept() -> Result<serde_json::Value, String> {
     let _ = std::fs::remove_file(&db_path);
     Ok(json!({ "fresh": fresh, "edited": edited, "pending": pending, "older": older, "newest": newest }))
 }
+fn set_before_read() -> Result<serde_json::Value, String> {
+    use magicklala_graph::VariableDef;
+    let link = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let route = |order: &[&str]| {
+        let mut spell = SpellGraph::new("Set Then Wait");
+        spell.nodes = vec![
+            studio_node("start", "event/on_start", 0.0, serde_json::Value::Null),
+            studio_node("set", "var/set", 260.0, json!({ "name": "ms", "value": 5 })),
+            studio_node("wait", "time/delay", 520.0, json!({ "ms": "{{ms}}" })),
+        ];
+        spell.nodes.retain(|node| order.contains(&node.id.0.as_str()));
+        spell.wires = order.windows(2).enumerate().map(|(index, pair)| link(&format!("w{index}"), (pair[0], "out"), (pair[1], "in"))).collect();
+        spell.variables = vec![VariableDef { name: "ms".to_owned(), ty: SocketType::Int, default: None, exposed: true }];
+        spell
+    };
+    let mut report = serde_json::Map::new();
+    for (name, order) in [("setFirst", vec!["start", "set", "wait"]), ("neverSet", vec!["start", "wait"]), ("setAfter", vec!["start", "wait", "set"])] {
+        let mut rt = runtime_for(route(&order));
+        let check = validation_of(&mut rt)?;
+        let about_ms: Vec<serde_json::Value> = check["errors"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|error| error.as_str().is_some_and(|text| text.contains("variable ms")))
+            .collect();
+        report.insert(name.to_owned(), json!(about_ms));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -10107,6 +10143,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("bound-unset") => bound_unset(),
         Some("finish-then-fail-log") => finish_then_fail_log(),
         Some("live-mark-kept") => live_mark_kept(),
+        Some("set-before-read") => set_before_read(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

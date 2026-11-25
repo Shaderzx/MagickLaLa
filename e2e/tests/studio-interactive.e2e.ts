@@ -2242,3 +2242,11 @@ test('The live release keeps its Live mark while the draft changes: v1 says Live
   expect(report.newest).toMatch(/Live/);
   expect(report.newest).not.toMatch(/Restore/);
 });
+
+test('A number variable set earlier on the route can be read by a later step: On Start, Set ms, then Delay {{ms}} passes Check even though ms has no starting value, while a Delay that reads ms before any Set still says it has no value', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['set-before-read']);
+
+  expect(report.setFirst).toEqual([]);
+  expect(report.neverSet).toEqual(['Delay: ms needs a whole number of at least 0, but the variable ms has no value']);
+  expect(report.setAfter).toEqual(report.neverSet);
+});
