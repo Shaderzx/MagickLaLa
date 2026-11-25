@@ -2648,7 +2648,8 @@ fn step_numbers() -> Result<serde_json::Value, String> {
             }
             steps.push(words);
         }
-        report.insert(status.to_owned(), json!({ "badges": badges, "steps": steps, "header": texts_under(&mut rt, "inspector-trace").split(" Brewing sequence").next().unwrap_or_default().to_owned() }));
+        let log = texts_under(&mut rt, "trace-scroll");
+        report.insert(status.to_owned(), json!({ "badges": badges, "steps": steps, "log": log, "header": texts_under(&mut rt, "inspector-trace").split(" Brewing sequence").next().unwrap_or_default().to_owned() }));
     }
     Ok(serde_json::Value::Object(report))
 }
