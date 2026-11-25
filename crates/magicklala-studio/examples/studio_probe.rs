@@ -3727,6 +3727,66 @@ fn plank_clear() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn stacked_pot_clear() -> Result<serde_json::Value, String> {
+    let mut report = serde_json::Map::new();
+    let scenes = [
+        ("kitchen-brewed@960", crowded_kitchen(), (960.0_f32, 640.0_f32), false, true),
+        ("kitchen@1280", crowded_kitchen(), (1280.0, 800.0), false, false),
+        ("research-pantry@960", example("parallel_research.json")?, (960.0, 640.0), true, false),
+    ];
+    for (name, spell, size, pantry, brew) in scenes {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        if pantry {
+            click(&mut rt, "expand-nodes")?;
+        }
+        if brew {
+            click(&mut rt, "run-spell")?;
+            live_finish(&mut rt)?;
+        }
+        rt.frame(3.0);
+        rt.frame(6.0);
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let s = plan.scale;
+        let pours = magicklala_canvas::cauldron::pour_paths(&rt.state.canvas, &plan);
+        let landings: Vec<f32> = pours.iter().filter_map(|(_, points)| points.last().map(|point| point[0])).collect();
+        let origin = rt.presented("canvas").map(|(rect, _)| [rect[0], rect[1]]).ok_or("no canvas")?;
+        let crowded = plan.lanes.is_some() && pours.len() >= 8;
+        let bubbles_on_pours: Vec<String> = (0..8)
+            .filter_map(|index| layout_rect(&rt, &format!("pot-bubble-{index}")).map(|rect| (index, rect)))
+            .filter(|(_, rect)| {
+                let centre = rect[0] + rect[2] * 0.5 - origin[0];
+                landings.iter().any(|x| (centre - x).abs() < 16.0 * s)
+            })
+            .map(|(index, _)| format!("bubble {index}"))
+            .collect();
+        let mut tightest = f32::MAX;
+        for card in plan.with_role(magicklala_canvas::BrewRole::Ingredient) {
+            let bottom = card.rect[1] + card.rect[3];
+            for (_, points) in &pours {
+                for point in
+                    points.iter().filter(|point| point[0] > card.rect[0] + 2.0 && point[0] < card.rect[0] + card.rect[2] - 2.0 && point[1] > bottom - 0.5)
+                {
+                    tightest = tightest.min(point[1] - bottom);
+                }
+            }
+        }
+        report.insert(
+            name.to_owned(),
+            json!({
+                "stacked": plan.lanes.is_some(),
+                "crowded": crowded,
+                "ladle": magicklala_canvas::cauldron::ladle_stir(&rt.state.canvas, &plan).is_some(),
+                "froth": magicklala_canvas::cauldron::rim_froth(&rt.state.canvas, &plan),
+                "bubblesOnPours": bubbles_on_pours,
+                "floorGap": if tightest == f32::MAX { serde_json::Value::Null } else { json!((tightest / s * 10.0).round() / 10.0) },
+            }),
+        );
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -10408,6 +10468,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("two-failures-strip") => two_failures_strip(),
         Some("small-rack-rows") => small_rack_rows(),
         Some("plank-clear") => plank_clear(),
+        Some("stacked-pot-clear") => stacked_pot_clear(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

@@ -2303,3 +2303,16 @@ test('Shelf planks stay clear of everything on the tags: on racks of three and e
     expect({ scene, clashes: rack.clashes }).toEqual({ scene, clashes: [] });
   }
 });
+
+test('A crowded stacked pot keeps its rim clear: with eight or more pours on lanes no ladle wedges between the streams and no froth sits over them, no rising bubble starts where a stream lands, and the stream bundle keeps at least 10 points of air under the cards it passes', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['stacked-pot-clear']);
+
+  for (const [scene, pot] of Object.entries<any>(report)) {
+    if (pot.crowded) {
+      expect({ scene, ladle: pot.ladle, froth: pot.froth }).toEqual({ scene, ladle: false, froth: false });
+    }
+    expect({ scene, bubblesOnPours: pot.bubblesOnPours }).toEqual({ scene, bubblesOnPours: [] });
+    if (pot.stacked && pot.floorGap !== null) expect(pot.floorGap, scene).toBeGreaterThanOrEqual(10);
+  }
+  expect(Object.values<any>(report).some((pot) => pot.crowded)).toBe(true);
+});
