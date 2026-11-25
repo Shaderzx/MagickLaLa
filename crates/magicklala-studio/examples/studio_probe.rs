@@ -3962,6 +3962,63 @@ fn plug_target_size() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn wide_letters() -> Result<serde_json::Value, String> {
+    let routes = ["WWWWWWWWWWWWWWWWWWWWWW", "MMMMMMMMMMMMMMMMMMMMMM", "mmmmmmmmmmmmmmmmmmmmmm"];
+    let mut report = serde_json::Map::new();
+    for (name, size, pantry) in [("pantry@960", (960.0_f32, 640.0_f32), true), ("plain@960", (960.0, 640.0), false), ("plain@1280", (1280.0, 800.0), false)] {
+        let mut spell = SpellGraph::new("Wide Letters");
+        spell.nodes = vec![
+            studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+            studio_node("switch", "flow/switch", 280.0, json!({ "cases": routes })),
+        ];
+        spell.wires = vec![studio_wire("w0", ("trigger", "out"), ("switch", "in")), studio_wire("wv", ("trigger", "content"), ("switch", "value"))];
+        for (index, route) in routes.iter().enumerate() {
+            let id = format!("reply_{index}");
+            spell.nodes.push(studio_node(&id, "io/send_message", 560.0, serde_json::Value::Null));
+            spell.wires.push(studio_wire(&format!("r{index}"), ("switch", route), (&id, "in")));
+            spell.wires.push(studio_wire(&format!("c{index}"), ("trigger", "content"), (&id, "content")));
+        }
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        if pantry && rt.find("expand-nodes").is_some() {
+            click(&mut rt, "expand-nodes")?;
+        }
+        rt.frame(3.0);
+        rt.frame(6.0);
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let tags: Vec<(String, [f32; 4])> = plan
+            .with_role(magicklala_canvas::BrewRole::Bottle)
+            .filter_map(|card| rt.presented(&format!("node-{}-header", card.id.0)).map(|(rect, _)| (card.id.0.clone(), rect)))
+            .collect();
+        let mut overlaps = Vec::new();
+        for (index, (id, rect)) in tags.iter().enumerate() {
+            for (other, other_rect) in &tags[index + 1..] {
+                if rects_overlap(*rect, *other_rect) {
+                    overlaps.push(format!("{id}~{other}"));
+                }
+            }
+        }
+        let mut measure = studio_text_system();
+        let mut cut = Vec::new();
+        for card in plan.with_role(magicklala_canvas::BrewRole::Bottle) {
+            let title = rt.state.canvas.display_title(&card.id);
+            if let Some((line, rect)) =
+                text_lines_under(&rt, &format!("bottle-tag-{}", card.id.0)).into_iter().find(|(line, _)| line.replace('\u{a0}', " ").contains("Send"))
+            {
+                let font = 12.5_f32.max(10.5 / plan.scale);
+                let (natural, line_h) = measure.measure(&line, rune::TextStyle::new(font, 750.0), 1.0);
+                let rows = (rect[3] / (line_h * plan.scale)).round().max(1.0);
+                if natural * plan.scale > rect[2] * rows + 2.0 {
+                    cut.push(title);
+                }
+            }
+        }
+        report.insert(name.to_owned(), json!({ "overlaps": overlaps, "cut": cut }));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -10678,6 +10735,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("solo-tag-whole") => solo_tag_whole(),
         Some("recipe-plug") => recipe_plug(),
         Some("plug-target-size") => plug_target_size(),
+        Some("wide-letters") => wide_letters(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

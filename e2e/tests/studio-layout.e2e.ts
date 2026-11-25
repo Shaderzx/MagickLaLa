@@ -681,3 +681,12 @@ test('Plug in and Unplug are real buttons: on the Recipe rows of a step missing 
     expect(sizes.missingPill, width).toBe(false);
   }
 });
+
+test('Wide letters get the room they need: three Send bottles on WWWW, MMMM and mmmm routes keep their whole names on their tags and never overlap, at 960 with the Pantry open and at 960 and 1280 without it', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['wide-letters']);
+
+  expect(Object.keys(report).length).toBe(3);
+  for (const [scene, shelf] of Object.entries<any>(report)) {
+    expect({ scene, cut: shelf.cut, overlaps: shelf.overlaps }).toEqual({ scene, cut: [], overlaps: [] });
+  }
+});
