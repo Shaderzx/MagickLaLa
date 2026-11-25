@@ -21,6 +21,10 @@ const STIRS: [f32; 5] = [0.0, -0.42, 0.3, -0.18, 0.5];
 
 static SPLASH: [Beat; 3] = [Beat::new(0.0).scale(0.35).opacity(0.0), Beat::new(0.14).scale(0.95).opacity(1.0), Beat::new(0.8).scale(1.7).opacity(0.0)];
 
+pub fn rim_line(plan: &BrewPlan) -> f32 {
+    rim_point(plan, 0.5)[1]
+}
+
 fn rim_point(plan: &BrewPlan, share: f32) -> [f32; 2] {
     let pot = plan.pot;
     [pot[0] + pot[2] * (0.30 + 0.40 * share), pot[1] + pot[3] * 0.44]
@@ -527,8 +531,20 @@ fn rim_crowded(state: &CanvasState, plan: &BrewPlan) -> bool {
     plan.lanes.is_some() && plan.with_role(BrewRole::Ingredient).filter(|placed| state.card(&placed.id).is_some()).count() >= 8
 }
 
-pub fn rim_froth(state: &CanvasState, plan: &BrewPlan) -> bool {
-    matches!(crate::view::cauldron_mood(state), CauldronMood::Simmering | CauldronMood::Brewed) && !rim_crowded(state, plan)
+pub fn rim_froth(state: &CanvasState, plan: &BrewPlan) -> Vec<[f32; 3]> {
+    if !matches!(crate::view::cauldron_mood(state), CauldronMood::Simmering | CauldronMood::Brewed) || rim_crowded(state, plan) {
+        return Vec::new();
+    }
+    let streams = pour_paths(state, plan);
+    crate::hearth::froth_bubbles(plan.pot[2], plan.pot[3])
+        .into_iter()
+        .filter(|[bx, by, br]| {
+            !streams
+                .iter()
+                .flat_map(|(_, points)| points.iter())
+                .any(|point| (point[0] - plan.pot[0] - bx).hypot(point[1] - plan.pot[1] - by) < br + 3.0 * plan.scale)
+        })
+        .collect()
 }
 
 pub fn ladle_line(state: &CanvasState, plan: &BrewPlan) -> Option<([f32; 2], [f32; 2])> {
@@ -872,7 +888,7 @@ pub(crate) fn route_label(state: &CanvasState, bottle: &NodeId) -> Option<String
         .filter(|socket| socket != "out")
 }
 
-fn bubbles(mood: CauldronMood, plan: &BrewPlan, p: &HearthPalette, tint: Option<Color>, landings: &[f32]) -> Vec<El> {
+fn bubbles(mood: CauldronMood, plan: &BrewPlan, p: &HearthPalette, tint: Option<Color>, streams: &[Vec<[f32; 2]>]) -> Vec<El> {
     let froth = tint.map_or(p.broth_foam, |t| crate::hearth::mix(t, crate::hearth::hex(0xFFFFFF), 0.5));
     let edge = tint.unwrap_or(p.broth_mid);
     if matches!(mood, CauldronMood::Empty | CauldronMood::Hexed) {
@@ -887,7 +903,11 @@ fn bubbles(mood: CauldronMood, plan: &BrewPlan, p: &HearthPalette, tint: Option<
             let share = (index as f32 + 0.5) / count as f32;
             let radius = (3.0 + (index % 3) as f32 * 1.8) * plan.scale.max(0.5);
             let x = plan.pot[0] + plan.pot[2] * (0.30 + 0.40 * share) - radius;
-            if landings.iter().any(|landing| (x + radius - landing).abs() < 16.0 * plan.scale + 4.0) {
+            let centre = x + radius;
+            let lands_here = streams.iter().filter_map(|points| points.last()).any(|landing| (centre - landing[0]).abs() < 16.0 * plan.scale + 4.0);
+            let crosses_one =
+                streams.iter().flatten().any(|point| (point[0] - centre).abs() < radius + 7.0 && point[1] < rim[1] && point[1] > rim[1] - radius * 2.0 - rise);
+            if lands_here || crosses_one {
                 return None;
             }
             let period = if lively { 1.6 + (index % 4) as f64 * 0.35 } else { 3.2 + (index % 3) as f64 * 0.6 };
@@ -1127,7 +1147,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         .size(pot[2], pot[3])
         .absolute(pot[0], pot[1])
         .child(
-            canvas(hero_cauldron_shape(mood, state.light, pot[2], pot[3], potion_tint(state, &plan), ladle_stir(state, &plan), rim_froth(state, &plan)))
+            canvas(hero_cauldron_shape(mood, state.light, pot[2], pot[3], potion_tint(state, &plan), ladle_stir(state, &plan), &rim_froth(state, &plan)))
                 .key("hero-cauldron")
                 .size(pot[2], pot[3]),
         )
@@ -1172,8 +1192,8 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
     for drip in drips(state, &plan, mood, &p) {
         board = board.child(drip);
     }
-    let landings: Vec<f32> = pour_paths(state, &plan).iter().filter_map(|(_, points)| points.last().map(|point| point[0])).collect();
-    for bubble in bubbles(mood, &plan, &p, potion_tint(state, &plan), &landings) {
+    let streams: Vec<Vec<[f32; 2]>> = pour_paths(state, &plan).into_iter().map(|(_, points)| points).collect();
+    for bubble in bubbles(mood, &plan, &p, potion_tint(state, &plan), &streams) {
         board = board.child(bubble);
     }
     let lifted = match &state.drag {

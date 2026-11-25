@@ -379,6 +379,14 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     let wraps = narrow && state.display_title(&card.id).chars().count() as f32 * 7.4 * title_size / 13.0 > title_room;
     let title_ink = if dimmed { untaken_title } else { p.ink };
     let chip_font = legible(11.0);
+    let stacked_cards: Vec<&crate::brew::BrewCard> = plan.cards.iter().filter(|placed| placed.role == crate::brew::BrewRole::Ingredient).collect();
+    let rows_too_tight_for_chips = stacked_cards.iter().any(|upper| {
+        stacked_cards.iter().any(|lower| {
+            let gap = lower.rect[1] - (upper.rect[1] + upper.rect[3]);
+            let side_by_side = lower.rect[0] < upper.rect[0] + upper.rect[2] && upper.rect[0] < lower.rect[0] + lower.rect[2];
+            side_by_side && gap >= 0.0 && gap < 13.0 * plan.scale
+        })
+    });
     let top_row = col().w_full().min_w(0.0).child(if crammed {
         twin_title(&state.display_title(&card.id), TextStyle::new(title_size, 750.0), title_ink, title_room_est)
     } else {
@@ -493,7 +501,8 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     let title_right = step_pad + state.display_title(&card.id).chars().count() as f32 * 0.56 * title_size;
     let chip_left = dims[0] - icon_side - (chip_font + 11.0);
     let chip_on_name = (dense || crammed) && card.status == ExecutionStatus::Succeeded && chip_bottom > title_top && (mirrored || title_right > chip_left);
-    if let Some(pill) = status_pill.filter(|_| !chip_on_name) {
+    let chip_on_card_above = rows_too_tight_for_chips && card.status == ExecutionStatus::Succeeded;
+    if let Some(pill) = status_pill.filter(|_| !chip_on_name && !chip_on_card_above) {
         let lane = row().w(dims[0]).pl(if mirrored { icon_side } else { clear }).pr(if mirrored { clear } else { icon_side }).absolute(0.0, -12.0);
         let lane = if mirrored { lane.justify_start() } else { lane.justify_end() };
         let room = dims[0] - clear - icon_side;

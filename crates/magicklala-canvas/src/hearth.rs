@@ -816,7 +816,24 @@ pub fn ladle_ends(width: f32, height: f32, stir: f32) -> ([f32; 2], [f32; 2]) {
     (base, tip)
 }
 
-pub fn hero_cauldron_shape(mood: CauldronMood, light: bool, width: f32, height: f32, tint: Option<Color>, ladle: Option<f32>, froth: bool) -> Shape {
+const FROTH: [(f32, f32, f32); 8] = [
+    (-2.0, -44.0, 7.2),
+    (18.0, -50.0, 10.4),
+    (38.0, -42.0, 6.4),
+    (8.0, -70.0, 7.8),
+    (30.0, -74.0, 6.8),
+    (16.0, -96.0, 5.2),
+    (40.0, -86.0, 4.0),
+    (-4.0, -84.0, 3.6),
+];
+
+pub fn froth_bubbles(width: f32, height: f32) -> Vec<[f32; 3]> {
+    let u = (width.min(height) / 240.0).clamp(0.55, 1.35);
+    let (cx, rim_y) = (width * 0.5, height * 0.56 - 30.0 * u);
+    FROTH.iter().map(|&(bx, by, br)| [cx + bx * u, rim_y + by * u, br * u]).collect()
+}
+
+pub fn hero_cauldron_shape(mood: CauldronMood, light: bool, width: f32, height: f32, tint: Option<Color>, ladle: Option<f32>, froth: &[[f32; 3]]) -> Shape {
     let p = HearthPalette::for_theme(light);
     let (deep, mid, foam, spark) = tinted_broth(mood, &p, tint);
     let cx = width * 0.5;
@@ -1005,22 +1022,9 @@ pub fn hero_cauldron_shape(mood: CauldronMood, light: bool, width: f32, height: 
         s = stroke_ellipse(s, cx + 16.0 * u, rim_y + 2.0 * u, 9.0 * u, 2.8 * u, 1.4 * u, with_alpha(spark, 0.55));
     }
 
-    let bubbles: &[(f32, f32, f32)] = match mood {
-        _ if !froth => &[],
-        CauldronMood::Empty | CauldronMood::Ready | CauldronMood::Hexed => &[],
-        CauldronMood::Simmering | CauldronMood::Brewed => &[
-            (-2.0, -44.0, 7.2),
-            (18.0, -50.0, 10.4),
-            (38.0, -42.0, 6.4),
-            (8.0, -70.0, 7.8),
-            (30.0, -74.0, 6.8),
-            (16.0, -96.0, 5.2),
-            (40.0, -86.0, 4.0),
-            (-4.0, -84.0, 3.6),
-        ],
-    };
-    for &(bx, by, br) in bubbles {
-        s = fill_bubble(s, cx + bx * u, rim_y + by * u, br * u, with_alpha(foam, 0.74), deep, spark);
+    let lively = matches!(mood, CauldronMood::Simmering | CauldronMood::Brewed);
+    for &[bx, by, br] in froth.iter().filter(|_| lively) {
+        s = fill_bubble(s, bx, by, br, with_alpha(foam, 0.74), deep, spark);
     }
 
     let stars: &[(f32, f32, f32, bool)] = match mood {
