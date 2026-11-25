@@ -747,3 +747,15 @@ test('Error actions fit the error: a step missing an input offers Grimoire and i
   expect(report.wiring).toEqual({ grimoire: true, ringOnSelected: true, ringOnOthers: false });
   expect(report.service).toEqual({ errorShown: true, grimoire: false });
 });
+
+test('A stand-in wire is never silent: setting Search Memory aside routes its source into Generate Text, the Recipe chip on each rerouted input says stand-in, and the undo banner names the input and its new source', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['stand-in']);
+
+  expect(report.bridged.length).toBeGreaterThan(0);
+  for (const socket of report.bridged) {
+    expect(report.chips[socket], socket).toMatch(/stand-in/);
+    expect(report.banner, socket).toContain(socket);
+  }
+  expect(report.banner).toMatch(/Set aside Search Memory/);
+  expect(report.banner).toMatch(/On Message/);
+});

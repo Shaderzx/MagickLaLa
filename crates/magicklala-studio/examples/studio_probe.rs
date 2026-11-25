@@ -4323,6 +4323,37 @@ fn error_actions() -> Result<serde_json::Value, String> {
     });
     Ok(json!({ "wiring": wiring_report, "service": service_report }))
 }
+fn stand_in() -> Result<serde_json::Value, String> {
+    let mut rt = runtime_for(StudioApp::from_registry().spell.clone());
+    let fed_before: Vec<String> = rt
+        .state
+        .spell
+        .wires
+        .iter()
+        .filter(|wire| wire.to_node.0 == "llm")
+        .map(|wire| format!("{}.{}>{}", wire.from_node.0, wire.from_socket, wire.to_socket))
+        .collect();
+    rt.update(|app, _| {
+        app.toss(magicklala_canvas::Toss::Aside(NodeId::from("recall")));
+        app.sync_edits();
+        app.canvas.select(Some(NodeId::from("llm")));
+        app.right_tab = RightTab::Inspector;
+    });
+    rt.frame(1.0);
+    let bridged: Vec<String> = rt
+        .state
+        .canvas
+        .wires
+        .iter()
+        .filter(|wire| {
+            wire.to_node.0 == "llm" && !wire.ty.is_flow() && !fed_before.contains(&format!("{}.{}>{}", wire.from_node.0, wire.from_socket, wire.to_socket))
+        })
+        .map(|wire| wire.to_socket.clone())
+        .collect();
+    let chips: serde_json::Map<String, serde_json::Value> =
+        bridged.iter().map(|socket| (socket.clone(), json!(texts_under(&mut rt, &format!("unplug-{socket}"))))).collect();
+    Ok(json!({ "bridged": bridged, "chips": chips, "banner": rt.state.undo_banner.clone() }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11085,6 +11116,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("twin-tags") => twin_tags(),
         Some("hex-chips-clear") => hex_chips_clear(),
         Some("error-actions") => error_actions(),
+        Some("stand-in") => stand_in(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),
