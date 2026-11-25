@@ -1550,12 +1550,12 @@ test('Hands on the workbench: Escape clears a pick and closes a menu, Delete rem
   expect(report.bottle).toEqual({ caption: ['Duplicate'], offered: true, aside: true });
   expect(report.menuCoversPot).toEqual([]);
 });
-test('Crowded shelves stay untangled and readable: valid potions with four, eight, or twelve steps and fourteen bottles, at 1280 and at 960 with the Pantry open, pour through one shared outlet that splits in clear gaps, no ribbon crosses another or runs through a card, and every card label stays at least 12px tall', { timeout: 900_000 }, async () => {
+test('Crowded shelves stay untangled and readable: valid potions with four, eight, or twelve steps and fourteen bottles, at 1280 and at 960 with the Pantry open, pour through one shared outlet that splits in clear gaps, no ribbon crosses another or runs through a card, and every card label stays at least 12px tall inside its card', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['crowded-bottles']);
 
   expect(report.map((shelf: { case: string }) => shelf.case)).toEqual(['4@1280', '4@960', '8@1280', '8@960', 'kitchen@1280', 'kitchen@960']);
   for (const shelf of report) {
-    expect({ case: shelf.case, check: shelf.check, crossings: shelf.crossings, through: shelf.through, outlets: shelf.outlets }).toEqual({ case: shelf.case, check: 'valid', crossings: [], through: [], outlets: 1 });
+    expect({ case: shelf.case, check: shelf.check, crossings: shelf.crossings, through: shelf.through, outlets: shelf.outlets, spills: shelf.spills }).toEqual({ case: shelf.case, check: 'valid', crossings: [], through: [], outlets: 1, spills: [] });
     expect(shelf.smallestLabel).toBeGreaterThanOrEqual(12);
   }
 });

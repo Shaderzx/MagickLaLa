@@ -5581,11 +5581,12 @@ fn crowded_bottles(args: &[String]) -> Result<serde_json::Value, String> {
                     }
                 }
             }
+            let shelf_left = bottles.iter().map(|card| card.rect[0]).fold(f32::MAX, f32::min);
             let tap_row = magicklala_canvas::cauldron::ribbon_paths(&plan)
                 .iter()
                 .filter_map(|ribbon| {
                     let tap = ribbon.first().copied()?;
-                    ribbon.iter().find(|point| (point[1] - tap[1]).abs() > 12.0 * s).map(|point| (point[0] / (3.0 * s)).round() as i64)
+                    ribbon.iter().find(|point| point[0] < shelf_left - 2.0 * s && (point[1] - tap[1]).abs() > 3.0 * s).map(|point| (point[0] / (3.0 * s)).round() as i64)
                 })
                 .collect::<std::collections::BTreeSet<_>>()
                 .len();
@@ -5594,7 +5595,22 @@ fn crowded_bottles(args: &[String]) -> Result<serde_json::Value, String> {
                 .iter()
                 .filter_map(|card| text_lines_under(&rt, &format!("node-{}", card.id.0)).first().map(|(_, rect)| rect[3]))
                 .fold(f32::MAX, f32::min);
-            report.push(json!({ "case": format!("{count}@{}", size.0), "check": check, "crossings": crossings, "through": through, "outlets": tap_row, "smallestLabel": smallest_label.round() }));
+            let mut spills = Vec::new();
+            for card in &plan.cards {
+                let Some(frame) = layout_rect(&rt, &format!("node-{}-header", card.id.0)) else { continue };
+                let lines = text_lines_under(&rt, &format!("node-{}", card.id.0));
+                let words: Vec<&(String, [f32; 4])> = lines.iter().filter(|(line, _)| line.parse::<usize>().is_err()).collect();
+                let badges: Vec<&(String, [f32; 4])> = lines.iter().filter(|(line, _)| line.parse::<usize>().is_ok()).collect();
+                for (line, rect) in &words {
+                    if rect[0] < frame[0] - 0.5 || rect[0] + rect[2] > frame[0] + frame[2] + 0.5 {
+                        spills.push(format!("{}: {line} leaves its card", card.id.0));
+                    }
+                    if badges.iter().any(|(_, badge)| rects_overlap(*badge, *rect)) {
+                        spills.push(format!("{}: badge covers {line}", card.id.0));
+                    }
+                }
+            }
+            report.push(json!({ "case": format!("{count}@{}", size.0), "check": check, "crossings": crossings, "through": through, "outlets": tap_row, "smallestLabel": smallest_label.round(), "spills": spills }));
             if let Some(dir) = args.get(1) {
                 let app = std::mem::replace(&mut rt.state, StudioApp::from_registry());
                 render_headless_snapshot_state(&PathBuf::from(dir).join(format!("bottles{count}_{}.png", size.0)), app).map_err(|error| error.to_string())?;
