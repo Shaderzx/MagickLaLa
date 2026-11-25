@@ -8,6 +8,10 @@ pub const VIAL_SIZE: [f32; 2] = [196.0, 58.0];
 pub const POT_SIZE: [f32; 2] = [300.0, 290.0];
 pub const SINGLE_BOTTLE_SIZE: [f32; 2] = [148.0, 196.0];
 pub const MULTI_BOTTLE_SIZE: [f32; 2] = [150.0, 148.0];
+pub const RACK_BOTTLE_SIZE: [f32; 2] = [112.0, 104.0];
+pub const RACK_FROM: usize = 4;
+pub const RACK_PIPE_ROOM: f32 = 30.0;
+const RACK_GAP_X: f32 = 14.0;
 pub const POT_RIM_TOP: f32 = 0.34;
 pub const POT_STEAM_TOP: f32 = 0.08;
 const ROW_GAP: f32 = 22.0;
@@ -215,6 +219,34 @@ fn feeds_only_one_bottle(state: &CanvasState, id: &NodeId, bottle_count: usize) 
     (one_target && target_is_bottle && outgoing.iter().all(|wire| !wire.ty.is_flow())).then_some(first)
 }
 
+pub fn bottle_size_for(count: usize) -> [f32; 2] {
+    if count >= RACK_FROM {
+        RACK_BOTTLE_SIZE
+    } else if count > 1 {
+        MULTI_BOTTLE_SIZE
+    } else {
+        SINGLE_BOTTLE_SIZE
+    }
+}
+
+fn rack_per_row(count: usize) -> usize {
+    ((count as f32).sqrt().ceil() as usize).max(2)
+}
+
+fn rack_block(count: usize, per_row: usize) -> [f32; 2] {
+    let cols = count.min(per_row).max(1);
+    let rows = count.div_ceil(per_row.max(1)).max(1);
+    [
+        cols as f32 * RACK_BOTTLE_SIZE[0] + (cols - 1) as f32 * RACK_GAP_X,
+        RACK_PIPE_ROOM + rows as f32 * RACK_BOTTLE_SIZE[1] + (rows - 1) as f32 * RACK_PIPE_ROOM,
+    ]
+}
+
+fn rack_spot(index: usize, per_row: usize) -> [f32; 2] {
+    let (row, col) = (index / per_row.max(1), index % per_row.max(1));
+    [col as f32 * (RACK_BOTTLE_SIZE[0] + RACK_GAP_X), RACK_PIPE_ROOM + row as f32 * (RACK_BOTTLE_SIZE[1] + RACK_PIPE_ROOM)]
+}
+
 fn bottle_gap_x(bottles: usize, gap: f32) -> f32 {
     if bottles >= 4 { gap.max(56.0) } else { gap }
 }
@@ -289,16 +321,45 @@ fn with_visible_pot(state: &CanvasState, size: (f32, f32), m: Metrics, plan: Pla
     made
 }
 
+const FLOOR_CHAR_PX: f32 = 6.7;
+const FLOOR_CARD_EXTRAS_PX: f32 = 50.0;
+
+fn widest_title_px(state: &CanvasState) -> f32 {
+    let brewing = brewing_nodes(state);
+    let ends = potion_ends(state);
+    state
+        .nodes
+        .iter()
+        .filter(|card| brewing.contains(&card.id) && !ends.contains(&card.id))
+        .map(|card| state.display_title(&card.id).chars().count() as f32 * FLOOR_CHAR_PX + FLOOR_CARD_EXTRAS_PX)
+        .fold(0.0, f32::max)
+}
+
+fn with_whole_titles(state: &CanvasState, size: (f32, f32), m: Metrics, plan: Planner) -> (f32, BrewPlan) {
+    let need = widest_title_px(state);
+    let mut metrics = m;
+    let mut made = with_visible_pot(state, size, metrics, plan);
+    for _ in 0..4 {
+        let shown = metrics.vial[0] * made.0;
+        if shown >= need - 0.5 || metrics.vial[0] >= m.vial[0] * 2.2 {
+            break;
+        }
+        metrics.vial[0] = (metrics.vial[0] * (need / shown.max(1.0)) * 1.03).min(m.vial[0] * 2.2);
+        made = with_visible_pot(state, size, metrics, plan);
+    }
+    made
+}
+
 impl Arrangement {
     fn build(self, state: &CanvasState, size: (f32, f32)) -> (f32, BrewPlan) {
         let small_pot = [204.0, 198.0];
         match self {
-            Arrangement::CrowdedRing => with_visible_pot(state, size, CROWDED, plan_with),
-            Arrangement::CrowdedFlank => with_visible_pot(state, size, CROWDED, plan_flanked),
-            Arrangement::TightFlank => with_visible_pot(state, size, TIGHT, plan_flanked),
-            Arrangement::Stacked => with_visible_pot(state, size, Metrics { pot: small_pot, col_gap: 24.0, ..CROWDED }, plan_stacked),
-            Arrangement::TightRing => with_visible_pot(state, size, TIGHT, plan_with),
-            Arrangement::TightStacked => with_visible_pot(state, size, Metrics { pot: small_pot, ..TIGHT }, plan_stacked),
+            Arrangement::CrowdedRing => with_whole_titles(state, size, CROWDED, plan_with),
+            Arrangement::CrowdedFlank => with_whole_titles(state, size, CROWDED, plan_flanked),
+            Arrangement::TightFlank => with_whole_titles(state, size, TIGHT, plan_flanked),
+            Arrangement::Stacked => with_whole_titles(state, size, Metrics { pot: small_pot, col_gap: 24.0, ..CROWDED }, plan_stacked),
+            Arrangement::TightRing => with_whole_titles(state, size, TIGHT, plan_with),
+            Arrangement::TightStacked => with_whole_titles(state, size, Metrics { pot: small_pot, ..TIGHT }, plan_stacked),
         }
     }
 }
@@ -360,9 +421,12 @@ fn plan_flanked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
     let usable_h = (size.1 - TOP_ROOM - BOTTOM_ROOM).max(120.0);
     let left_count = ingredients.len().div_ceil(2);
     let side_h = stack_height(left_count, m.vial[1], m.row_gap);
-    let bottle_size = if bottles.len() > 1 { MULTI_BOTTLE_SIZE } else { SINGLE_BOTTLE_SIZE };
+    let bottle_size = bottle_size_for(bottles.len());
+    let rack = bottles.len() >= RACK_FROM;
+    let rack_wh = rack_block(bottles.len(), rack_per_row(bottles.len()));
     let bottle_count = bottles.len().max(1);
-    let bottles_w = bottle_count as f32 * bottle_size[0] + (bottle_count - 1) as f32 * m.col_gap;
+    let bottles_w = if rack { rack_wh[0] } else { bottle_count as f32 * bottle_size[0] + (bottle_count - 1) as f32 * m.col_gap };
+    let bottles_tall = if rack { rack_wh[1] } else { bottle_size[1] };
     let rim_drop = m.pot[1] * 0.44;
     let tap_drop = m.pot[1] * 0.56 + 30.0;
     let neck_drop = if bottles.len() > 1 { 24.0 } else { 29.0 };
@@ -373,7 +437,7 @@ fn plan_flanked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
     let bottles_x = shelf_x + ((m.vial[0] - bottles_w) * 0.5).max(0.0);
     let bottles_top = (side_top + side_h + 16.0).max(pot_y + tap_drop - neck_drop);
     let block_w = (shelf_x + m.vial[0]).max(bottles_x + bottles_w);
-    let block_h = (pot_y + m.pot[1] + PLAQUE_ROOM).max(bottles_top + bottle_size[1]).max(side_top + side_h);
+    let block_h = (pot_y + m.pot[1] + PLAQUE_ROOM).max(bottles_top + bottles_tall).max(side_top + side_h);
     let aside_per_row = (((block_w + m.col_gap) / (m.vial[0] + m.col_gap)).floor() as usize).max(1);
     let aside_rows = aside.len().div_ceil(aside_per_row);
     let aside_h = if aside.is_empty() { 0.0 } else { ASIDE_GAP + stack_height(aside_rows, m.vial[1], m.row_gap) };
@@ -400,14 +464,16 @@ fn plan_flanked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
         });
     }
     for (index, id) in bottles.iter().enumerate() {
-        let x = bottles_x + index as f32 * (bottle_size[0] + m.col_gap);
+        let spot = rack_spot(index, rack_per_row(bottles.len()));
+        let (x, row_top) =
+            if rack { (bottles_x + spot[0], bottles_top + spot[1]) } else { (bottles_x + index as f32 * (bottle_size[0] + m.col_gap), bottles_top) };
         cards.push(BrewCard {
             id: id.clone(),
             role: BrewRole::Bottle,
             recipe_step: Some(ingredients.len() + index + 1),
             feeds_only: None,
             mirrored: false,
-            rect: to_screen(x, bottles_top, bottle_size[0], bottle_size[1]),
+            rect: to_screen(x, row_top, bottle_size[0], bottle_size[1]),
         });
     }
     let aside_top = block_h + ASIDE_GAP;
@@ -447,7 +513,8 @@ fn plan_stacked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
     let usable_w = (size.0 - 2.0 * SIDE_ROOM).max(120.0);
     let usable_h = (size.1 - TOP_ROOM - BOTTOM_ROOM).max(120.0);
     let readable_row = (((usable_w / READABLE + m.col_gap) / (m.vial[0] + m.col_gap)).floor() as usize).max(1);
-    let bottle_size = if bottles.len() > 1 { MULTI_BOTTLE_SIZE } else { SINGLE_BOTTLE_SIZE };
+    let bottle_size = bottle_size_for(bottles.len());
+    let rack = bottles.len() >= RACK_FROM;
     let pot_block_h = m.pot[1] + PLAQUE_ROOM;
     let lane_band = 14.0 + 6.0 * ingredients.len().min(4) as f32;
     let hop_room = if bottles.len() >= 4 { 18.0 } else { 14.0 * bottles.len().saturating_sub(1) as f32 };
@@ -461,8 +528,14 @@ fn plan_stacked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
     let shape_for = |(per_row, shelf_w, shelf_h): (usize, f32, f32), rows: usize| {
         let cols = bottle_count.div_ceil(rows);
         let rows = bottle_count.div_ceil(cols);
-        let w = cols as f32 * bottle_size[0] + (cols - 1) as f32 * bottle_gap_x(bottles.len(), m.col_gap);
-        let h = stack_height(rows, bottle_size[1], m.bottle_gap) + (cols - 1) as f32 * BOTTLE_STAIR;
+        let [w, h] = if rack {
+            rack_block(bottle_count, cols)
+        } else {
+            [
+                cols as f32 * bottle_size[0] + (cols - 1) as f32 * bottle_gap_x(bottles.len(), m.col_gap),
+                stack_height(rows, bottle_size[1], m.bottle_gap) + (cols - 1) as f32 * BOTTLE_STAIR,
+            ]
+        };
         let lower_w = m.pot[0] + m.pot_to_bottles + w;
         let lower_h = pot_block_h.max(h);
         let fit = (usable_w / shelf_w.max(lower_w)).min(usable_h / (shelf_h + shelf_gap + lower_h));
@@ -506,8 +579,13 @@ fn plan_stacked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
     let bottle_cols = bottles.len().div_ceil(bottle_rows.max(1)).max(1);
     for (index, id) in bottles.iter().enumerate() {
         let col = index / bottle_rows;
-        let x = bottles_x + col as f32 * (bottle_size[0] + bottle_gap_x(bottles.len(), m.col_gap));
-        let y = bottles_top + (bottle_cols - 1 - col) as f32 * BOTTLE_STAIR + (index % bottle_rows) as f32 * (bottle_size[1] + m.bottle_gap);
+        let spot = rack_spot(index, bottle_cols);
+        let x = if rack { bottles_x + spot[0] } else { bottles_x + col as f32 * (bottle_size[0] + bottle_gap_x(bottles.len(), m.col_gap)) };
+        let y = if rack {
+            bottles_top + spot[1]
+        } else {
+            bottles_top + (bottle_cols - 1 - col) as f32 * BOTTLE_STAIR + (index % bottle_rows) as f32 * (bottle_size[1] + m.bottle_gap)
+        };
         cards.push(BrewCard {
             id: id.clone(),
             role: BrewRole::Bottle,
@@ -559,17 +637,24 @@ fn plan_with(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, BrewPla
     let (cols, rows) = if state.nodes.is_empty() { (1, 1) } else { shelf_grid(ingredients.len(), rows_fit) };
     let shelf_w = if cols == 0 { 0.0 } else { cols as f32 * m.vial[0] + (cols - 1) as f32 * m.col_gap };
     let shelf_h = stack_height(rows, m.vial[1], m.row_gap);
-    let bottle_size = if bottles.len() > 1 { MULTI_BOTTLE_SIZE } else { SINGLE_BOTTLE_SIZE };
+    let bottle_size = bottle_size_for(bottles.len());
+    let rack = bottles.len() >= RACK_FROM;
+    let per_row = rack_per_row(bottles.len());
+    let rack_wh = rack_block(bottles.len(), per_row);
     let bottle_rows_fit = (((usable_h / READABLE + m.bottle_gap) / (bottle_size[1] + m.bottle_gap)).floor() as usize).max(1);
     let bottle_cols = bottles.len().max(1).div_ceil(bottle_rows_fit);
     let bottle_rows = bottles.len().max(1).div_ceil(bottle_cols);
-    let bottles_h = stack_height(bottle_rows, bottle_size[1], m.bottle_gap);
+    let bottles_h = if rack { rack_wh[1] } else { stack_height(bottle_rows, bottle_size[1], m.bottle_gap) };
     let headroom = if state.nodes.is_empty() { (m.pot[0].max(m.pot[1]) * 0.72 - m.pot[1] * 0.5 + 12.0).max(0.0) } else { 0.0 };
     let pot_block_h = headroom + m.pot[1] + if state.nodes.is_empty() { EMPTY_POT_ROOM } else { PLAQUE_ROOM };
     let block_h = shelf_h.max(pot_block_h).max(bottles_h);
     let pot_x = if cols == 0 { 0.0 } else { shelf_w + m.shelf_to_pot };
     let bottles_x = pot_x + m.pot[0] + m.pot_to_bottles;
-    let block_w = bottles_x + bottle_cols as f32 * bottle_size[0] + (bottle_cols - 1) as f32 * bottle_gap_x(bottles.len(), m.col_gap);
+    let block_w = if rack {
+        bottles_x + rack_wh[0]
+    } else {
+        bottles_x + bottle_cols as f32 * bottle_size[0] + (bottle_cols - 1) as f32 * bottle_gap_x(bottles.len(), m.col_gap)
+    };
     let aside_per_row = ((block_w + m.col_gap) / (m.vial[0] + m.col_gap)).floor().max(1.0) as usize;
     let aside_rows = aside.len().div_ceil(aside_per_row);
     let aside_h = if aside.is_empty() { 0.0 } else { ASIDE_GAP + stack_height(aside_rows, m.vial[1], m.row_gap) };
@@ -600,8 +685,9 @@ fn plan_with(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, BrewPla
     }
     let bottles_top = (block_h - bottles_h) * 0.5;
     for (index, id) in bottles.iter().enumerate() {
-        let y = bottles_top + (index % bottle_rows) as f32 * (bottle_size[1] + m.bottle_gap);
-        let x = bottles_x + (index / bottle_rows) as f32 * (bottle_size[0] + bottle_gap_x(bottles.len(), m.col_gap));
+        let spot = rack_spot(index, per_row);
+        let y = if rack { bottles_top + spot[1] } else { bottles_top + (index % bottle_rows) as f32 * (bottle_size[1] + m.bottle_gap) };
+        let x = if rack { bottles_x + spot[0] } else { bottles_x + (index / bottle_rows) as f32 * (bottle_size[0] + bottle_gap_x(bottles.len(), m.col_gap)) };
         cards.push(BrewCard {
             id: id.clone(),
             role: BrewRole::Bottle,

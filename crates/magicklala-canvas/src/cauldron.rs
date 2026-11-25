@@ -1,7 +1,7 @@
 use magicklala_graph::NodeId;
 use rune::{Beat, Color, El, LineCap, LoopSpec, Path, Phase, Sequence, Shape, TextStyle, canvas, el, row, text};
 
-use crate::brew::{BrewCard, BrewPlan, BrewRole, MULTI_BOTTLE_SIZE, SINGLE_BOTTLE_SIZE, brew_plan};
+use crate::brew::{BrewCard, BrewPlan, BrewRole, RACK_FROM, RACK_PIPE_ROOM, bottle_size_for, brew_plan};
 use crate::hearth::{
     CauldronMood, HearthPalette, StreamStyle, brew_tint, category_tone, distillation_ribbon_shape, fill_circle, ghost_potion_bottle_shape, hero_cauldron_shape,
     pour_point, pouring_stream_shape, stream_ink, with_alpha,
@@ -227,7 +227,88 @@ fn landing(plan: &BrewPlan, placed: &BrewCard, index: usize, spread: f32) -> ([f
     (rim_point(plan, share), (1.0 - depth) * 36.0 * plan.scale)
 }
 
+fn rack_trunk(plan: &BrewPlan, bottles: &[&BrewCard]) -> Option<f32> {
+    let tap = spout_point(plan);
+    let left = bottles.iter().map(|card| card.rect[0]).fold(f32::MAX, f32::min);
+    (left >= tap[0] + 16.0 * plan.scale).then_some((tap[0] + left) * 0.5)
+}
+
+fn pipe_height(plan: &BrewPlan, card: &BrewCard) -> f32 {
+    card.rect[1] - RACK_PIPE_ROOM * 0.5 * plan.scale
+}
+
+fn rack_ribbons(plan: &BrewPlan, bottles: &[&BrewCard]) -> Option<Vec<Vec<[f32; 2]>>> {
+    let s = plan.scale.max(0.2);
+    let tap = spout_point(plan);
+    let trunk_x = rack_trunk(plan, bottles)?;
+    let left = bottles.iter().map(|card| card.rect[0]).fold(f32::MAX, f32::min);
+    let radius = 18.0 * s;
+    let trunk_room = (trunk_x - tap[0]).min(left - trunk_x - 4.0 * s).max(2.0 * s);
+    let drip = 6.0 * s;
+    let routes = bottles
+        .iter()
+        .map(|card| {
+            let neck = bottle_neck(card, bottles.len());
+            let pipe = pipe_height(plan, card);
+            if (pipe - tap[1]).abs() < radius.min(trunk_room) * 2.0 {
+                let reach = (left - trunk_x - 4.0 * s).max(8.0 * s);
+                let mut bend = vec![tap];
+                bend.extend(s_bend([trunk_x - radius.min(trunk_room), tap[1]], [trunk_x + reach, pipe]));
+                bend.extend([[neck[0], pipe], neck]);
+                let mut radii = vec![0.0; bend.len().saturating_sub(3)];
+                radii.push(drip);
+                rounded_route(&bend, &radii, 4.0 * s)
+            } else {
+                rounded_route(&[tap, [trunk_x, tap[1]], [trunk_x, pipe], [neck[0], pipe], neck], &[radius.min(trunk_room), radius, drip], 4.0 * s)
+            }
+        })
+        .collect();
+    Some(routes)
+}
+
+pub fn rack_glass(plan: &BrewPlan) -> Vec<Vec<[f32; 2]>> {
+    let bottles: Vec<&BrewCard> = plan.with_role(BrewRole::Bottle).collect();
+    if bottles.len() < RACK_FROM {
+        return Vec::new();
+    }
+    let Some(trunk_x) = rack_trunk(plan, &bottles) else { return Vec::new() };
+    let tap = spout_point(plan);
+    let mut rows: Vec<(f32, f32)> = Vec::new();
+    for card in &bottles {
+        let pipe = pipe_height(plan, card);
+        let neck = bottle_neck(card, bottles.len());
+        match rows.iter_mut().find(|(y, _)| (*y - pipe).abs() < 1.0) {
+            Some(row) => row.1 = row.1.max(neck[0]),
+            None => rows.push((pipe, neck[0])),
+        }
+    }
+    let top = rows.iter().map(|row| row.0).fold(tap[1], f32::min);
+    let bottom = rows.iter().map(|row| row.0).fold(tap[1], f32::max);
+    let mut glass = vec![vec![tap, [trunk_x, tap[1]]], vec![[trunk_x, top], [trunk_x, bottom]]];
+    glass.extend(rows.iter().map(|(y, end)| vec![[trunk_x, *y], [*end + 7.0 * plan.scale, *y]]));
+    glass
+}
+
+pub fn rack_planks(plan: &BrewPlan) -> Option<([f32; 4], Vec<f32>)> {
+    let bottles: Vec<&BrewCard> = plan.with_role(BrewRole::Bottle).collect();
+    if bottles.len() < RACK_FROM {
+        return None;
+    }
+    let s = plan.scale;
+    let left = bottles.iter().map(|card| card.rect[0]).fold(f32::MAX, f32::min) - 10.0 * s;
+    let right = bottles.iter().map(|card| card.rect[0] + card.rect[2]).fold(f32::MIN, f32::max) + 10.0 * s;
+    let top = bottles.iter().map(|card| card.rect[1]).fold(f32::MAX, f32::min);
+    let bottom = bottles.iter().map(|card| card.rect[1] + card.rect[3]).fold(f32::MIN, f32::max);
+    let mut ledges: Vec<f32> = bottles.iter().map(|card| card.rect[1] + 68.0 * s - top).collect();
+    ledges.sort_by(f32::total_cmp);
+    ledges.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+    Some(([left, top, right - left, bottom - top], ledges))
+}
+
 fn grid_ribbons(plan: &BrewPlan, bottles: &[&BrewCard]) -> Option<Vec<Vec<[f32; 2]>>> {
+    if bottles.len() >= RACK_FROM {
+        return rack_ribbons(plan, bottles);
+    }
     if bottles.len() < 4 {
         return None;
     }
@@ -270,7 +351,7 @@ fn grid_ribbons(plan: &BrewPlan, bottles: &[&BrewCard]) -> Option<Vec<Vec<[f32; 
     let radius = 22.0 * s;
     let routes = (0..bottles.len())
         .map(|index| {
-            let neck = bottle_neck(bottles[index], true);
+            let neck = bottle_neck(bottles[index], bottles.len());
             let column = columns.iter().position(|column| column.contains(&index)).unwrap_or(0);
             let row = columns[column].iter().position(|other| *other == index).unwrap_or(0);
             let turn = turn_y(column, row);
@@ -351,12 +432,11 @@ fn rounded_route(corners: &[[f32; 2]], radii: &[f32], spacing: f32) -> Vec<[f32;
 }
 pub fn ribbon_paths(plan: &BrewPlan) -> Vec<Vec<[f32; 2]>> {
     let bottles: Vec<&BrewCard> = plan.with_role(BrewRole::Bottle).collect();
-    let multi = bottles.len() > 1;
     let ghost = plan.ghost_bottle.map(|ghost| ribbon_route(plan, ghost_neck(ghost), None));
     if let Some(grid) = grid_ribbons(plan, &bottles) {
         return grid.into_iter().chain(ghost).collect();
     }
-    let choices: Vec<Vec<Vec<[f32; 2]>>> = bottles.iter().map(|placed| ribbon_choices(plan, bottle_neck(placed, multi), Some(&placed.id))).collect();
+    let choices: Vec<Vec<Vec<[f32; 2]>>> = bottles.iter().map(|placed| ribbon_choices(plan, bottle_neck(placed, bottles.len()), Some(&placed.id))).collect();
     untangled(plan, choices).into_iter().chain(ghost).collect()
 }
 
@@ -364,9 +444,10 @@ fn ghost_neck(ghost: [f32; 4]) -> [f32; 2] {
     [ghost[0] + ghost[2] * 0.5, ghost[1] + ghost[3] * 0.15]
 }
 
-fn bottle_neck(card: &BrewCard, multi: bool) -> [f32; 2] {
+fn bottle_neck(card: &BrewCard, count: usize) -> [f32; 2] {
     let rect = card.rect;
-    let neck_share = if multi { 17.8 / MULTI_BOTTLE_SIZE[1] } else { 28.0 / SINGLE_BOTTLE_SIZE[1] };
+    let natural = bottle_size_for(count);
+    let neck_share = if count > 1 { 17.8 / natural[1] } else { 28.0 / natural[1] };
     [rect[0] + rect[2] * 0.474, rect[1] + rect[3] * neck_share]
 }
 
@@ -693,6 +774,12 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
             _ => pouring_stream_shape(shape, vial_mouth(placed, plan), to, style),
         };
     }
+    let glass_w = 9.0 * plan.scale.max(0.4);
+    for glass in rack_glass(plan) {
+        let path = glass.iter().skip(1).fold(rune::Path::new().move_to(glass[0]), |path, point| path.line_to(*point));
+        shape = shape.stroke_path(&path, glass_w + 2.4, rune::LineCap::Round, with_alpha(p.rule_2, 0.7));
+        shape = shape.stroke_path(&path, glass_w, rune::LineCap::Round, with_alpha(p.card, 0.92));
+    }
     let ribbons = ribbon_paths(plan);
     for (placed, ribbon) in bottles.iter().zip(&ribbons) {
         let Some(card) = state.card(&placed.id) else { continue };
@@ -1015,6 +1102,20 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         let vial = ingredient_vial_card(state, card, step, origin, plan.vial, placed.role == BrewRole::Aside, placed.mirrored, &p, lens, toss, plan.clone());
         board = board.child(vial.scale(plan.scale));
     }
+    if let Some((frame, ledges)) = rack_planks(&plan) {
+        board = board.child(el().key("bottle-rack").size(frame[2], frame[3]).absolute(frame[0], frame[1]).child(
+            canvas(shelf_plank_shape([frame[2], frame[3]], &ledges, plan.scale.max(0.4), &p)).key("rack-plank").size(frame[2], frame[3]).absolute(0.0, 0.0),
+        ));
+        let kinds: Vec<&str> = bottles.iter().filter_map(|placed| state.card(&placed.id).map(|card| card.kind.as_str())).collect();
+        if let Some(kind) = kinds.first().filter(|kind| kinds.iter().all(|other| other == *kind)) {
+            let size = crate::view::legible_size(11.0, plan.scale);
+            board = board.child(
+                el().key("rack-kind")
+                    .absolute(frame[0] + 10.0 * plan.scale, frame[1] + frame[3] + 6.0 * plan.scale)
+                    .child(text(*kind).font(TextStyle::new(size * plan.scale, 500.0).mono()).color(p.mute)),
+            );
+        }
+    }
     for placed in &bottles {
         let Some(card) = state.card(&placed.id) else { continue };
         let step = if has_run {
@@ -1024,10 +1125,11 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         } else {
             placed.recipe_step
         };
-        let natural = if multi { MULTI_BOTTLE_SIZE } else { SINGLE_BOTTLE_SIZE };
+        let natural = bottle_size_for(bottles.len());
+        let one_kind = bottles.len() >= RACK_FROM && bottles.iter().all(|other| state.card(&other.id).map(|card| &card.kind) == Some(&card.kind));
         let origin = card_frame(placed.rect, natural, plan.scale, [0.0, 0.0]);
         let view = if multi {
-            branch_bottle_view(state, card, step, [0.0, 0.0, natural[0]], bottle_tint(state, &plan, &placed.id), has_run, false, plan.scale, &p, lens)
+            branch_bottle_view(state, card, step, [0.0, 0.0, natural[0]], bottle_tint(state, &plan, &placed.id), has_run, one_kind, plan.scale, &p, lens)
         } else {
             potion_stand_view(state, card, step, [0.0, 0.0, natural[0]], potion_tint(state, &plan), mood, false, plan.scale, &p, lens)
         };
