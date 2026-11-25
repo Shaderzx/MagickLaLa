@@ -2327,3 +2327,15 @@ test('A lone bottle shows its names whole: the potion name and the bottle name o
     expect({ scene, cut: tag.cut }).toEqual({ scene, cut: [] });
   }
 });
+
+test('Recipe plugs a missing input without leaving the Cauldron: a Send Message with nothing in its content offers Plug in, lists only the earlier text outputs that fit, wires the chosen one so Check passes, and Unplug takes it back out, while flow inputs get no plug button', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['recipe-plug']);
+
+  expect(report.flowButton).toBe(false);
+  expect(report.offered).toContain('trigger-content');
+  expect(report.offered.every((source: string) => source.startsWith('trigger-') && source !== 'trigger-out')).toBe(true);
+  expect(report.plugged).toEqual(['trigger.content']);
+  expect(report.checkAfterPlug).toBe('valid');
+  expect(report.unplugShown).toBe(true);
+  expect(report.afterUnplug).toEqual([]);
+});

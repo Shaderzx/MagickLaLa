@@ -3829,6 +3829,47 @@ fn solo_tag_whole() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn recipe_plug() -> Result<serde_json::Value, String> {
+    let mut spell = SpellGraph::new("Plug Me");
+    spell.nodes =
+        vec![studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null), studio_node("reply", "io/send_message", 280.0, serde_json::Value::Null)];
+    spell.wires = vec![studio_wire("w1", ("trigger", "out"), ("reply", "in"))];
+    let mut rt = runtime_for(spell);
+    rt.update(|app, _| app.canvas.select(Some(NodeId::from("reply"))));
+    rt.frame(1.0);
+    let feeds = |rt: &Runtime<StudioApp>| -> Vec<String> {
+        rt.state
+            .spell
+            .wires
+            .iter()
+            .filter(|wire| wire.to_node.0 == "reply" && wire.to_socket == "content")
+            .map(|wire| format!("{}.{}", wire.from_node.0, wire.from_socket))
+            .collect()
+    };
+    let flow_button = rt.find("plug-in").is_some();
+    click(&mut rt, "plug-content")?;
+    rt.frame(2.0);
+    let elements = rt.elements();
+    let mut offered: Vec<String> =
+        elements.iter().filter_map(|element| element.key.as_deref()).filter_map(|key| key.strip_prefix("plug-content-")).map(str::to_owned).collect();
+    offered.sort();
+    offered.dedup();
+    click(&mut rt, "plug-content-trigger-content")?;
+    rt.frame(3.0);
+    let plugged = feeds(&rt);
+    let check = validation_of(&mut rt)?;
+    let unplug_shown = rt.find("unplug-content").is_some();
+    click(&mut rt, "unplug-content")?;
+    rt.frame(4.0);
+    Ok(json!({
+        "flowButton": flow_button,
+        "offered": offered,
+        "plugged": plugged,
+        "checkAfterPlug": check["validation"],
+        "unplugShown": unplug_shown,
+        "afterUnplug": feeds(&rt),
+    }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -10518,6 +10559,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("plank-clear") => plank_clear(),
         Some("stacked-pot-clear") => stacked_pot_clear(),
         Some("solo-tag-whole") => solo_tag_whole(),
+        Some("recipe-plug") => recipe_plug(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),
