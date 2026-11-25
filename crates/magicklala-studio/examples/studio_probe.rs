@@ -3894,13 +3894,19 @@ fn named_missing() -> Result<serde_json::Value, String> {
                 (!names.is_empty()).then(|| (card.id.0.clone(), names))
             })
             .collect();
+        let mut bare = Vec::new();
         for (id, names) in flagged {
             let words = texts_under(&mut rt, &format!("node-{id}"));
             if !names.iter().any(|name| words.contains(name.as_str())) {
                 vague.push(format!("{id}: {words}"));
             }
+            let pill = texts_under(&mut rt, &format!("status-pill-{id}"));
+            let tag = if pill.is_empty() { texts_under(&mut rt, &format!("bottle-hex-{id}")) } else { pill };
+            if !["Missing", "Wrong type", "No "].iter().any(|verb| tag.contains(verb)) {
+                bare.push(format!("{id}: {tag}"));
+            }
         }
-        report.insert(format!("{}", size.0), json!({ "vague": vague }));
+        report.insert(format!("{}", size.0), json!({ "vague": vague, "bare": bare }));
     }
     Ok(serde_json::Value::Object(report))
 }

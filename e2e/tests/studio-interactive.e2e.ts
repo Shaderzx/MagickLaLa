@@ -2163,6 +2163,8 @@ test('Every red tag names what is missing: after Check on the dozen-ingredient p
 
   expect(report['1280'].vague).toEqual([]);
   expect(report['960'].vague).toEqual([]);
+  expect(report['1280'].bare).toEqual([]);
+  expect(report['960'].bare).toEqual([]);
 });
 
 test('A failed pour stub keeps clear of its neighbours: with Search Memory missing its query the red stub follows its own pour toward the rim and its cross stays at least 10 points from every other stream at both sizes', { timeout: 900_000 }, async () => {
