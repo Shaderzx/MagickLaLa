@@ -409,6 +409,19 @@ pub fn brew_plan(state: &CanvasState, size: (f32, f32)) -> BrewPlan {
         .map_or_else(|| plan_with(state, size, TIGHT).1, |(_, plan)| plan)
 }
 fn plan_flanked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, BrewPlan) {
+    let bottles = potion_ends(state).len();
+    let widths: Vec<usize> = if bottles >= RACK_FROM { (2..=bottles).collect() } else { vec![rack_per_row(bottles)] };
+    widths
+        .into_iter()
+        .map(|per_row| plan_flanked_rows(state, size, m, per_row))
+        .fold(None, |best: Option<(f32, BrewPlan)>, next| match best {
+            Some(top) if top.0 >= next.0 - 0.001 => Some(top),
+            _ => Some(next),
+        })
+        .unwrap_or_else(|| plan_flanked_rows(state, size, m, 2))
+}
+
+fn plan_flanked_rows(state: &CanvasState, size: (f32, f32), m: Metrics, per_row: usize) -> (f32, BrewPlan) {
     let order = recipe_order(state);
     let brewing = brewing_nodes(state);
     let ends = potion_ends(state);
@@ -421,7 +434,7 @@ fn plan_flanked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
     let side_h = stack_height(left_count, m.vial[1], m.row_gap);
     let bottle_size = bottle_size_for(bottles.len());
     let rack = bottles.len() >= RACK_FROM;
-    let rack_wh = rack_block(bottles.len(), rack_per_row(bottles.len()));
+    let rack_wh = rack_block(bottles.len(), per_row);
     let bottle_count = bottles.len().max(1);
     let bottles_w = if rack { rack_wh[0] } else { bottle_count as f32 * bottle_size[0] + (bottle_count - 1) as f32 * m.col_gap };
     let bottles_tall = if rack { rack_wh[1] } else { bottle_size[1] };
@@ -462,7 +475,7 @@ fn plan_flanked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
         });
     }
     for (index, id) in bottles.iter().enumerate() {
-        let spot = rack_spot(index, rack_per_row(bottles.len()));
+        let spot = rack_spot(index, per_row);
         let (x, row_top) =
             if rack { (bottles_x + spot[0], bottles_top + spot[1]) } else { (bottles_x + index as f32 * (bottle_size[0] + m.col_gap), bottles_top) };
         cards.push(BrewCard {
