@@ -1725,3 +1725,11 @@ test('Wire records survive the shelf: setting a step aside and pouring it back k
     await rm(dir, { recursive: true, force: true });
   }
 });
+test('Grimoire room: the default Support and Parallel Research potions leave a wide channel between every wired pair of cards so no wire loops back behind a card, and twin names keep their number when a title is shortened', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['grimoire-room']);
+
+  for (const [potion, room] of Object.entries<any>(report)) {
+    expect({ potion, tight: room.tight }).toEqual({ potion, tight: [] });
+    expect({ potion, twinsCut: room.twinsCut }).toEqual({ potion, twinsCut: [] });
+  }
+});

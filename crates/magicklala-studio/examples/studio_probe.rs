@@ -6862,7 +6862,47 @@ fn wire_records(db_path: &Path) -> Result<serde_json::Value, String> {
         "missing": original.iter().filter(|id| !after.contains(id)).cloned().collect::<Vec<_>>(),
     }))
 }
-fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
+fn grimoire_room() -> Result<serde_json::Value, String> {
+    let mut measure = studio_text_system();
+    let mut report = serde_json::Map::new();
+    for (name, spell) in [("support", StudioApp::from_registry().spell.clone()), ("research", example("parallel_research.json")?)] {
+        let mut rt = runtime_for(spell);
+        click(&mut rt, "mode-grimoire")?;
+        click(&mut rt, "zoom-fit")?;
+        rt.frame(1.0);
+        let card_at = |id: &NodeId| rt.state.canvas.card(id).map(|card| (card.position, card.size));
+        let tight: Vec<String> = rt
+            .state
+            .canvas
+            .wires
+            .iter()
+            .filter_map(|wire| {
+                let ((from, from_size), (to, _)) = (card_at(&wire.from_node)?, card_at(&wire.to_node)?);
+                (to[0] - (from[0] + from_size[0]) < 60.0).then(|| format!("{}>{}", wire.from_node.0, wire.to_node.0))
+            })
+            .collect();
+        let zoom = rt.state.canvas.camera.zoom;
+        let mut twins_cut = Vec::new();
+        for card in rt.state.canvas.nodes.clone() {
+            let title = rt.state.canvas.display_title(&card.id);
+            if !title.contains(" · ") {
+                continue;
+            }
+            let lines = text_lines_under(&rt, &format!("node-{}-header", card.id.0));
+            let shown = lines.iter().any(|(line, rect)| {
+                let clean = line.replace('\u{a0}', " ");
+                let (natural, _) = measure.measure(&clean, rune::TextStyle::new((13.6 * zoom).clamp(11.8, 15.5), 750.0), 1.0);
+                clean.trim_start().starts_with('·') && natural <= rect[2] + 2.0
+                    || clean == title && natural <= rect[2] + 2.0
+            });
+            if !shown {
+                twins_cut.push(title);
+            }
+        }
+        report.insert(name.to_owned(), json!({ "tight": tight, "twinsCut": twins_cut }));
+    }
+    Ok(json!(report))
+}fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),
@@ -7783,6 +7823,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("tidy-bottles") => tidy_bottles(),
         Some("starter-shelf") => starter_shelf_room(),
         Some("wire-records") => wire_records(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("grimoire-room") => grimoire_room(),
         Some("honest-edits") => honest_edits(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
