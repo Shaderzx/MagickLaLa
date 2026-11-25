@@ -1843,16 +1843,25 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         right_meta = right_meta.child(label(format!("{:?}", socket.ty), if compact { 10.5 } else { 11.0 }, 550.0, if flagged { t.hex } else { t.mute }));
         row()
             .w_full()
-            .h(socket_h)
+            .min_h(socket_h)
+            .py(2.0)
+            .gap(8.0)
             .items_center()
             .justify_between()
             .border_sides([0.0, 0.0, 1.0, 0.0], if flagged { with_alpha(t.hex, 0.42) } else { t.rule })
-            .child(row().gap(8.0).items_center().child(marker).child(label(
-                &socket.name,
-                if compact { 11.5 } else { 12.0 },
-                if socket.ty.is_flow() || flagged { 650.0 } else { 500.0 },
-                if flagged { t.hex } else { t.ink },
-            )))
+            .child(
+                row().grow(1.0).min_w(0.0).gap(8.0).items_center().child(marker).child(
+                    label(
+                        &socket.name,
+                        if compact { 11.5 } else { 12.0 },
+                        if socket.ty.is_flow() || flagged { 650.0 } else { 500.0 },
+                        if flagged { t.hex } else { t.ink },
+                    )
+                    .wrap_anywhere()
+                    .grow(1.0)
+                    .min_w(0.0),
+                ),
+            )
             .child(right_meta)
     };
     let mut sockets = col().gap(0.0);
