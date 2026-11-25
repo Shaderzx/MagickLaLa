@@ -1188,7 +1188,7 @@ fn cubic_point(p0: [f32; 2], c1: [f32; 2], c2: [f32; 2], p3: [f32; 2], t: f32) -
     [a * p0[0] + b * c1[0] + c * c2[0] + d * p3[0], a * p0[1] + b * c1[1] + c * c2[1] + d * p3[1]]
 }
 
-fn sample_cubic(p0: [f32; 2], c1: [f32; 2], c2: [f32; 2], p3: [f32; 2], steps: usize, max_t: f32) -> Vec<[f32; 2]> {
+pub(crate) fn sample_cubic(p0: [f32; 2], c1: [f32; 2], c2: [f32; 2], p3: [f32; 2], steps: usize, max_t: f32) -> Vec<[f32; 2]> {
     (0..=steps).map(|i| cubic_point(p0, c1, c2, p3, (i as f32 / steps as f32) * max_t)).collect()
 }
 
@@ -1263,7 +1263,7 @@ pub fn pour_point(from: [f32; 2], to: [f32; 2], arch_lift: f32, t: f32) -> [f32;
     cubic_point(from, c1, c2, to, t)
 }
 
-fn pour_controls(from: [f32; 2], to: [f32; 2], arch_lift: f32) -> ([f32; 2], [f32; 2]) {
+pub(crate) fn pour_controls(from: [f32; 2], to: [f32; 2], arch_lift: f32) -> ([f32; 2], [f32; 2]) {
     if to[0] < from[0] {
         let flip = |point: [f32; 2]| [2.0 * from[0] - point[0], point[1]];
         let (c1, c2) = pour_controls(from, flip(to), arch_lift);

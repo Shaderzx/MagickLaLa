@@ -3489,6 +3489,39 @@ fn named_missing() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn stub_clear() -> Result<serde_json::Value, String> {
+    let mut demo = StudioApp::from_registry().spell.clone();
+    demo.wires.retain(|wire| wire.to_socket != "query" || wire.to_node.0 != "recall");
+    let mut report = serde_json::Map::new();
+    for size in [(1280.0_f32, 800.0_f32), (960.0, 640.0)] {
+        let mut app = StudioApp::with_spell(demo.clone(), registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        let _ = validation_of(&mut rt)?;
+        rt.frame(1.0);
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let pours = magicklala_canvas::cauldron::drawn_pours(&rt.state.canvas, &plan);
+        let mut crowded = Vec::new();
+        let mut hanging = Vec::new();
+        for (id, points, hexed) in pours.iter().filter(|(_, _, hexed)| *hexed) {
+            let _ = hexed;
+            let end = points[points.len() - 1];
+            let rim = plan.pot_body(false)[1];
+            if (rim - end[1]) / plan.scale > 60.0 {
+                hanging.push(format!("{} {:.0}", id.0, (rim - end[1]) / plan.scale));
+            }
+            for (other, line, _) in pours.iter().filter(|(other, _, _)| other != id) {
+                let near = line.iter().map(|point| (point[0] - end[0]).hypot(point[1] - end[1])).fold(f32::MAX, f32::min);
+                if near < 10.0 {
+                    crowded.push(format!("{} near {} {near:.1}", id.0, other.0));
+                }
+            }
+        }
+        report.insert(format!("{}", size.0), json!({ "crowded": crowded, "hanging": hanging, "hexed": pours.iter().filter(|(_, _, hexed)| *hexed).count() }));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9776,6 +9809,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("finish-then-fail-log") => finish_then_fail_log(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
+        Some("stub-clear") => stub_clear(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),

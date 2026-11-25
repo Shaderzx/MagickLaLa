@@ -233,6 +233,33 @@ fn ribbon_course(plan: &BrewPlan, from: [f32; 2], to: [f32; 2], own: Option<&Nod
     ranked.sort_by_key(|(order, points)| (hits(points), sharp(points), overshoot(points), *order));
     ranked.into_iter().map(|(_, points)| points).collect()
 }
+fn drawn_route(plan: &BrewPlan, placed: &BrewCard, _index: usize, _spread: f32, hexed: bool, paths: &[(NodeId, Vec<[f32; 2]>)]) -> Option<Vec<[f32; 2]>> {
+    let bowed = column_clearance(plan, placed, vial_mouth(placed, plan)).is_some();
+    (plan.lanes.is_some() || bowed || hexed).then(|| paths.iter().find(|(id, _)| id == &placed.id).map(|(_, points)| points.clone())).flatten()
+}
+
+pub fn drawn_pours(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32; 2]>, bool)> {
+    let ingredients: Vec<&BrewCard> = plan.with_role(BrewRole::Ingredient).filter(|placed| state.card(&placed.id).is_some()).collect();
+    let spread = ingredients.len().max(2) as f32 - 1.0;
+    let paths = pour_paths(state, plan);
+    ingredients
+        .iter()
+        .enumerate()
+        .filter_map(|(index, placed)| {
+            let card = state.card(&placed.id)?;
+            let hexed = card.status == ExecutionStatus::Failed || card.inputs.iter().any(|socket| socket.flagged);
+            let (to, lift) = landing(plan, placed, index, spread);
+            let points = drawn_route(plan, placed, index, spread, hexed, &paths).unwrap_or_else(|| {
+                let from = vial_mouth(placed, plan);
+                let (c1, c2) = crate::hearth::pour_controls(from, to, lift);
+                crate::hearth::sample_cubic(from, c1, c2, to, 40, 1.0)
+            });
+            let points = if hexed { hexed_stub(&points, STUB_CLEARANCE * plan.scale).to_vec() } else { points };
+            Some((placed.id.clone(), points, hexed))
+        })
+        .collect()
+}
+
 pub fn pour_order(state: &CanvasState, plan: &BrewPlan) -> Vec<NodeId> {
     let mut order: Vec<NodeId> = plan.with_role(BrewRole::Ingredient).map(|card| card.id.clone()).collect();
     order.sort_by_key(|id| pour_lit(state, id));
@@ -752,10 +779,9 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
         let Some(card) = state.card(&placed.id) else { continue };
         let (to, lift) = landing(plan, placed, index, spread);
         let style = stream_for(state, card, mood, p, lift);
-        let bowed = column_clearance(plan, placed, vial_mouth(placed, plan)).is_some();
-        shape = match (plan.lanes.is_some() || bowed || style.hexed, paths.iter().find(|(id, _)| id == &placed.id)) {
-            (true, Some((_, points))) => lane_stream(shape, points, style, STUB_CLEARANCE * plan.scale, p),
-            _ => pouring_stream_shape(shape, vial_mouth(placed, plan), to, style),
+        shape = match drawn_route(plan, placed, index, spread, style.hexed, &paths) {
+            Some(points) => lane_stream(shape, &points, style, STUB_CLEARANCE * plan.scale, p),
+            None => pouring_stream_shape(shape, vial_mouth(placed, plan), to, style),
         };
     }
     let glass_w = 9.0 * plan.scale.max(0.4);
