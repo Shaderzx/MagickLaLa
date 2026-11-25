@@ -3828,6 +3828,10 @@ impl StudioApp {
         self.sync_spell();
     }
 
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
     pub fn redo(&mut self) {
         if self.is_running() {
             return;

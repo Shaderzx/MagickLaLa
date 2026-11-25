@@ -3030,6 +3030,28 @@ fn twin_switch_names() -> Result<serde_json::Value, String> {
     let titles: Vec<String> = ["send_0", "send_1", "send_late"].iter().map(|id| rt.state.canvas.display_title(&NodeId::from(*id))).collect();
     Ok(json!({ "titles": titles }))
 }
+fn redo_across() -> Result<serde_json::Value, String> {
+    let mut rt = runtime_for(StudioApp::from_registry().spell.clone());
+    rt.on_key = Some(magicklala_studio::studio_key);
+    rt.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("llm")));
+        app.select_model("openai", "gpt-4.1");
+    });
+    rt.frame(0.0);
+    rt.key(rune::KeyEvent { key: rune::Key::Command('z'), mods: rune::Mods { cmd: true, ..Default::default() } });
+    rt.frame(0.0);
+    rt.update(|app, _| {
+        app.request_open_sample("Research Agent");
+        app.confirm_switch();
+    });
+    rt.frame(1.0);
+    let ids = |app: &StudioApp| serde_json::to_value((&app.spell.nodes, &app.spell.wires)).unwrap_or_default();
+    let before = ids(&rt.state);
+    let redo_waiting = rt.state.can_redo();
+    rt.update(|app, _| app.redo());
+    rt.frame(0.0);
+    Ok(json!({ "name": rt.state.spell.name, "redoWaiting": redo_waiting, "unchanged": before == ids(&rt.state) }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9303,6 +9325,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("long-routes") => long_routes(),
         Some("menu-fan") => menu_fan(),
         Some("twin-switch-names") => twin_switch_names(),
+        Some("redo-across") => redo_across(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),

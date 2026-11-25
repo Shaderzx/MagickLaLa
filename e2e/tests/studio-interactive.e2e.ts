@@ -2052,3 +2052,9 @@ test('Bottles never share a visible name: two Sends fed by an orders route on tw
 
   expect(report.titles).toEqual(['Send · orders 1', 'Send · refunds', 'Send · orders 2']);
 });
+
+test('Redo never crosses potions: after undoing an edit in one potion and opening another, there is nothing to redo and redo leaves the newly opened recipe untouched', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['redo-across']);
+
+  expect(report).toEqual({ name: 'Research Agent', redoWaiting: false, unchanged: true });
+});
