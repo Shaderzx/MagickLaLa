@@ -3159,7 +3159,11 @@ fn check_matches_brew() -> Result<serde_json::Value, String> {
         studio_node("loop", "flow/while_loop", 260.0, json!({ "max_iterations": "{{limit}}" })),
         studio_node("tick", "var/set", 520.0, json!({ "name": "limit", "value": 1 })),
     ];
-    looped.wires = vec![link("l1", ("start", "out"), ("loop", "in")), link("l2", ("always", "matched"), ("loop", "condition")), link("l3", ("loop", "body"), ("tick", "in"))];
+    looped.wires = vec![
+        link("l1", ("start", "out"), ("loop", "in")),
+        link("l2", ("always", "matched"), ("loop", "condition")),
+        link("l3", ("loop", "body"), ("tick", "in")),
+    ];
     looped.variables = vec![VariableDef { name: "limit".to_owned(), ty: SocketType::Float, default: Some(Value::Float(1.5)), exposed: true }];
     let mut loop_rt = runtime_for(looped);
     let loop_check = validation_of(&mut loop_rt)?;

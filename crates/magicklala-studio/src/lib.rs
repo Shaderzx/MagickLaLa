@@ -2470,12 +2470,9 @@ impl StudioApp {
                 let spec = self.specs.iter().find(|spec| spec.kind == card.kind)?;
                 let open = spec.outputs.iter().find(|socket| socket.name == magicklala_graph::DYNAMIC_SOCKET)?;
                 let field = editable_field(&card.kind)?;
-                let names = self
-                    .prompted_config(&card.id, &card.kind)
-                    .get(field)
-                    .and_then(serde_json::Value::as_array)
-                    .map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect())
-                    .unwrap_or_default();
+                let configured = self.prompted_config(&card.id, &card.kind);
+                let listed = configured.get(field).cloned().unwrap_or_else(|| self.listed_default(&card.kind, field));
+                let names = listed.as_array().map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect()).unwrap_or_default();
                 Some((card.id.clone(), names, open.ty, fixed_outputs(spec)))
             })
             .collect();
@@ -3114,7 +3111,7 @@ impl StudioApp {
         let mut findings = Vec::new();
         for node in &graph.nodes {
             let Some(spec) = self.specs.iter().find(|spec| spec.kind == node.kind) else { continue };
-            for (key, setting) in node.config.as_object().into_iter().flatten() {
+            for (key, setting) in node.config.as_object().into_iter().flatten().filter(|(key, _)| !magicklala_graph::UNBOUND_SETTINGS.contains(&key.as_str())) {
                 let Some(name) = magicklala_graph::bound_variable(setting) else { continue };
                 let Some(field) = spec.config.iter().find(|field| &field.key == key) else { continue };
                 let Some(value) = self
@@ -3132,12 +3129,16 @@ impl StudioApp {
                 }
                 let need = match &field.kind {
                     FieldKind::Number { min, max } => {
-                        let fits = value.as_f64().is_some_and(|number| min.is_none_or(|min| number >= min) && max.is_none_or(|max| number <= max));
+                        let whole = field.default.as_ref().is_some_and(|default| default.is_i64() || default.is_u64()) || *min == Some(1.0);
+                        let fits = value.as_f64().is_some_and(|number| {
+                            min.is_none_or(|min| number >= min) && max.is_none_or(|max| number <= max) && (!whole || number.fract() == 0.0)
+                        });
+                        let noun = if whole { "a whole number" } else { "a number" };
                         (!fits).then(|| match (min, max) {
-                            (Some(min), Some(max)) => format!("a number from {min} to {max}"),
-                            (Some(min), None) => format!("a number of at least {min}"),
-                            (None, Some(max)) => format!("a number of at most {max}"),
-                            (None, None) => "a number".to_owned(),
+                            (Some(min), Some(max)) => format!("{noun} from {min} to {max}"),
+                            (Some(min), None) => format!("{noun} of at least {min}"),
+                            (None, Some(max)) => format!("{noun} of at most {max}"),
+                            (None, None) => noun.to_owned(),
                         })
                     }
                     FieldKind::Boolean => (!value.is_boolean()).then(|| "true or false".to_owned()),

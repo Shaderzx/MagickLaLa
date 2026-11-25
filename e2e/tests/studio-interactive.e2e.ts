@@ -1981,7 +1981,7 @@ test('Check holds a bound setting to the same rules as a typed one: a temperatur
 
   expect(report.clean).toBe('valid');
   expect(report.ranged).toEqual([
-    'Search Memory: limit needs a number from 1 to 100, but the variable max_memories is 500',
+    'Search Memory: limit needs a whole number from 1 to 100, but the variable max_memories is 500',
     'Generate Text: temperature needs a number from 0 to 2, but the variable temperature is 5',
   ]);
   expect(report.worded).toEqual(['Generate Text: temperature needs a number from 0 to 2, but the variable temperature is "hot"']);
