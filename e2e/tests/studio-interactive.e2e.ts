@@ -2127,3 +2127,11 @@ test('Undo after redo walks straight back: two model picks, undo, redo, then two
   expect(report.seen).toEqual(['gpt-4o', 'gpt-4.1', 'gpt-4o', report.original]);
   expect(report.selected).toBe('llm');
 });
+
+test('Check judges a bound loop limit even without a value to read: a Float variable holding 3.0 passes, an Int variable with no value and a true-or-false variable are both flagged before the brew can fail', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['bound-unset']);
+
+  expect(report.whole).toEqual([]);
+  expect(report.unset).toEqual(['While Loop: max iterations needs a whole number of at least 1, but the variable limit has no value']);
+  expect(report.flag).toEqual(['While Loop: max iterations needs a whole number of at least 1, but the variable limit holds true or false']);
+});

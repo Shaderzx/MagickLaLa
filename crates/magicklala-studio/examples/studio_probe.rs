@@ -3332,6 +3332,42 @@ fn redo_then_undo() -> Result<serde_json::Value, String> {
     let still_selected = rt.state.canvas.selection.as_ref().map(|id| id.0.clone());
     Ok(json!({ "original": original, "seen": seen, "selected": still_selected }))
 }
+fn bound_unset() -> Result<serde_json::Value, String> {
+    use magicklala_graph::{Value, VariableDef};
+    let link = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let looped = |ty: SocketType, default: Option<Value>| {
+        let mut spell = SpellGraph::new("Bound Loop");
+        spell.nodes = vec![
+            studio_node("start", "event/on_start", 0.0, serde_json::Value::Null),
+            studio_node("always", "logic/regex_match", 0.0, json!({ "text": "go", "pattern": "go" })),
+            studio_node("loop", "flow/while_loop", 260.0, json!({ "max_iterations": "{{limit}}" })),
+            studio_node("tick", "var/set", 520.0, json!({ "name": "seen", "value": 1 })),
+        ];
+        spell.wires = vec![link("l1", ("start", "out"), ("loop", "in")), link("l2", ("always", "matched"), ("loop", "condition")), link("l3", ("loop", "body"), ("tick", "in"))];
+        spell.variables = vec![
+            VariableDef { name: "limit".to_owned(), ty, default, exposed: true },
+            VariableDef { name: "seen".to_owned(), ty: SocketType::Int, default: Some(Value::Int(0)), exposed: true },
+        ];
+        spell
+    };
+    let mut report = serde_json::Map::new();
+    for (name, spell) in [
+        ("whole", looped(SocketType::Float, Some(Value::Float(3.0)))),
+        ("unset", looped(SocketType::Int, None)),
+        ("flag", looped(SocketType::Bool, None)),
+    ] {
+        let mut rt = runtime_for(spell);
+        let check = validation_of(&mut rt)?;
+        report.insert(name.to_owned(), json!(check["errors"].as_array().cloned().unwrap_or_default().into_iter().filter(|error| error.as_str().is_some_and(|text| text.contains("While Loop"))).collect::<Vec<_>>()));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9615,6 +9651,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("lit-strand") => lit_strand(),
         Some("gemini-pick") => gemini_pick(),
         Some("redo-then-undo") => redo_then_undo(),
+        Some("bound-unset") => bound_unset(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
