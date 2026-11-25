@@ -1043,7 +1043,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         let step = if placed.role == BrewRole::Aside {
             None
         } else if has_run {
-            card.step_order.and(placed.recipe_step)
+            card.step_order
         } else {
             placed.recipe_step
         };
@@ -1068,7 +1068,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
     for placed in &bottles {
         let Some(card) = state.card(&placed.id) else { continue };
         let step = if has_run {
-            card.step_order.and(placed.recipe_step)
+            card.step_order
         } else if multi {
             None
         } else {
