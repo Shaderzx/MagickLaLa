@@ -4453,6 +4453,30 @@ fn quiet_hex() -> Result<serde_json::Value, String> {
     });
     Ok(json!({ "unselected": unselected, "selected": selected }))
 }
+fn fix_fits() -> Result<serde_json::Value, String> {
+    let mut sizes = Vec::new();
+    for size in [(1280.0, 800.0), (960.0, 640.0)] {
+        let mut demo = StudioApp::from_registry().spell.clone();
+        demo.wires.retain(|wire| !(wire.to_node.0 == "recall" && wire.to_socket == "query"));
+        let mut app = StudioApp::with_spell(demo, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(1.0);
+        let _ = validation_of(&mut rt)?;
+        rt.update(|app, _| {
+            app.canvas.select(Some(NodeId::from("recall")));
+            app.right_tab = RightTab::Inspector;
+        });
+        rt.frame(2.0);
+        rt.frame(3.0);
+        let boxed = layout_rect(&rt, "inspector-error").ok_or("no red box")?;
+        let inside = |key: &str| {
+            layout_rect(&rt, key).map(|rect| rect[0] >= boxed[0] - 0.5 && rect[1] >= boxed[1] - 0.5 && rect[0] + rect[2] <= boxed[0] + boxed[2] + 0.5 && rect[1] + rect[3] <= boxed[1] + boxed[3] + 0.5)
+        };
+        sizes.push(json!({ "width": size.0, "fix": inside("inspector-fix"), "grimoire": inside("inspector-open-grimoire") }));
+    }
+    Ok(json!({ "sizes": sizes }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11221,6 +11245,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("mend-matches-list") => mend_matches_list(),
         Some("recipe-chip-details") => recipe_chip_details(),
         Some("quiet-hex") => quiet_hex(),
+        Some("fix-fits") => fix_fits(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

@@ -790,3 +790,12 @@ test('A missing input is told once where you look: with nothing selected the pla
   expect(report.selected.recipeSays).toContain('"query"');
   expect(report.selected.missingQueryMentions).toBeLessThanOrEqual(2);
 });
+
+test('The red box keeps its buttons inside it: at 1280 and at 960 the Plug in fix and the Grimoire button both sit within the box', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['fix-fits']);
+
+  expect(report.sizes).toEqual([
+    { width: 1280, fix: true, grimoire: true },
+    { width: 960, fix: true, grimoire: true },
+  ]);
+});
