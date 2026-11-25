@@ -3820,11 +3820,14 @@ fn stub_clear() -> Result<serde_json::Value, String> {
 }
 fn kitchen_brewed_tidy() -> Result<serde_json::Value, String> {
     let mut report = serde_json::Map::new();
-    for size in [(960.0_f32, 640.0_f32), (1280.0, 800.0)] {
+    for (scene, size, pantry) in [("960", (960.0_f32, 640.0_f32), false), ("960-pantry", (960.0, 640.0), true), ("1280", (1280.0, 800.0), false)] {
         let mut app = StudioApp::with_spell(crowded_kitchen(), registry_specs());
         app.size = size;
         let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
         rt.frame(0.0);
+        if pantry {
+            click(&mut rt, "expand-nodes")?;
+        }
         click(&mut rt, "run-spell")?;
         live_finish(&mut rt)?;
         rt.frame(3.0);
@@ -3876,7 +3879,7 @@ fn kitchen_brewed_tidy() -> Result<serde_json::Value, String> {
             }
         }
         report.insert(
-            format!("{}", size.0),
+            scene.to_owned(),
             json!({ "coveredNames": covered_names, "looseBadges": loose_badges, "coveredIcons": covered_icons, "coveredTitles": covered_titles }),
         );
     }
