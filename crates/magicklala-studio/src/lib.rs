@@ -3680,8 +3680,19 @@ impl StudioApp {
     fn close_run(&mut self, kind: &'static str, detail: String, report: RunReport) {
         let at_ms = self.elapsed_ms();
         self.trace.push(TraceLine { at_ms, kind, detail, status: ExecutionStatus::Failed, node: None, path: Vec::new() });
-        let left = if kind == "RunCancelled" { ExecutionStatus::Idle } else { ExecutionStatus::Failed };
-        self.canvas.nodes.iter_mut().filter(|card| card.status == ExecutionStatus::Running).for_each(|card| card.status = left);
+        let unfinished_bottles: Vec<NodeId> = magicklala_canvas::brew::potion_ends(&self.canvas)
+            .into_iter()
+            .filter(|id| self.canvas.card(id).is_some_and(|card| matches!(card.status, ExecutionStatus::Idle | ExecutionStatus::Running)))
+            .collect();
+        let cut_short: Vec<NodeId> = self.canvas.nodes.iter().filter(|card| card.status == ExecutionStatus::Running).map(|card| card.id.clone()).collect();
+        for id in cut_short.iter().chain(&unfinished_bottles) {
+            if let Some(card) = self.canvas.card_mut(id) {
+                card.status = ExecutionStatus::Idle;
+            }
+            if !self.canvas.stopped.contains(id) {
+                self.canvas.stopped.push(id.clone());
+            }
+        }
         let reply_to_chat = self.release_active();
         self.conclude(report, reply_to_chat);
     }
