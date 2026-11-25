@@ -1866,7 +1866,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                     .continuous_corners()
                     .fill(t.card)
                     .border(1.0, t.rule_2)
-                    .child(label(format!("Model · {}", app.selected_provider()), 10.0, 600.0, t.mute).truncate())
+                    .child(label(format!("Model · {}", provider_name(&app.selected_provider())), 10.0, 600.0, t.mute).truncate())
                     .child(
                         row()
                             .w_full()
@@ -1989,6 +1989,19 @@ pub fn prompt_font() -> TextStyle {
 
 pub fn prompt_editor_height(size: (f32, f32)) -> f32 {
     if size.1 < COMPACT_INSPECTOR_BELOW { COMPACT_PROMPT_EDITOR_HEIGHT } else { PROMPT_EDITOR_HEIGHT }
+}
+
+fn provider_name(id: &str) -> String {
+    match id {
+        "openai" => "OpenAI".to_owned(),
+        "anthropic" => "Anthropic".to_owned(),
+        "google" | "gemini" => "Google".to_owned(),
+        "mistral" => "Mistral".to_owned(),
+        "groq" => "Groq".to_owned(),
+        "ollama" => "Ollama".to_owned(),
+        "openrouter" => "OpenRouter".to_owned(),
+        other => other.to_owned(),
+    }
 }
 
 fn editor_caption(field: &str) -> &'static str {
