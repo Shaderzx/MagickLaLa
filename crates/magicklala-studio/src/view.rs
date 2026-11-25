@@ -2055,7 +2055,9 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                 .fill(t.hex_tint)
                 .border(1.4, t.hex)
                 .child(label(headline, 12.0, 750.0, t.hex).wrap())
-                .child(actions.child(button_el("inspector-open-grimoire", "Grimoire", ButtonKind::Secondary, 8.0, t, StudioApp::open_grimoire))),
+                .child(actions.children(
+                    flagged_socket.is_some().then(|| button_el("inspector-open-grimoire", "Grimoire", ButtonKind::Secondary, 8.0, t, StudioApp::open_grimoire)),
+                )),
         );
     }
     let mut prompt_block = match (field, editor, wired_editor) {

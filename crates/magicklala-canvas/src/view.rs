@@ -525,7 +525,15 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
             }
         });
 
-    let mut shell = el().key(format!("node-{}", card.id.0)).size(dims[0], dims[1]).absolute(pos[0], pos[1]).child(content);
+    let ring = (card.selected && hexed).then(|| {
+        el().key(format!("selection-ring-{}", card.id.0))
+            .absolute(-5.0, -5.0)
+            .size(dims[0] + 10.0, dims[1] + 10.0)
+            .radius(29.0)
+            .continuous_corners()
+            .border(2.4, if state.light { p.ink } else { p.primary_bg })
+    });
+    let mut shell = el().key(format!("node-{}", card.id.0)).size(dims[0], dims[1]).absolute(pos[0], pos[1]).children(ring).child(content);
     if let Some(badge) = step_badge {
         shell = shell.child(el().key(format!("step-badge-{}", card.id.0)).absolute(if mirrored { dims[0] - 11.0 } else { -9.0 }, -9.0).child(badge));
     }
