@@ -1796,3 +1796,16 @@ test('List settings stay true: an imported case with a comma survives Check and 
   expect(report.stale.errors.join(' ')).toMatch(/billing/);
   expect(report.stale.outputs).toEqual(['refund', 'billing', 'default']);
 });
+
+test('Check and Save tell the truth: a draft holding only a variable saves from the toolbar and asks before you leave once it is emptied again, Check reads placeholders the way a brew does, and Check with no edits keeps a failed brew on screen', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-check-save-'));
+  try {
+    const report = await studioProbe(['check-save-truth', join(dir, 'studio.sqlite')]);
+
+    expect(report.draft).toEqual({ saved: true, askedAfterEmptying: true });
+    expect(report.literal).toEqual({ check: 'valid', errors: [] });
+    expect(report.failedBrew).toEqual({ before: 'Some(Failed)', after: 'Some(Failed)', failedCards: 1, stale: false });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

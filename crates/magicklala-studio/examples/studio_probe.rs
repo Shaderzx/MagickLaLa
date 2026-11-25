@@ -1909,6 +1909,54 @@ fn list_truth() -> Result<serde_json::Value, String> {
         "stale": { "check": stale_check["validation"], "errors": stale_check["errors"], "outputs": outputs_of(&stale.state, "switch") },
     }))
 }
+fn check_save_truth(db_path: &Path) -> Result<serde_json::Value, String> {
+    let config = StudioConfig { db_path: Some(db_path.to_path_buf()), ..StudioConfig::default() };
+    let app = StudioApp::open(&config).map_err(|error| error.to_string())?;
+    let mut draft = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    draft.update(|app, _| {
+        app.new_empty_spell();
+        app.add_variable();
+    });
+    draft.frame(0.0);
+    let name = draft.state.spell.name.clone();
+    click(&mut draft, "save")?;
+    let saved = draft.state.saved_potions.iter().any(|(saved, _)| saved == &name);
+    draft.update(|app, _| {
+        app.remove_variable_at(0);
+        app.sync_spell();
+        app.request_open_sample("Research Agent");
+    });
+    let asked = draft.state.pending_switch.is_some();
+
+    let mut literal = SpellGraph::new("Literal");
+    literal.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("echo", "text/template", 280.0, json!({ "template": "{{thing..name}} {{content}}" })),
+        studio_node("reply", "io/send_message", 560.0, serde_json::Value::Null),
+    ];
+    literal.wires = vec![
+        studio_wire("w1", ("trigger", "out"), ("reply", "in")),
+        studio_wire("w2", ("trigger", "content"), ("echo", "content")),
+        studio_wire("w3", ("echo", "text"), ("reply", "content")),
+    ];
+    let mut literal_rt = runtime_for(literal);
+    let literal_check = validation_of(&mut literal_rt)?;
+
+    let mut broken = echo_spell();
+    broken.nodes[1] = studio_node("echo", "code/rhai_script", 280.0, json!({ "script": "throw \"boom\"" }));
+    broken.wires[2] = studio_wire("w3", ("echo", "result"), ("reply", "content"));
+    let mut failing = runtime_for(broken);
+    click(&mut failing, "run-spell")?;
+    live_finish(&mut failing)?;
+    let before = format!("{:?}", failing.state.canvas.last_brew);
+    click(&mut failing, "validate")?;
+    let failed_cards = failing.state.canvas.nodes.iter().filter(|card| card.status == ExecutionStatus::Failed).count();
+    Ok(json!({
+        "draft": { "saved": saved, "askedAfterEmptying": asked },
+        "literal": { "check": literal_check["validation"], "errors": literal_check["errors"] },
+        "failedBrew": { "before": before, "after": format!("{:?}", failing.state.canvas.last_brew), "failedCards": failed_cards, "stale": failing.state.trace_stale },
+    }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8050,6 +8098,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("pantry-settings") => pantry_settings(),
         Some("empty-recipe") => empty_recipe(),
         Some("list-truth") => list_truth(),
+        Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("pot-rect") => pot_rect(),
         Some("gateway-hint") => gateway_hint(),
         Some("honest-dials") => honest_dials(Path::new(args.get(1).ok_or("missing database path")?)),
