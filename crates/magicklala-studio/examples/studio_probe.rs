@@ -6391,6 +6391,41 @@ fn legible_shelves() -> Result<serde_json::Value, String> {
         );
     }
     Ok(json!({ "reference": reference, "cases": report }))
+}fn clear_sight() -> Result<serde_json::Value, String> {
+    let mut menu_rt = sized_runtime((960.0, 640.0), Theme::Light);
+    let trigger = menu_rt.state.canvas.nodes.iter().find(|card| card.kind == "event/on_message").map(|card| card.id.clone()).ok_or("no trigger")?;
+    let header = menu_rt.find(&format!("node-{}-header", trigger.0)).ok_or("no trigger card")?;
+    right_click(&mut menu_rt, header);
+    menu_rt.frame(1.0);
+    let menu = rect(&menu_rt, "context-menu").ok_or("no menu")?;
+    let plan = magicklala_canvas::brew_plan(&menu_rt.state.canvas, menu_rt.state.canvas_size());
+    let origin = menu_rt.presented("canvas").map(|(rect, _)| rect).ok_or("no canvas")?;
+    let covered: Vec<String> = plan
+        .cards
+        .iter()
+        .filter(|card| card.id != trigger)
+        .filter(|card| rects_overlap([card.rect[0] + origin[0], card.rect[1] + origin[1], card.rect[2], card.rect[3]], menu))
+        .map(|card| card.id.0.clone())
+        .collect();
+
+    let mut grimoire = runtime_for(example("webhook_router.json")?);
+    click(&mut grimoire, "mode-grimoire")?;
+    let mut crowded = Vec::new();
+    for zoom in [0.6_f32, 0.64, 0.68, 0.75, 1.0] {
+        grimoire.update(move |app, _| app.canvas.camera.zoom = zoom);
+        grimoire.frame(1.0);
+        let ids: Vec<String> = grimoire.state.canvas.nodes.iter().map(|card| card.id.0.clone()).collect();
+        for id in ids {
+            let Some(frame) = layout_rect(&grimoire, &format!("node-{id}-header")) else { continue };
+            for (line, r) in text_lines_under(&grimoire, &format!("node-{id}-header")) {
+                if r[1] < frame[1] - 0.5 || r[1] + r[3] > frame[1] + frame[3] + 0.5 {
+                    crowded.push(format!("{zoom}: {id} {line}"));
+                }
+            }
+        }
+    }
+    crowded.dedup();
+    Ok(json!({ "menuCovers": covered, "headerSpills": crowded.into_iter().take(8).collect::<Vec<_>>() }))
 }fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
@@ -7304,6 +7339,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("fair-shelves") => fair_shelves(),
         Some("last-mile") => last_mile(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("legible-shelves") => legible_shelves(),
+        Some("clear-sight") => clear_sight(),
         Some("honest-edits") => honest_edits(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),

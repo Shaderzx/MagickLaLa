@@ -1648,3 +1648,9 @@ test('Legible shelves: in crowded, brewed, eight-bottle, compact and zoomed-out 
     expect(measured.potWidth, scene).toBeGreaterThanOrEqual(140);
   }
 });
+test('Clear sight: the card menu at 960 by 640 parks in open canvas instead of burying the other ingredients, and Grimoire card headers keep every word inside from 60% to 100% zoom', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['clear-sight']);
+
+  expect(report.menuCovers).toEqual([]);
+  expect(report.headerSpills).toEqual([]);
+});
