@@ -238,15 +238,19 @@ fn rack_per_row(count: usize) -> usize {
     if count <= 3 { count.max(1) } else { ((count as f32).sqrt().ceil() as usize).max(2) }
 }
 
-pub(crate) fn rack_title_lines(title: &str, bottles: usize) -> f32 {
+pub(crate) fn rack_title_lines(title: &str, bottles: usize, scale: f32) -> f32 {
     if bottles > 3 {
         return 1.0;
     }
-    (title.chars().count() as f32 * 0.56 * 12.5 / (RACK_BOTTLE_SIZE[0] - 10.0)).ceil().clamp(1.0, 4.0)
+    let size = crate::view::legible_size(12.5, scale);
+    (title.chars().count() as f32 * 0.56 * size / (RACK_BOTTLE_SIZE[0] - 10.0)).ceil().clamp(1.0, 4.0)
 }
 
-fn rack_tag_room(state: &CanvasState, bottles: &[NodeId]) -> f32 {
-    bottles.iter().map(|id| (rack_title_lines(&state.display_title(id), bottles.len()) - 1.0) * 12.5 * 1.35).fold(0.0, f32::max)
+/// The extra height the tallest bottle tag needs below its first line, in plan units, at the scale the rack is drawn: small screens draw bigger
+/// text in plan units, so a tag wraps sooner and the next row must sit lower.
+fn rack_tag_room(state: &CanvasState, bottles: &[NodeId], scale: f32) -> f32 {
+    let line = crate::view::legible_size(12.5, scale) * 1.35;
+    bottles.iter().map(|id| (rack_title_lines(&state.display_title(id), bottles.len(), scale) - 1.0) * line).fold(0.0, f32::max)
 }
 
 fn rack_block(count: usize, per_row: usize, room: f32) -> [f32; 2] {
@@ -288,6 +292,7 @@ struct Metrics {
     shelf_to_pot: f32,
     pot_to_bottles: f32,
     bottle_gap: f32,
+    tag_scale: f32,
 }
 
 const ROOMY: Metrics = Metrics {
@@ -298,9 +303,18 @@ const ROOMY: Metrics = Metrics {
     shelf_to_pot: SHELF_TO_POT,
     pot_to_bottles: POT_TO_BOTTLES,
     bottle_gap: BOTTLE_GAP,
+    tag_scale: 1.0,
 };
-const CROWDED: Metrics =
-    Metrics { vial: [160.0, 58.0], pot: [250.0, 242.0], row_gap: 12.0, col_gap: 14.0, shelf_to_pot: 40.0, pot_to_bottles: 44.0, bottle_gap: 10.0 };
+const CROWDED: Metrics = Metrics {
+    vial: [160.0, 58.0],
+    pot: [250.0, 242.0],
+    row_gap: 12.0,
+    col_gap: 14.0,
+    shelf_to_pot: 40.0,
+    pot_to_bottles: 44.0,
+    bottle_gap: 10.0,
+    tag_scale: 1.0,
+};
 const TIGHT: Metrics = Metrics { vial: [160.0, 42.0], ..CROWDED };
 const READABLE: f32 = 0.92;
 const BOTTLE_STAIR: f32 = 30.0;
@@ -322,9 +336,24 @@ const BACK_ROW_PENALTY: f32 = 0.8;
 
 type Planner = fn(&CanvasState, (f32, f32), Metrics) -> (f32, BrewPlan);
 
-fn with_visible_pot(state: &CanvasState, size: (f32, f32), m: Metrics, plan: Planner) -> (f32, BrewPlan) {
+/// Plans again at the scale the first pass found, so bottle tags get the room their text needs at that scale (text grows in plan units as the
+/// plan shrinks).
+fn with_tag_room(state: &CanvasState, size: (f32, f32), m: Metrics, plan: Planner) -> (f32, BrewPlan) {
     let mut metrics = m;
     let mut made = plan(state, size, metrics);
+    for _ in 0..3 {
+        if (made.1.scale - metrics.tag_scale).abs() < 0.01 || made.1.scale >= metrics.tag_scale && metrics.tag_scale < 1.0 {
+            break;
+        }
+        metrics.tag_scale = made.1.scale.min(1.0);
+        made = plan(state, size, metrics);
+    }
+    made
+}
+
+fn with_visible_pot(state: &CanvasState, size: (f32, f32), m: Metrics, plan: Planner) -> (f32, BrewPlan) {
+    let mut metrics = m;
+    let mut made = with_tag_room(state, size, metrics, plan);
     for _ in 0..4 {
         let shown = metrics.pot[0] * made.0;
         if shown >= MIN_POT_PX - 0.5 || metrics.pot[0] >= m.pot[0] * 2.5 {
@@ -332,7 +361,7 @@ fn with_visible_pot(state: &CanvasState, size: (f32, f32), m: Metrics, plan: Pla
         }
         let grow = (MIN_POT_PX / shown.max(1.0)) * 1.04;
         metrics.pot = [metrics.pot[0] * grow, metrics.pot[1] * grow];
-        made = plan(state, size, metrics);
+        made = with_tag_room(state, size, metrics, plan);
     }
     made
 }
@@ -394,7 +423,7 @@ const FALLBACKS: [(Arrangement, f32); 9] = [
 ];
 
 pub fn brew_plan(state: &CanvasState, size: (f32, f32)) -> BrewPlan {
-    let roomy = plan_with(state, size, ROOMY);
+    let roomy = with_tag_room(state, size, ROOMY, plan_with);
     if roomy.0.min(1.0) >= READABLE {
         return roomy.1;
     }
@@ -425,7 +454,7 @@ pub fn brew_plan(state: &CanvasState, size: (f32, f32)) -> BrewPlan {
             Some((top, _)) if top >= fit => best,
             _ => Some((fit, plan)),
         })
-        .map_or_else(|| plan_with(state, size, TIGHT).1, |(_, plan)| plan)
+        .map_or_else(|| with_tag_room(state, size, TIGHT, plan_with).1, |(_, plan)| plan)
 }
 fn plan_flanked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, BrewPlan) {
     let bottles = potion_ends(state).len();
@@ -445,7 +474,7 @@ fn plan_flanked_rows(state: &CanvasState, size: (f32, f32), m: Metrics, per_row:
     let brewing = brewing_nodes(state);
     let ends = potion_ends(state);
     let bottles: Vec<NodeId> = order.iter().filter(|id| ends.contains(id)).cloned().collect();
-    let tag_room = rack_tag_room(state, &bottles);
+    let tag_room = rack_tag_room(state, &bottles, m.tag_scale);
     let ingredients: Vec<NodeId> = order.iter().filter(|id| brewing.contains(*id) && !bottles.contains(*id)).cloned().collect();
     let aside: Vec<NodeId> = order.iter().filter(|id| !brewing.contains(*id) && !bottles.contains(*id)).cloned().collect();
     let usable_w = (size.0 - 2.0 * SIDE_ROOM).max(120.0);
@@ -539,7 +568,7 @@ fn plan_stacked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
     let brewing = brewing_nodes(state);
     let ends = potion_ends(state);
     let bottles: Vec<NodeId> = order.iter().filter(|id| ends.contains(id)).cloned().collect();
-    let tag_room = rack_tag_room(state, &bottles);
+    let tag_room = rack_tag_room(state, &bottles, m.tag_scale);
     let ingredients: Vec<NodeId> = order.iter().filter(|id| brewing.contains(*id) && !bottles.contains(*id)).cloned().collect();
     let aside: Vec<NodeId> = order.iter().filter(|id| !brewing.contains(*id) && !bottles.contains(*id)).cloned().collect();
     let lane_gap = m.col_gap.max(36.0);
@@ -684,7 +713,7 @@ fn plan_with(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, BrewPla
     let brewing = brewing_nodes(state);
     let ends = potion_ends(state);
     let bottles: Vec<NodeId> = order.iter().filter(|id| ends.contains(id)).cloned().collect();
-    let tag_room = rack_tag_room(state, &bottles);
+    let tag_room = rack_tag_room(state, &bottles, m.tag_scale);
     let ingredients: Vec<NodeId> = order.iter().filter(|id| brewing.contains(*id) && !bottles.contains(*id)).cloned().collect();
     let aside: Vec<NodeId> = order.iter().filter(|id| !brewing.contains(*id) && !bottles.contains(*id)).cloned().collect();
 
