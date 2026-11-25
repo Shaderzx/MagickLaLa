@@ -28,6 +28,10 @@ jobs:
   e2e:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1/2, 2/2]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -41,7 +45,7 @@ jobs:
       - run: npm ci
         working-directory: e2e
       - run: cargo build --workspace --bins --examples
-      - run: npx e2e run
+      - run: npx e2e run --shard ${{ matrix.shard }}
         working-directory: e2e
   landmines:
     if: github.event_name == 'pull_request'
