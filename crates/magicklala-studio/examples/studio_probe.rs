@@ -3692,6 +3692,41 @@ fn rename_keystrokes() -> Result<serde_json::Value, String> {
         "check": check["validation"],
     }))
 }
+fn seal_clear() -> Result<serde_json::Value, String> {
+    let mut report = serde_json::Map::new();
+    for (name, spell, size) in [
+        ("kitchen@960", crowded_kitchen(), (960.0_f32, 640.0_f32)),
+        ("kitchen@1280", crowded_kitchen(), (1280.0, 800.0)),
+        ("eight@1280", many_bottle_spell(8), (1280.0, 800.0)),
+    ] {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        click(&mut rt, "run-spell")?;
+        live_finish(&mut rt)?;
+        rt.frame(3.0);
+        rt.frame(6.0);
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let bottles: Vec<NodeId> = plan.with_role(magicklala_canvas::BrewRole::Bottle).map(|card| card.id.clone()).collect();
+        let mut on_fill = Vec::new();
+        let mut time_chips = 0;
+        for id in &bottles {
+            let Some(column) = layout_rect(&rt, &format!("node-{}-header", id.0)) else { continue };
+            let fill_line = column[1] + 66.0 * plan.scale * 0.45;
+            if let Some(badge) = layout_rect(&rt, &format!("step-badge-{}", id.0))
+                && badge[1] + badge[3] > fill_line + 0.5
+            {
+                on_fill.push(id.0.clone());
+            }
+            if texts_under(&mut rt, &format!("node-{}-header", id.0)).contains("ms") {
+                time_chips += 1;
+            }
+        }
+        report.insert(name.to_owned(), json!({ "bottles": bottles.len(), "onFill": on_fill, "timeChips": time_chips }));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9984,6 +10019,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("kitchen-brewed-tidy") => kitchen_brewed_tidy(),
         Some("tile-align") => tile_align(),
         Some("rename-keystrokes") => rename_keystrokes(),
+        Some("seal-clear") => seal_clear(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),

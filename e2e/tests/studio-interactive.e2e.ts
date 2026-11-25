@@ -2200,3 +2200,12 @@ test('Typing a variable rename one key at a time never takes over a step input: 
     landedOnInput: { check: ['query: a step input already uses this name'], name: 'query_limit' },
   });
 });
+
+test('Big racks keep the potion in view: after a brew every bottle on a rack of four or more wears its step number up by the cork, clear of the fill line, and none of them shows a time chip, at 960 and 1280 alike', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['seal-clear']);
+
+  for (const scene of ['kitchen@960', 'kitchen@1280', 'eight@1280']) {
+    expect(report[scene].bottles).toBeGreaterThanOrEqual(8);
+    expect({ scene, onFill: report[scene].onFill, timeChips: report[scene].timeChips }).toEqual({ scene, onFill: [], timeChips: 0 });
+  }
+});
