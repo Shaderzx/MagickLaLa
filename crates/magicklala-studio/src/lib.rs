@@ -798,6 +798,11 @@ pub enum UndoEntry {
     VariableAdded {
         index: usize,
     },
+    VariableType {
+        index: usize,
+        variable: VariableDef,
+        default_edit: TextEdit,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1103,6 +1108,15 @@ impl StudioApp {
         }
     }
 
+    pub fn follow_window(&mut self, size: (f32, f32)) {
+        if size.0 < 1.0 || size.1 < 1.0 || ((size.0 - self.size.0).abs() < 0.5 && (size.1 - self.size.1).abs() < 0.5) {
+            return;
+        }
+        self.size = size;
+        let viewport = self.canvas_size();
+        self.canvas.fit(viewport);
+    }
+
     pub fn canvas_size(&self) -> (f32, f32) {
         ((self.size.0 - self.left_rail_width() - self.inspector_width()).max(200.0), (self.size.1 - TOOLBAR_HEIGHT - self.trace_height()).max(200.0))
     }
@@ -1266,6 +1280,7 @@ impl StudioApp {
         }
         let raw = self.var_default_edits.get(index).map(|e| e.text.clone()).unwrap_or_else(|| Self::format_value(self.spell.variables[index].default.as_ref()));
         if raw.trim().is_empty() {
+            self.remember_variable_type(index);
             self.spell.variables[index].ty = ty;
             self.spell.variables[index].default = Self::reset_value(ty);
             if let Some(edit) = self.var_default_edits.get_mut(index) {
@@ -1276,6 +1291,7 @@ impl StudioApp {
             return;
         }
         if let Some(parsed) = Self::try_parse_value(&raw, ty) {
+            self.remember_variable_type(index);
             self.spell.variables[index].ty = ty;
             self.spell.variables[index].default = Some(parsed);
             if let Some(edit) = self.var_default_edits.get_mut(index) {
@@ -1296,12 +1312,23 @@ impl StudioApp {
         if index >= self.spell.variables.len() {
             return;
         }
+        self.remember_variable_type(index);
         self.spell.variables[index].ty = ty;
         self.spell.variables[index].default = Self::reset_value(ty);
         if let Some(edit) = self.var_default_edits.get_mut(index) {
             *edit = TextEdit::new(Self::format_value(self.spell.variables[index].default.as_ref()));
         }
         self.dirty = true;
+    }
+
+    fn remember_variable_type(&mut self, index: usize) {
+        let variable = self.spell.variables[index].clone();
+        let default_edit = self.var_default_edits.get(index).cloned().unwrap_or_else(|| TextEdit::new(Self::format_value(variable.default.as_ref())));
+        self.undo_banner = Some(format!("Changed the type of {}", variable.name));
+        self.undo_stack.push(UndoEntry::VariableType { index, variable, default_edit });
+        self.variables_touched = true;
+        self.validation = ValidationState::Unchecked;
+        self.canvas.validated = false;
     }
 
     pub fn cancel_variable_type_reset(&mut self) {
@@ -1518,7 +1545,7 @@ impl StudioApp {
             spell.nodes = vec![
                 place("trigger", "event/on_message", [0.0, 90.0], serde_json::Value::Null),
                 place("search", "knowledge/search", [260.0, 40.0], json!({ "limit": 5 })),
-                place("llm", "ai/generate_text", [530.0, 90.0], json!({ "prompt": "Summarize research findings:\n{{knowledge}}\n\nQuestion: {{content}}" })),
+                place("llm", "ai/generate_text", [530.0, 90.0], json!({ "prompt": "Summarize the research findings and answer the question." })),
                 place("reply", "io/send_message", [800.0, 90.0], serde_json::Value::Null),
             ];
             let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
@@ -1960,6 +1987,9 @@ impl StudioApp {
         let flow_out_of =
             |app: &Self, node: &NodeId| app.canvas.card(node).and_then(|card| card.outputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone()));
         let flow_in_of = |app: &Self, node: &NodeId| app.canvas.card(node).and_then(|card| card.inputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone()));
+        let free_flow_out_of = |app: &Self, node: &NodeId| {
+            app.canvas.card(node).and_then(|card| card.outputs.iter().find(|s| s.ty.is_flow() && !app.feeds(node, &s.name)).map(|s| s.name.clone()))
+        };
         let my_flow_in = spec.inputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone());
         let my_flow_out = spec.outputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone());
         let mut sources: Vec<NodeId> = Vec::new();
@@ -1985,8 +2015,7 @@ impl StudioApp {
         }
 
         if let Some(input) = &my_flow_in {
-            let free_tail =
-                order.iter().rev().filter(|node| !bottle(self, node)).find(|node| flow_out_of(self, node).is_some_and(|out| !self.feeds(node, &out))).cloned();
+            let free_tail = order.iter().rev().filter(|node| !bottle(self, node)).find(|node| free_flow_out_of(self, node).is_some()).cloned();
             let before_bottle = order.iter().rev().find_map(|node| {
                 let out = flow_out_of(self, node)?;
                 self.canvas
@@ -1998,7 +2027,7 @@ impl StudioApp {
             let splice = before_bottle.filter(|_| !bottle(self, id) && my_flow_out.is_some());
             match (free_tail.filter(|_| splice.is_none()), splice) {
                 (Some(tail), _) => {
-                    let out = flow_out_of(self, &tail).unwrap_or_default();
+                    let out = free_flow_out_of(self, &tail).unwrap_or_default();
                     if self.connect((&tail, &out), (id, input)) {
                         sources.push(tail);
                     }
@@ -2189,8 +2218,8 @@ impl StudioApp {
             return false;
         }
         let refusal = self.canvas.last_connect_error.take().map(|error| Self::wire_refusal(&error));
-        if let Some(message) = &refusal {
-            self.store_error = Some(message.clone());
+        if refusal.is_some() {
+            self.wire_error = refusal.clone();
         }
         if self.aside_wires.keys().chain(self.aside_bridges.keys()).chain(self.aside_refused.keys()).any(|id| !self.canvas.is_shelved(id)) {
             self.rebuild_bridges();
@@ -2245,7 +2274,7 @@ impl StudioApp {
         self.var_problems = problems;
         let (nodes, wires, subgraphs) = self.rebuilt_parts();
         let shelf = self.shelf_entries();
-        if refusal.is_some() && !problems_changed && !vars_changed && wires == self.spell.wires {
+        if refusal.is_some() && !problems_changed && !vars_changed && wires == self.spell.wires && shelf == self.spell.shelf {
             return true;
         }
         if !problems_changed
@@ -2257,9 +2286,15 @@ impl StudioApp {
         {
             return false;
         }
+        let shelf_changed = shelf != self.spell.shelf;
         self.spell.shelf = shelf;
         let unplaced = |list: &[NodeInstance]| list.iter().map(|node| (node.id.clone(), node.kind.clone(), node.config.clone())).collect::<Vec<_>>();
-        if vars_changed || problems_changed || wires != self.spell.wires || subgraphs != self.spell.subgraphs || unplaced(&nodes) != unplaced(&self.spell.nodes)
+        if vars_changed
+            || problems_changed
+            || wires != self.spell.wires
+            || subgraphs != self.spell.subgraphs
+            || shelf_changed
+            || unplaced(&nodes) != unplaced(&self.spell.nodes)
         {
             self.canvas.clear_run_marks();
             self.canvas.last_brew = None;
@@ -2278,7 +2313,8 @@ impl StudioApp {
         self.spell.subgraphs = subgraphs;
         self.draft_status = None;
         self.publish_status = None;
-        self.store_error = refusal;
+        self.store_error = None;
+        self.wire_error = refusal;
         self.active_release_version = if self.var_problems.is_empty() { self.live_release_matching_recipe() } else { None };
         self.canvas.release_badge = self.active_release_version.map(|version| format!("v{version}"));
         self.dirty = true;
@@ -2482,7 +2518,7 @@ impl StudioApp {
 
     fn bypass_for(&mut self, id: &NodeId, known: &[(SocketRef, SocketRef)]) -> Vec<(SocketRef, SocketRef)> {
         let mut bridges = Vec::new();
-        let refused = self.aside_refused.get(id).cloned().unwrap_or_default();
+        let refused: Vec<(SocketRef, SocketRef)> = self.aside_refused.values().flatten().cloned().collect();
         let welcome = |source: &SocketRef, target: &SocketRef| !refused.iter().any(|(from, to)| from == source && to == target);
         let sources = self.reach_past_shelf(id, known, true, true);
         let targets = self.reach_past_shelf(id, known, true, false);
@@ -2542,8 +2578,13 @@ impl StudioApp {
                 })
             })
             .collect();
-        let mut findings: Vec<HexFinding> =
-            variable_findings.into_iter().chain(version_findings).chain(self.blank_field_findings()).chain(self.unfilled_word_findings()).collect();
+        let mut findings: Vec<HexFinding> = variable_findings
+            .into_iter()
+            .chain(version_findings)
+            .chain(self.blank_field_findings())
+            .chain(self.undeclared_variable_findings())
+            .chain(self.unfilled_word_findings())
+            .collect();
         let validator = SpellValidator::new(self.specs.clone());
         if let Err(errors) = validator.validate(&self.brew_graph()) {
             let title_of = |id: &NodeId| self.canvas.display_title(id);
@@ -2592,6 +2633,21 @@ impl StudioApp {
             .collect()
     }
 
+    fn undeclared_variable_findings(&self) -> Vec<HexFinding> {
+        self.brew_graph()
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.kind.as_str(), "var/get" | "var/set" | "var/reset"))
+            .filter_map(|node| {
+                let name = node.config.get("name")?.as_str()?.trim();
+                (!name.is_empty() && !self.spell.variables.iter().any(|variable| variable.name == name)).then(|| {
+                    let readable = format!("{}: no variable is named {name}, add it on the Variables tab", self.canvas.display_title(&node.id));
+                    HexFinding { node: Some(node.id.clone()), socket: None, readable: readable.clone(), message: readable, mistyped: false }
+                })
+            })
+            .collect()
+    }
+
     fn blank_field_findings(&self) -> Vec<HexFinding> {
         self.brew_graph()
             .nodes
@@ -2609,16 +2665,17 @@ impl StudioApp {
             .collect()
     }
 
-    fn check_spell_with_root(&self, root: SubgraphKey) -> Result<(), Vec<String>> {
-        let findings = self.hex_findings_for_root(root);
-        if findings.is_empty() { Ok(()) } else { Err(findings.into_iter().map(|finding| finding.message).collect()) }
-    }
-
     pub fn validate(&mut self) -> &ValidationState {
         if self.is_running() {
             return &self.validation;
         }
         self.sync_spell();
+        self.wire_error = None;
+        let findings = self.hex_findings_for_spell();
+        self.show_findings(findings)
+    }
+
+    fn show_findings(&mut self, findings: Vec<HexFinding>) -> &ValidationState {
         let old_run = self.canvas.last_brew.is_some() || self.trace.iter().any(|line| line.kind != "RunRejected");
         if old_run {
             self.canvas.clear_run_marks();
@@ -2635,7 +2692,6 @@ impl StudioApp {
                 socket.flagged = false;
             }
         }
-        let findings = self.hex_findings_for_spell();
         self.hex_findings = findings.clone();
         self.validation = match if findings.is_empty() { Ok(()) } else { Err(findings) } {
             Ok(()) => {
@@ -3199,6 +3255,22 @@ impl StudioApp {
                     self.sync_spell();
                 }
             }
+            UndoEntry::VariableType { index, variable, default_edit } => {
+                if index < self.spell.variables.len() {
+                    self.spell.variables[index].ty = variable.ty;
+                    self.spell.variables[index].default = variable.default;
+                    if let Some(edit) = self.var_default_edits.get_mut(index) {
+                        *edit = default_edit;
+                    }
+                    self.open_var_type = None;
+                    self.pending_type_reset = None;
+                    self.variables_touched = true;
+                    self.validation = ValidationState::Unchecked;
+                    self.canvas.validated = false;
+                    self.dirty = true;
+                    self.sync_spell();
+                }
+            }
             UndoEntry::Variable { index, variable, name_edit, default_edit } => {
                 let at = index.min(self.spell.variables.len());
                 self.spell.variables.insert(at, variable);
@@ -3296,9 +3368,11 @@ impl StudioApp {
             Err(error) => return Err(self.refuse(error.to_string())),
         };
         let target = (self.root_spell(), Some(next));
-        if let Err(errors) = self.check_spell_with_root(target) {
-            let message = format!("Cannot publish an invalid potion: {}", errors.join("; "));
-            self.validation = ValidationState::Invalid(errors);
+        let findings = self.hex_findings_for_root(target);
+        if !findings.is_empty() {
+            let readable: Vec<String> = findings.iter().map(|finding| finding.readable.clone()).collect();
+            let message = format!("Cannot publish an invalid potion: {}", readable.join("; "));
+            self.show_findings(findings);
             return Err(self.refuse(message));
         }
         self.validation = ValidationState::Valid;
@@ -3451,7 +3525,7 @@ pub fn studio_key(app: &mut StudioApp, key: &rune::KeyEvent, _: &mut rune::Tx) -
             app.delete_selected_node();
             true
         }
-        _ if on_workbench && key.is_command('z') && !key.mods.shift && !app.undo_stack.is_empty() && !app.is_running() => {
+        _ if !app.has_open_popover() && key.is_command('z') && !key.mods.shift && !app.undo_stack.is_empty() && !app.is_running() => {
             app.undo();
             true
         }
@@ -3538,8 +3612,6 @@ fn template_roots(text: &str) -> Vec<String> {
 fn default_prompt(kind: &str) -> String {
     match kind {
         "ai/generate_text" => "You are a helpful agent. Answer the user clearly and kindly.".to_owned(),
-        "memory/search" => "Recall the 5 most relevant memories for {{content}}".to_owned(),
-        "knowledge/search" => "Search the knowledge base for {{content}}".to_owned(),
         "code/rhai_script" => "content.to_upper()".to_owned(),
         "text/template" => "{{content}}".to_owned(),
         _ => String::new(),

@@ -6154,7 +6154,14 @@ fn honest_edits(db_path: &Path) -> Result<serde_json::Value, String> {
         .collect();
     branch_outs.sort();
 
-    let mut cut_spell = chain(&[("trigger", "event/on_message"), ("a", "time/delay"), ("b", "time/delay"), ("c", "time/delay"), ("d", "time/delay"), ("reply", "io/send_message")]);
+    let mut cut_spell = chain(&[
+        ("trigger", "event/on_message"),
+        ("a", "time/delay"),
+        ("b", "time/delay"),
+        ("c", "time/delay"),
+        ("d", "time/delay"),
+        ("reply", "io/send_message"),
+    ]);
     cut_spell.wires = vec![
         studio_wire("w1", ("trigger", "out"), ("a", "in")),
         studio_wire("w2", ("a", "out"), ("b", "in")),
@@ -6300,7 +6307,11 @@ fn honest_edits(db_path: &Path) -> Result<serde_json::Value, String> {
     let undo_on_variables = keyed.state.spell.variables.len();
 
     let mut undeclared_spell = tasting_spell();
-    undeclared_spell.nodes.push(studio_node("peek", "var/get", 280.0, json!({ "name": "mood" })));
+    undeclared_spell.nodes.push(studio_node("peek", "var/set", 280.0, json!({ "name": "mood" })));
+    undeclared_spell.wires.retain(|wire| wire.id.0 != "w1");
+    undeclared_spell.wires.push(studio_wire("w4", ("trigger", "out"), ("peek", "in")));
+    undeclared_spell.wires.push(studio_wire("w5", ("peek", "out"), ("reply", "in")));
+    undeclared_spell.wires.push(studio_wire("w6", ("trigger", "content"), ("peek", "value")));
     let mut undeclared = runtime_for(undeclared_spell);
     click(&mut undeclared, "validate")?;
     let undeclared_named = match &undeclared.state.validation {
@@ -6322,7 +6333,8 @@ fn honest_edits(db_path: &Path) -> Result<serde_json::Value, String> {
         "undoOnVariables": undo_on_variables,
         "undeclaredNamed": undeclared_named,
     }))
-}fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
+}
+fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),

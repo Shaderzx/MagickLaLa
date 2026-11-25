@@ -1161,9 +1161,10 @@ fn socket_port<S: 'static>(
                         match canvas.input_socket_at(cursor) {
                             Some(target) if target == into => {}
                             Some(target) => {
+                                let kept = canvas.wires.clone();
                                 canvas.wires.retain(|wire| wire.id != held.id);
                                 if let Err(refused) = canvas.connect_sockets(&from, &target) {
-                                    canvas.wires.push(held);
+                                    canvas.wires = kept;
                                     canvas.last_connect_error = Some(refused);
                                 }
                             }

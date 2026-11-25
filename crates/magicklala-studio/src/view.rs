@@ -386,7 +386,7 @@ pub fn studio_view(app: &StudioApp, _: &mut Cx<StudioApp>) -> El {
         .child(el().key("center").grow(1.0).min_w(0.0).h_full().child(canvas_with_menu(app, &t)))
         .child(inspector(app, &t));
     let studio = col().key("studio").w_full().h_full().fill(t.paper).child(toolbar(app, &t)).child(middle).child(trace_strip(app, &t));
-    let root = el().key("studio-root").w_full().h_full().child(studio);
+    let root = el().key("studio-root").w_full().h_full().child(studio).on_layout(|app: &mut StudioApp, rect: [f32; 4]| app.follow_window((rect[2], rect[3])));
     match pantry_ghost(app, &t) {
         Some(ghost) => root.child(ghost),
         None => root,
@@ -1026,7 +1026,7 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                     .child(
                         el().key(format!("potion-mark-{}", name.to_ascii_lowercase().replace(' ', "-"))).size(24.0, 30.0).child(
                             canvas(magicklala_canvas::hearth::potion_bottle_shape(
-                                magicklala_canvas::CauldronMood::Brewed,
+                                potion_mood(app, name),
                                 light,
                                 56.0,
                                 70.0,
@@ -2098,12 +2098,17 @@ fn playground_panel(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         );
     }
     let body = if transcript.is_empty() {
-        col().w_full().pt(40.0).px(14.0).items_center().gap(10.0).child(canvas(empty_bottle_mark(light, 42.0)).size(42.0, 42.0)).child(heading(
+        let empty = col().w_full().pt(40.0).px(14.0).items_center().gap(10.0).child(canvas(empty_bottle_mark(light, 42.0)).size(42.0, 42.0)).child(heading(
             "No messages yet",
             15.0,
             800.0,
             t.ink,
-        ))
+        ));
+        let failed = app.canvas.invalid_brew || app.canvas.last_brew.is_some_and(|status| status != RunStatus::Succeeded);
+        match app.canvas.brew_summary.as_ref().filter(|_| failed && !app.is_running()) {
+            Some(reason) => empty.child(label(reason, 12.0, 600.0, t.hex).wrap().key("tasting-reason")),
+            None => empty,
+        }
     } else {
         transcript.iter().enumerate().fold(col().gap(2.0).pt(8.0).pb(12.0), |mut list, (index, message)| {
             if message.from_user && index > 0 {
@@ -2184,12 +2189,29 @@ fn playground_panel(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     panel.child(col().key("inspector-scroll").w_full().grow(1.0).min_h(0.0).px(14.0).scroll(ScrollSpec { stick_bottom: true }).child(body)).child(composer_dock)
 }
 
-pub fn potion_mood(_app: &StudioApp, _name: &str) -> magicklala_canvas::CauldronMood {
-    magicklala_canvas::CauldronMood::Brewed
+pub fn potion_mood(app: &StudioApp, name: &str) -> magicklala_canvas::CauldronMood {
+    use magicklala_canvas::CauldronMood;
+    if name != app.spell.name {
+        return CauldronMood::Ready;
+    }
+    if app.is_running() {
+        CauldronMood::Simmering
+    } else if matches!(app.validation, ValidationState::Invalid(_))
+        || app.canvas.invalid_brew
+        || app.canvas.last_brew.is_some_and(|status| status != RunStatus::Succeeded)
+    {
+        CauldronMood::Hexed
+    } else if app.canvas.nodes.is_empty() {
+        CauldronMood::Empty
+    } else if app.canvas.last_brew.is_some() {
+        CauldronMood::Brewed
+    } else {
+        CauldronMood::Ready
+    }
 }
 
 pub fn studio_status(app: &StudioApp) -> Option<(&str, bool)> {
-    match (&app.store_error, &app.draft_status, &app.publish_status) {
+    match (app.wire_error.as_ref().or(app.store_error.as_ref()), &app.draft_status, &app.publish_status) {
         (Some(error), _, _) => Some((error, true)),
         (None, Some(status), _) | (None, None, Some(status)) => Some((status, false)),
         (None, None, None) => None,
