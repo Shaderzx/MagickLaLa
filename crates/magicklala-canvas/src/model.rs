@@ -333,6 +333,22 @@ impl CanvasState {
     }
 
     pub fn display_title(&self, id: &NodeId) -> String {
+        let named = self.twin_title(id);
+        let Some(card) = self.card(id) else { return named };
+        let numbered = named.ends_with(&format!(" · {}", self.twin_number(id)));
+        let clashes = self.nodes.iter().any(|other| &other.id != id && other.title == card.title && self.twin_title(&other.id) == named);
+        if numbered && clashes {
+            return named.rsplit_once(" · ").map_or(named.clone(), |(short, number)| format!("{short} #{number}"));
+        }
+        named
+    }
+
+    fn twin_number(&self, id: &NodeId) -> usize {
+        let Some(card) = self.card(id) else { return 0 };
+        self.nodes.iter().filter(|other| other.title == card.title).position(|other| &other.id == id).unwrap_or_default() + 1
+    }
+
+    fn twin_title(&self, id: &NodeId) -> String {
         let Some(card) = self.card(id) else { return id.0.clone() };
         let twins: Vec<&NodeId> = self.nodes.iter().filter(|other| other.title == card.title).map(|other| &other.id).collect();
         if twins.len() < 2 {
