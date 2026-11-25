@@ -580,6 +580,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     let sub_col = if untaken { p.untaken_sub() } else { p.mute };
     let long_tag = crate::brew::potion_ends(state).len() <= 3;
     let tag_inner = col()
+        .key(format!("bottle-tag-{}", card.id.0))
         .w_full()
         .px(if width >= crate::brew::RACK_BOTTLE_SIZE[0] + 1.0 { 9.0 } else { 5.0 })
         .py(8.0)

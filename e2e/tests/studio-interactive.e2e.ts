@@ -2166,3 +2166,11 @@ test('A failed pour stub keeps clear of its neighbours: with Search Memory missi
     expect({ width, ...report[width] }).toEqual({ width, crowded: [], hanging: [], hexed: 1 });
   }
 });
+
+test('A brewed crowded kitchen stays tidy at both sizes: no time chip covers a bottle name, every bottle step number sits on its own tag instead of the shelf bracket, and no card time chip covers the card icon', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['kitchen-brewed-tidy']);
+
+  for (const width of ['960', '1280']) {
+    expect({ width, ...report[width] }).toEqual({ width, coveredNames: [], looseBadges: [], coveredIcons: [] });
+  }
+});

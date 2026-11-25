@@ -3522,6 +3522,48 @@ fn stub_clear() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn kitchen_brewed_tidy() -> Result<serde_json::Value, String> {
+    let mut report = serde_json::Map::new();
+    for size in [(960.0_f32, 640.0_f32), (1280.0, 800.0)] {
+        let mut app = StudioApp::with_spell(crowded_kitchen(), registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        click(&mut rt, "run-spell")?;
+        live_finish(&mut rt)?;
+        rt.frame(3.0);
+        rt.frame(6.0);
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let mut covered_names = Vec::new();
+        let mut loose_badges = Vec::new();
+        let mut covered_icons = Vec::new();
+        for card in &rt.state.canvas.nodes {
+            let id = &card.id.0;
+            let role = plan.card(&card.id).map(|placed| placed.role);
+            if role == Some(magicklala_canvas::BrewRole::Bottle) {
+                let Some(tag) = layout_rect(&rt, &format!("bottle-tag-{id}")) else { continue };
+                let title = rt.state.canvas.display_title(&card.id);
+                let lines = text_lines_under(&rt, &format!("node-{id}-header"));
+                let Some((_, name)) = lines.iter().find(|(line, _)| line.replace('\u{a0}', " ") == title) else { continue };
+                if lines.iter().any(|(line, rect)| line.replace('\u{a0}', " ") != title && !line.chars().all(|ch| ch.is_ascii_digit()) && rects_overlap(*rect, *name)) {
+                    covered_names.push(title.clone());
+                }
+                if let Some(badge) = layout_rect(&rt, &format!("step-badge-{id}"))
+                    && !(badge[0] >= tag[0] - 0.5 && badge[0] + badge[2] <= tag[0] + tag[2] + 0.5 && badge[1] >= tag[1] - 0.5 && badge[1] + badge[3] <= tag[1] + tag[3] + 0.5)
+                {
+                    loose_badges.push(title.clone());
+                }
+            } else if role == Some(magicklala_canvas::BrewRole::Ingredient)
+                && let (Some(chip), Some(icon)) = (layout_rect(&rt, &format!("status-pill-{id}")), layout_rect(&rt, &format!("vial-{id}")))
+                && rects_overlap(chip, icon)
+            {
+                covered_icons.push(rt.state.canvas.display_title(&card.id));
+            }
+        }
+        report.insert(format!("{}", size.0), json!({ "coveredNames": covered_names, "looseBadges": loose_badges, "coveredIcons": covered_icons }));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9810,6 +9852,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),
+        Some("kitchen-brewed-tidy") => kitchen_brewed_tidy(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
