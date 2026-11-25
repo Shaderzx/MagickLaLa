@@ -1817,3 +1817,11 @@ test('One action is one undo: a Send Message tossed into an empty pot and set as
   expect(report.duplicate).toEqual({ after: 4, entries: 1, afterUndo: 3 });
   expect(report.pour).toEqual({ poured: true, shelvedAfterUndo: true });
 });
+
+test('Wires come home in their own place: setting aside two steps and pouring them back in turn leaves every wire with its original id and order, and undoing a set-aside does the same', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['wire-return']);
+
+  expect(report.poured).toEqual(report.original);
+  expect(report.pouredMatches).toBe(true);
+  expect(report.undoMatches).toBe(true);
+});

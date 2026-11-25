@@ -2000,6 +2000,59 @@ fn one_step_undo() -> Result<serde_json::Value, String> {
     let pour = json!({ "poured": poured, "shelvedAfterUndo": back.state.canvas.is_shelved(&NodeId::from("echo")) });
     Ok(json!({ "toss": toss, "duplicate": duplicate, "pour": pour }))
 }
+fn wire_return() -> Result<serde_json::Value, String> {
+    let records = |app: &StudioApp| app.spell.wires.iter().map(|wire| format!("{}:{}.{}>{}.{}", wire.id.0, wire.from_node.0, wire.from_socket, wire.to_node.0, wire.to_socket)).collect::<Vec<_>>();
+    let spell = StudioApp::from_registry().spell.clone();
+    let middles: Vec<NodeId> = spell
+        .nodes
+        .iter()
+        .filter(|node| spell.wires.iter().any(|wire| wire.to_node == node.id) && spell.wires.iter().any(|wire| wire.from_node == node.id))
+        .map(|node| node.id.clone())
+        .take(2)
+        .collect();
+    let [first, second] = <[NodeId; 2]>::try_from(middles).map_err(|_| "need two middle steps")?;
+    let mut rt = runtime_for(spell);
+    rt.update(|app, _| app.sync_spell());
+    let original = records(&rt.state);
+    for id in [&first, &second] {
+        let id = id.clone();
+        rt.update(move |app, _| {
+            app.toss(magicklala_canvas::Toss::Aside(id.clone()));
+            app.sync_edits();
+        });
+        rt.frame(0.0);
+    }
+    for id in [&first, &second] {
+        let id = id.clone();
+        rt.update(move |app, _| {
+            app.toss(magicklala_canvas::Toss::IntoPot(id.clone()));
+            app.sync_edits();
+        });
+        rt.frame(0.0);
+    }
+    let poured = records(&rt.state);
+
+    let mut undone = runtime_for(StudioApp::from_registry().spell.clone());
+    undone.on_key = Some(magicklala_studio::studio_key);
+    undone.update(|app, _| app.sync_spell());
+    let before_undo = records(&undone.state);
+    let aside = first.clone();
+    undone.update(move |app, _| {
+        app.toss(magicklala_canvas::Toss::Aside(aside.clone()));
+        app.sync_edits();
+    });
+    undone.frame(0.0);
+    undone.key(rune::KeyEvent { key: rune::Key::Command('z'), mods: rune::Mods { cmd: true, ..Default::default() } });
+    undone.frame(0.0);
+    undone.update(|app, _| app.sync_spell());
+    Ok(json!({
+        "pouredMatches": poured == original,
+        "original": original,
+        "poured": poured,
+        "undoMatches": records(&undone.state) == before_undo,
+        "undone": records(&undone.state),
+    }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8142,6 +8195,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("empty-recipe") => empty_recipe(),
         Some("list-truth") => list_truth(),
         Some("one-step-undo") => one_step_undo(),
+        Some("wire-return") => wire_return(),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("pot-rect") => pot_rect(),
         Some("gateway-hint") => gateway_hint(),
