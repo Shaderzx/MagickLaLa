@@ -1192,7 +1192,7 @@ fn grimoire_card_view<S: 'static>(
     let outputs = card.outputs.iter().map(|socket| socket_port::<S>(state, card, socket, true, dimmed, p, zoom, lens));
     shell = inputs.chain(outputs).fold(shell, |shell, port| shell.child(port));
     if let Some(badge) = perched_badge {
-        shell = shell.child(row().w(card_w).px((7.0 * zoom).max(5.0)).justify_end().absolute(0.0, -(19.5 * zoom).clamp(17.5, 21.0)).child(badge));
+        shell = shell.child(row().w(card_w).px((7.0 * zoom).max(5.0)).justify_end().absolute(0.0, -(19.5 * zoom).clamp(17.5, 21.0)).child(badge.key(format!("perched-{}", card.id.0))));
     }
     if let Some(step) = card.step_order {
         let step_sz = (18.0 * zoom).clamp(16.0, 20.0);

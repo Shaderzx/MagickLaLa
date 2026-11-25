@@ -3727,6 +3727,38 @@ fn seal_clear() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn perched_clear() -> Result<serde_json::Value, String> {
+    let mut report = serde_json::Map::new();
+    for size in [(1280.0_f32, 800.0_f32), (960.0, 640.0)] {
+        let mut app = StudioApp::with_spell(example("webhook_router.json")?, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        click(&mut rt, "run-spell")?;
+        live_finish(&mut rt)?;
+        click(&mut rt, "mode-grimoire")?;
+        rt.update(|app, _| {
+            let viewport = app.canvas_size();
+            app.canvas.fit(viewport);
+        });
+        rt.frame(3.0);
+        rt.frame(6.0);
+        let mut touching = Vec::new();
+        let mut perched = 0;
+        for card in &rt.state.canvas.nodes {
+            let Some(badge) = layout_rect(&rt, &format!("perched-{}", card.id.0)) else { continue };
+            perched += 1;
+            let grown = [badge[0] - 2.0, badge[1] - 2.0, badge[2] + 4.0, badge[3] + 4.0];
+            for other in rt.state.canvas.nodes.iter().filter(|other| other.id != card.id) {
+                if layout_rect(&rt, &format!("node-{}", other.id.0)).is_some_and(|rect| rects_overlap(grown, rect)) {
+                    touching.push(format!("{} on {}", card.id.0, other.id.0));
+                }
+            }
+        }
+        report.insert(format!("{}", size.0), json!({ "perched": perched, "touching": touching }));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -10020,6 +10052,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("tile-align") => tile_align(),
         Some("rename-keystrokes") => rename_keystrokes(),
         Some("seal-clear") => seal_clear(),
+        Some("perched-clear") => perched_clear(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),

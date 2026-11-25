@@ -2209,3 +2209,12 @@ test('Big racks keep the potion in view: after a brew every bottle on a rack of 
     expect({ scene, onFill: report[scene].onFill, timeChips: report[scene].timeChips }).toEqual({ scene, onFill: [], timeChips: 0 });
   }
 });
+
+test('Grimoire status tags never touch the card above: after brewing the webhook router every Untaken or time tag at both sizes keeps at least 2 points of air from every other card', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['perched-clear']);
+
+  for (const width of ['1280', '960']) {
+    expect(report[width].perched).toBeGreaterThan(3);
+    expect({ width, touching: report[width].touching }).toEqual({ width, touching: [] });
+  }
+});
