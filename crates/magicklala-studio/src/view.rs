@@ -182,7 +182,7 @@ fn context_tether(card: [f32; 4], menu: [f32; 4], t: &HearthPalette) -> Option<E
     Some(canvas(thread).key("context-tether").size(width, height).absolute(left, top))
 }
 
-fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<(El, Option<El>)> {
+fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<(El, Option<El>, Option<[f32; 2]>)> {
     let anchor = app.canvas.context_menu?;
     let view = app.canvas_size();
     let plan = (app.canvas.mode == WorkbenchMode::Cauldron).then(|| magicklala_canvas::brew_plan(&app.canvas, view));
@@ -198,14 +198,18 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<(El, Option<El>)> 
         if w > slack && h > slack { w * h } else { 0.0 }
     };
     let overlap = |spot: [f32; 2], r: [f32; 4]| overlap_beyond(spot, r, 4.0);
-    let steaming = app.is_running() || app.canvas.last_brew.is_some();
     let pot_zone = plan.as_ref().map(|plan| {
-        let body = plan.pot_body(steaming);
+        let body = plan.pot_body(false);
         [body[0], body[1], body[2], (plan.plaque_top + 34.0 * plan.scale.max(0.6)) - body[1]]
     });
     let picked = app.canvas.selection.clone();
     let others: Vec<[f32; 4]> = match &plan {
-        Some(plan) => plan.cards.iter().filter(|card| Some(&card.id) != picked.as_ref()).map(|card| card.rect).collect(),
+        Some(plan) => plan
+            .cards
+            .iter()
+            .filter(|card| Some(&card.id) != picked.as_ref())
+            .map(|card| [card.rect[0], card.rect[1] - 12.0, card.rect[2], card.rect[3] + 12.0])
+            .collect(),
         None => app
             .canvas
             .nodes
@@ -237,10 +241,13 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<(El, Option<El>)> 
             let crowd: f32 = others.iter().map(|other| overlap(spot, *other)).sum();
             (pot > 0.0, own > 0.0, crowd.round() as i64)
         };
-        spots.into_iter().map(clamp).enumerate().min_by_key(|(order, spot)| (cost(*spot), *order)).map_or(clamp(anchor), |(_, spot)| spot)
+        let best = spots.into_iter().map(clamp).enumerate().min_by_key(|(order, spot)| (cost(*spot), *order)).map(|(_, spot)| spot).unwrap_or(clamp(anchor));
+        let (pot, _, crowd) = cost(best);
+        if pot || crowd > 0 { [view.0 + 8.0, 8.0] } else { best }
     });
+    let docked = beside.is_some_and(|[x, _]| x > view.0);
     let [x, y] = beside.unwrap_or_else(|| clamp(anchor));
-    let tether = app.canvas.context_card.filter(|_| beside.is_some()).and_then(|card| context_tether(card, [x, y, menu_w, menu_h], t));
+    let tether = app.canvas.context_card.filter(|_| beside.is_some() && !docked).and_then(|card| context_tether(card, [x, y, menu_w, menu_h], t));
     let selected_card = app.canvas.selected_card();
     let selected_title = selected_card.map(|card| app.canvas.display_title(&card.id));
     let quick_add_title = app.specs.iter().find(|spec| spec.kind == QUICK_ADD_KIND).map_or(QUICK_ADD_KIND, |spec| spec.title.as_str());
@@ -276,7 +283,6 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<(El, Option<El>)> 
         .fill(t.card)
         .border(1.4, t.rule_2)
         .shadow(6.0, 20.0, t.shadow_soft)
-        .absolute(x, y)
         .child(header)
         .child(el().w_full().h(1.0).fill(t.rule));
     let idle = !app.is_running();
@@ -339,7 +345,7 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<(El, Option<El>)> 
                 StudioApp::fit_view,
             )),
     };
-    Some((card, tether))
+    Some((card, tether, (!docked).then_some([x, y])))
 }
 
 fn status_chip(app: &StudioApp, empty: bool, t: &HearthPalette) -> El {
@@ -391,7 +397,10 @@ pub fn studio_view(app: &StudioApp, _: &mut Cx<StudioApp>) -> El {
         .min_h(0.0)
         .child(left_rail(app, &t))
         .child(el().key("center").grow(1.0).min_w(0.0).h_full().child(canvas_with_menu(app, &t)))
-        .child(inspector(app, &t));
+        .child(match context_menu(app, &t) {
+            Some((menu, _, None)) => inspector(app, &t).child(menu.absolute(10.0, 44.0)),
+            _ => inspector(app, &t),
+        });
     let studio = col().key("studio").w_full().h_full().fill(t.paper).child(toolbar(app, &t)).child(middle).child(trace_strip(app, &t));
     let root = el().key("studio-root").w_full().h_full().child(studio).on_layout(|app: &mut StudioApp, rect: [f32; 4]| app.follow_window((rect[2], rect[3])));
     match pantry_ghost(app, &t) {
@@ -479,8 +488,8 @@ fn canvas_with_menu(app: &StudioApp, t: &HearthPalette) -> El {
         }
     }
     match context_menu(app, t) {
-        Some((menu, tether)) => board.children(tether).child(menu),
-        None => board,
+        Some((menu, tether, Some([x, y]))) => board.children(tether).child(menu.absolute(x, y)),
+        _ => board,
     }
 }
 

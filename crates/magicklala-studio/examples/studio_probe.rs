@@ -6431,7 +6431,25 @@ fn clear_sight() -> Result<serde_json::Value, String> {
         }
     }
     crowded.dedup();
-    Ok(json!({ "menuCovers": covered, "headerSpills": crowded.into_iter().take(8).collect::<Vec<_>>() }))
+    let mut last = sized_runtime((960.0, 640.0), Theme::Light);
+    let llm = last.state.canvas.nodes.iter().find(|card| card.kind == "ai/generate_text").map(|card| card.id.clone()).ok_or("no llm")?;
+    let spot = last.find(&format!("node-{}-header", llm.0)).ok_or("no llm card")?;
+    right_click(&mut last, spot);
+    last.frame(1.0);
+    let docked_menu = rect(&last, "context-menu").ok_or("no docked menu")?;
+    let inspector = rect(&last, "inspector").ok_or("no inspector")?;
+    let in_pane = docked_menu[0] >= inspector[0] - 0.5 && docked_menu[0] + docked_menu[2] <= inspector[0] + inspector[2] + 0.5;
+    let before = last.state.canvas.nodes.len();
+    click(&mut last, "context-duplicate-node")?;
+    let docked = json!({ "inRecipePane": in_pane, "duplicateWorks": last.state.canvas.nodes.len() == before + 1 });
+    if let Ok(dir) = std::env::var("CLEAR_SIGHT_SHOTS") {
+        let mut again = sized_runtime((960.0, 640.0), Theme::Light);
+        right_click(&mut again, spot);
+        again.frame(1.0);
+        let app = std::mem::replace(&mut again.state, StudioApp::from_registry());
+        render_headless_snapshot_state(&PathBuf::from(dir).join("docked-menu-960.png"), app).map_err(|error| error.to_string())?;
+    }
+    Ok(json!({ "menuCovers": covered, "headerSpills": crowded.into_iter().take(8).collect::<Vec<_>>(), "docked": docked }))
 }
 fn mixed_spell(ingredients: usize, bottles: usize) -> SpellGraph {
     let mut spell = SpellGraph::new(format!("{ingredients} steps {bottles} bottles"));

@@ -1582,7 +1582,7 @@ test('Steady hands: a card menu opens beside its card clear of the pot and other
   expect(report.menus.wide).toEqual({ coversPot: false, hides: [], attached: true });
   expect(report.menus.aside).toEqual({ coversPot: false, hides: [], attached: true });
   expect(report.menus.compact.coversPot).toBe(false);
-  expect(report.menus.compact.attached).toBe(true);
+  expect(report.menus.compact.hides).toEqual([]);
   expect(report.keys).toEqual({ escapeClosesModelMenu: true, escapeClosesTypeMenu: true, deleteOnVariablesKeepsStep: true, typingKeepsStep: true });
   expect(report.findings).toEqual({ variableNamed: true, replyFlagged: true });
   expect(report.hintBefore).toBe('→ Get Variable');
@@ -1648,11 +1648,12 @@ test('Legible shelves: in crowded, brewed, eight-bottle, compact and zoomed-out 
     expect(measured.potWidth, scene).toBeGreaterThanOrEqual(140);
   }
 });
-test('Clear sight: the card menu at 960 by 640 parks in open canvas instead of burying the other ingredients, and Grimoire card headers keep every word inside from 60% to 100% zoom', { timeout: 900_000 }, async () => {
+test('Clear sight: the card menu at 960 by 640 parks in open canvas instead of burying the other ingredients, docks in the Recipe pane with working actions when no open spot exists, and Grimoire card headers keep every word inside from 60% to 100% zoom', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['clear-sight']);
 
   expect(report.menuCovers).toEqual([]);
   expect(report.headerSpills).toEqual([]);
+  expect(report.docked).toEqual({ inRecipePane: true, duplicateWorks: true });
 });
 test('Mixed shelves: six or eight ingredients with two to six bottles never hide a card behind another in a back row, and no free pour runs behind a card on its way to the rim', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['mixed-shelves']);
