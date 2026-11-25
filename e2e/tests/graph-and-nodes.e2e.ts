@@ -1229,3 +1229,41 @@ test('a setting bound to a variable that holds no value fails its step with the 
     expect(finished(run, 'wait')).toBe(true);
   }, { variables: [{ name: 'ms', ty: 'int' }] });
 });
+
+test('a value step whose setting reads a variable with no value is itself marked failed with the variable named, not only the steps that waited on it', async () => {
+  const nodes = [
+    spellNode('start', 'event/on_start'),
+    spellNode('check', 'logic/validate', { pattern: '{{pat}}' }),
+    spellNode('text', 'json/stringify'),
+    spellNode('reply', 'io/send_message'),
+  ];
+  const wires = [
+    spellWire('w1', 'start', 'out', 'reply', 'in'),
+    spellWire('w2', 'check', 'errors', 'text', 'value'),
+    spellWire('w3', 'text', 'text', 'reply', 'content'),
+  ];
+  await withSpellFile(nodes, wires, async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(1);
+    expect(failureOf(run, 'check')).toContain('the variable pat has no value');
+  }, { variables: [{ name: 'pat', ty: 'string' }] });
+});
+
+test('a bound setting whose variable holds a value the setting cannot take fails its step by name instead of falling back to the default', async () => {
+  const nodes = [
+    spellNode('start', 'event/on_start'),
+    spellNode('set', 'var/set', { name: 'ms', value: 'not a number' }),
+    spellNode('wait', 'time/delay', { ms: '{{ms}}' }),
+    spellNode('reply', 'io/send_message', { content: 'Ready' }),
+  ];
+  const wires = [spellWire('w1', 'start', 'out', 'set', 'in'), spellWire('w2', 'set', 'out', 'wait', 'in'), spellWire('w3', 'wait', 'out', 'reply', 'in')];
+  await withSpellFile(nodes, wires, async (path) => {
+    const started = Date.now();
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(1);
+    expect(failureOf(run, 'wait')).toContain('ms');
+    expect(failureOf(run, 'wait')).toContain('not a number');
+    expect(run.events.some((event) => event.event === 'node_finished' && event.node_id === 'reply')).toBe(false);
+    expect(Date.now() - started).toBeLessThan(15_000);
+  }, { variables: [{ name: 'ms', ty: 'any' }] });
+});
