@@ -2938,6 +2938,57 @@ fn long_routes() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn menu_fan() -> Result<serde_json::Value, String> {
+    let mut floating_on_fan = Vec::new();
+    let mut docked_off_recipe = Vec::new();
+    let mut docked_outside_scroll = Vec::new();
+    let mut docked = 0;
+    for spell in [StudioApp::from_registry().spell.clone(), example("parallel_research.json")?] {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = (960.0, 640.0);
+        let mut rt = Runtime::new(app, studio_view, (960.0, 640.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let s = plan.scale;
+        let origin = layout_rect(&rt, "canvas").map(|rect| [rect[0], rect[1]]).ok_or("no canvas")?;
+        let fan = [origin[0] + plan.pot[0] - 32.0 * s, origin[1] + plan.pot[1], plan.pot[2] + 64.0 * s, plan.pot[3]];
+        for id in magicklala_canvas::recipe_order(&rt.state.canvas) {
+            if plan.card(&id).is_none_or(|card| card.role != magicklala_canvas::BrewRole::Ingredient) {
+                continue;
+            }
+            rt.update(|app, _| {
+                app.close_context_menu();
+                app.right_tab = RightTab::Trace;
+            });
+            rt.frame(0.0);
+            let Some(spot) = rt.find(&format!("node-{}", id.0)) else { continue };
+            right_click(&mut rt, spot);
+            rt.frame(1.0);
+            rt.frame(1.5);
+            let Some(menu) = layout_rect(&rt, "context-menu") else { continue };
+            let inspector = layout_rect(&rt, "inspector").ok_or("no inspector")?;
+            let in_panel = menu[0] >= inspector[0] - 0.5;
+            if in_panel {
+                docked += 1;
+                if rt.state.right_tab != RightTab::Inspector {
+                    docked_off_recipe.push(id.0.clone());
+                }
+                let scroll = layout_rect(&rt, "inspector-scroll").ok_or("no scroll")?;
+                if menu[1] < scroll[1] - 0.5 {
+                    docked_outside_scroll.push(id.0.clone());
+                }
+            } else if rects_overlap(menu, fan) {
+                floating_on_fan.push(format!("{} {}", rt.state.spell.name, id.0));
+            }
+        }
+        rt.update(|app, _| app.right_tab = RightTab::Variables);
+        rt.frame(2.0);
+        if layout_rect(&rt, "context-menu").is_some_and(|menu| layout_rect(&rt, "inspector").is_some_and(|panel| menu[0] >= panel[0] - 0.5)) {
+            docked_off_recipe.push("shown on Variables".to_owned());
+        }
+    }
+    Ok(json!({ "floatingOnFan": floating_on_fan, "docked": docked, "dockedOffRecipe": docked_off_recipe, "dockedOutsideScroll": docked_outside_scroll }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9209,6 +9260,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("stand-badge") => stand_badge(),
         Some("rack-pipes") => rack_pipes(),
         Some("long-routes") => long_routes(),
+        Some("menu-fan") => menu_fan(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
