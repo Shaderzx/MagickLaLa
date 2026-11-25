@@ -536,10 +536,11 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     let chip_on_name = (dense || crammed) && card.status == ExecutionStatus::Succeeded && chip_bottom > title_top && (mirrored || title_right > chip_left);
     let chip_on_card_above = rows_too_tight_for_chips && card.status == ExecutionStatus::Succeeded;
     let lifted_rides = (title_top - 1.0 - (chip_font * 1.25 + 4.0)).min(-12.0);
-    if chip_rides_title && -lifted_rides > air_above - 2.0 {
+    let told_in_recipe = hexed && card.selected;
+    if !told_in_recipe && chip_rides_title && -lifted_rides > air_above - 2.0 {
         let corner = if mirrored { 3.0 } else { dims[0] - chip_font * 1.4 - 3.0 };
         shell = shell.child(el().key(format!("status-pill-{}", card.id.0)).absolute(corner, 2.0).child(compact_hex_mark(&pill_reason, chip_font, p)));
-    } else if let Some(pill) = status_pill.filter(|_| !chip_on_name && !chip_on_card_above) {
+    } else if let Some(pill) = status_pill.filter(|_| !told_in_recipe && !chip_on_name && !chip_on_card_above) {
         let chip_height = chip_font * 1.25 + 4.0;
         let covers_name = chip_bottom > title_top && (mirrored || title_right > chip_left);
         let lifted = (title_top - 1.0 - chip_height).min(-12.0);

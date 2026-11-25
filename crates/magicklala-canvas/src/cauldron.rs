@@ -936,6 +936,12 @@ fn splash(state: &CanvasState, plan: &BrewPlan, p: &HearthPalette) -> Option<El>
 
 fn plaque_text(state: &CanvasState, mood: CauldronMood, plan: &BrewPlan) -> String {
     if let Some(summary) = &state.brew_summary {
+        let hexed_cards = state.nodes.iter().filter(|card| card.status == ExecutionStatus::Failed || card.inputs.iter().any(|socket| socket.flagged)).count();
+        let told_in_recipe =
+            state.selected_card().is_some_and(|card| card.status == ExecutionStatus::Failed || card.inputs.iter().any(|socket| socket.flagged));
+        if told_in_recipe && summary.starts_with("Hexed") {
+            return format!("Hexed · {hexed_cards} {}", if hexed_cards == 1 { "issue" } else { "issues" });
+        }
         return summary.clone();
     }
     let ingredients = plan.with_role(BrewRole::Ingredient).count();
