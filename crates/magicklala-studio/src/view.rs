@@ -2385,6 +2385,19 @@ fn log_chips<'a>(lines: &[&'a TraceLine], compact: bool, room_for_dots: usize, b
     {
         chips[last].1 = ChipShape::Dot;
     }
+    let issues: Vec<usize> = chips
+        .iter()
+        .enumerate()
+        .filter(|(_, (line, shape))| matches!(line.kind, "NodeFailed" | "RunRejected") && matches!(shape, ChipShape::Full))
+        .map(|(index, _)| index)
+        .collect();
+    if spent(&chips) > budget && issues.len() > 1 {
+        let more = issues.len() - 1;
+        chips[issues[1]].1 = ChipShape::More(more);
+        for &index in issues[2..].iter().rev() {
+            chips.remove(index);
+        }
+    }
     chips
 }
 
@@ -2594,6 +2607,8 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
     };
     let chips = log_chips(&shown, !app.trace_expanded, ((app.size.0 - 420.0) / 32.0).max(0.0) as usize, budget);
     let total = chips.len();
+    let chips_spent: f32 = chips.iter().map(|(line, shape)| chip_width(line, shape)).sum();
+    let collapsed = !app.trace_expanded;
     let mut step_num = 0usize;
     let body = chips.iter().enumerate().fold(row().gap(0.0).items_center(), |list, (index, (line, shape))| {
         let line = *line;
@@ -2666,9 +2681,12 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
             ExecutionStatus::Running | ExecutionStatus::Succeeded => t.broth_mid,
             ExecutionStatus::Idle => t.mute,
         };
+        let room = budget - (chips_spent - chip_width(line, shape)) - 16.0;
         let mut entry = row()
             .gap(6.0)
             .h(29.0)
+            .min_w(0.0)
+            .max_w(if collapsed { room.max(96.0) } else { f32::INFINITY })
             .px(9.0)
             .radius(10.0)
             .continuous_corners()
@@ -2690,7 +2708,7 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
                         .justify_center()
                         .child(figure(number, 9.5, 750.0, t.primary_ink)),
                 )
-                .child(label(&line.detail, 11.5, 600.0, if failed { t.hex } else { t.ink }));
+                .child(label(&line.detail, 11.5, 600.0, if failed { t.hex } else { t.ink }).truncate().shrink());
         } else if line.kind == "RunFinished" {
             let outcome = if line.detail == "Succeeded" || line.detail.is_empty() {
                 if app.active_release_version.is_some() { "Draft brewed" } else { "Brewed" }
