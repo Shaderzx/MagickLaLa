@@ -1829,3 +1829,12 @@ test('Wires come home in their own place: setting aside two steps and pouring th
   expect(report.pouredMatches).toBe(true);
   expect(report.undoMatches).toBe(true);
 });
+
+test('Every Pantry name shows whole at 960 and 1280: a long name wraps onto a second line instead of ending in an ellipsis', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['pantry-whole']);
+
+  for (const width of ['960', '1280']) {
+    expect(report[width].seen).toBeGreaterThan(30);
+    expect({ width, cut: report[width].cut }).toEqual({ width, cut: [] });
+  }
+});

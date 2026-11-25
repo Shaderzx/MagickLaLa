@@ -2059,6 +2059,35 @@ fn wire_return() -> Result<serde_json::Value, String> {
         "undone": records(&undone.state),
     }))
 }
+fn pantry_whole() -> Result<serde_json::Value, String> {
+    let mut report = serde_json::Map::new();
+    for size in [(960.0_f32, 640.0_f32), (1280.0, 800.0)] {
+        let mut app = StudioApp::with_spell(crowded_kitchen(), registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        if rt.find("palette-event-on_variable_changed").is_none() {
+            click(&mut rt, "expand-nodes")?;
+        }
+        rt.frame(3.0);
+        rt.frame(6.0);
+        let mut measure = studio_text_system();
+        let mut cut: Vec<String> = Vec::new();
+        let mut seen = 0;
+        for spec in rt.state.specs.clone() {
+            let key = format!("palette-{}", spec.kind.replace('/', "-"));
+            let Some((_, rect)) = text_lines_under(&rt, &key).into_iter().find(|(line, _)| line.replace('\u{a0}', " ") == spec.title) else { continue };
+            seen += 1;
+            let (natural, line_h) = measure.measure(&spec.title, rune::TextStyle::new(12.0, 550.0), 1.0);
+            let lines = (rect[3] / line_h).round().max(1.0);
+            if natural > rect[2] * lines + 2.0 {
+                cut.push(spec.title.clone());
+            }
+        }
+        report.insert(format!("{}", size.0), json!({ "seen": seen, "cut": cut }));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8278,6 +8307,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("list-truth") => list_truth(),
         Some("one-step-undo") => one_step_undo(),
         Some("wire-return") => wire_return(),
+        Some("pantry-whole") => pantry_whole(),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("pot-rect") => pot_rect(),
         Some("gateway-hint") => gateway_hint(),
