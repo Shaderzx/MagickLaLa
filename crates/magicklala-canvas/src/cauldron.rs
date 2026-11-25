@@ -1006,14 +1006,6 @@ fn extra_title_lines(state: &CanvasState, plan: &BrewPlan, bottles: &[&BrewCard]
     (title_lines(state, plan, bottles.len(), id) - 1.0) * crate::view::legible_size(12.5, plan.scale) * 1.35
 }
 
-fn rack_tag_floor(state: &CanvasState, plan: &BrewPlan, bottles: &[&BrewCard]) -> f32 {
-    let size = crate::view::legible_size(12.5, plan.scale);
-    bottles
-        .iter()
-        .map(|card| card.rect[1] + (66.0 + 12.0 + 16.0 + title_lines(state, plan, bottles.len(), &card.id) * size * 1.35 + 2.0) * plan.scale)
-        .fold(f32::MIN, f32::max)
-}
-
 fn rack_plank_shape(size: [f32; 2], rows: &[[f32; 3]], s: f32, p: &HearthPalette) -> Shape {
     let mut shape = Shape::new();
     let thick = 9.0 * s;
@@ -1231,17 +1223,6 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         board = board.child(el().key("bottle-rack").size(frame[2], frame[3]).absolute(frame[0], frame[1]).child(
             canvas(rack_plank_shape([frame[2], frame[3]], &ledges, plan.scale.max(0.4), &p)).key("rack-plank").size(frame[2], frame[3]).absolute(0.0, 0.0),
         ));
-        let kinds: Vec<&str> = bottles.iter().filter_map(|placed| state.card(&placed.id).map(|card| card.kind.as_str())).collect();
-        if let Some(kind) = kinds.first().filter(|kind| kinds.iter().all(|other| other == *kind)) {
-            let size = crate::view::legible_size(11.0, plan.scale);
-            board = board.child(
-                row()
-                    .w(frame[2])
-                    .justify_center()
-                    .absolute(frame[0], rack_tag_floor(state, &plan, &bottles) + 6.0 * plan.scale)
-                    .child(el().key("rack-kind").child(text(*kind).font(TextStyle::new(size * plan.scale, 500.0).mono()).color(p.mute))),
-            );
-        }
     }
     for placed in &bottles {
         let Some(card) = state.card(&placed.id) else { continue };
