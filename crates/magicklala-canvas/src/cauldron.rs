@@ -185,7 +185,7 @@ fn ribbon_course(plan: &BrewPlan, from: [f32; 2], to: [f32; 2], own: Option<&Nod
     let dx = to[0] - from[0];
     let direct = cubic_samples(from, [from[0] + dx * 0.4, from[1]], [to[0], to[1] - 16.0 * s], to, 44);
     let blocking: Vec<[f32; 4]> = plan.cards.iter().filter(|card| Some(&card.id) != own).map(|card| card.rect).filter(|r| inside(*r, &direct) > 0).collect();
-    let lanes_floor = plan.lanes.map_or(f32::MIN, |[shelf_bottom, band]| shelf_bottom + band + 6.0 * s);
+    let lanes_floor = plan.lanes.map_or(f32::MIN, |[shelf_bottom, band, _]| shelf_bottom + band + 6.0 * s);
     let nest = rise_rank(plan, own) as f32;
     let lowest_top = blocking.iter().map(|rect| rect[1]).fold(to[1] - 16.0 * s, f32::min);
     let ceiling = (lowest_top - 6.0 * s).max(lanes_floor);
@@ -603,14 +603,15 @@ pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32
         .map(|(index, placed)| {
             let from = vial_mouth(placed, plan);
             let points = match plan.lanes {
-                Some([shelf_bottom, gap]) => {
+                Some([shelf_bottom, gap, column_gap]) => {
                     let lane_rank = lane_order.iter().position(|id| id == &placed.id).unwrap_or(0) as f32;
                     let column = columns.iter().position(|x| (x - placed.rect[0]).abs() < 1.0).unwrap_or(0);
                     let mates = ingredients.iter().filter(|other| (other.rect[0] - placed.rect[0]).abs() < 1.0).count().max(1);
                     let rank = ingredients.iter().filter(|other| (other.rect[0] - placed.rect[0]).abs() < 1.0 && other.rect[1] < placed.rect[1] - 0.5).count();
                     let offset = (mates as f32 - 1.0) * 0.5 - rank as f32;
-                    let strand = (gap * 0.8 / mates as f32).min(6.0 * plan.scale);
-                    let lane_x = placed.rect[0] + placed.rect[2] + gap * 0.5 + offset * strand;
+                    let channel = column_gap - 10.0 * plan.scale;
+                    let strand = (channel * 0.7 / mates as f32).min(6.0 * plan.scale);
+                    let lane_x = placed.rect[0] + placed.rect[2] + channel * 0.5 + offset * strand;
                     let share = column as f32 / (columns.len().max(2) - 1) as f32;
                     let to = rim_point(plan, (share + offset * 0.035).clamp(0.0, 1.0));
                     let floor = (shelf_bottom + gap).min(ribbon_top - 8.0 * plan.scale).max(shelf_bottom + 2.0 * plan.scale);

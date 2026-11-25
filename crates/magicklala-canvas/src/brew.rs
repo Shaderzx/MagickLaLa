@@ -52,7 +52,7 @@ pub struct BrewPlan {
     pub ghost_bottle: Option<[f32; 4]>,
     pub aside_zone: [f32; 4],
     pub vial: [f32; 2],
-    pub lanes: Option<[f32; 2]>,
+    pub lanes: Option<[f32; 3]>,
     pub flank: bool,
     pub cards: Vec<BrewCard>,
 }
@@ -529,9 +529,10 @@ fn plan_stacked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
     let bottles: Vec<NodeId> = order.iter().filter(|id| ends.contains(id)).cloned().collect();
     let ingredients: Vec<NodeId> = order.iter().filter(|id| brewing.contains(*id) && !bottles.contains(*id)).cloned().collect();
     let aside: Vec<NodeId> = order.iter().filter(|id| !brewing.contains(*id) && !bottles.contains(*id)).cloned().collect();
+    let lane_gap = m.col_gap.max(36.0);
     let usable_w = (size.0 - 2.0 * SIDE_ROOM).max(120.0);
     let usable_h = (size.1 - TOP_ROOM - BOTTOM_ROOM).max(120.0);
-    let readable_row = (((usable_w / READABLE + m.col_gap) / (m.vial[0] + m.col_gap)).floor() as usize).max(1);
+    let readable_row = (((usable_w / READABLE + lane_gap) / (m.vial[0] + lane_gap)).floor() as usize).max(1);
     let bottle_size = bottle_size_for(bottles.len());
     let rack = bottles.len() >= RACK_FROM;
     let pot_block_h = m.pot[1] + PLAQUE_ROOM;
@@ -541,7 +542,7 @@ fn plan_stacked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
     let bottle_count = bottles.len().max(1);
     let shelf_for = |per_row: usize| {
         let cols = ingredients.len().min(per_row);
-        let w = if cols == 0 { 0.0 } else { cols as f32 * m.vial[0] + (cols - 1) as f32 * m.col_gap };
+        let w = if cols == 0 { 0.0 } else { cols as f32 * m.vial[0] + (cols - 1) as f32 * lane_gap };
         (per_row, w, stack_height(ingredients.len().div_ceil(per_row), m.vial[1], m.row_gap))
     };
     let shape_for = |(per_row, shelf_w, shelf_h): (usize, f32, f32), rows: usize| {
@@ -589,7 +590,7 @@ fn plan_stacked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
     let mut cards = Vec::with_capacity(state.nodes.len());
     let shelf_left = (block_w - shelf_w) * 0.5;
     for (index, id) in ingredients.iter().enumerate() {
-        let x = shelf_left + (index % per_row) as f32 * (m.vial[0] + m.col_gap);
+        let x = shelf_left + (index % per_row) as f32 * (m.vial[0] + lane_gap);
         let y = (index / per_row) as f32 * (m.vial[1] + m.row_gap);
         cards.push(BrewCard {
             id: id.clone(),
@@ -649,7 +650,20 @@ fn plan_stacked(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, Brew
     let zone_top = zone_top.min(size.1 - 84.0).max(0.0);
     let aside_zone = [0.0, zone_top, size.0, (size.1 - zone_top).max(84.0)];
     let shelf_bottom = to_screen(0.0, shelf_h, 0.0, 0.0)[1];
-    (fit, BrewPlan { scale, pot, plaque_top, ghost_bottle, aside_zone, vial: m.vial, lanes: Some([shelf_bottom, lane_band * scale]), flank: false, cards })
+    (
+        fit,
+        BrewPlan {
+            scale,
+            pot,
+            plaque_top,
+            ghost_bottle,
+            aside_zone,
+            vial: m.vial,
+            lanes: Some([shelf_bottom, lane_band * scale, lane_gap * scale]),
+            flank: false,
+            cards,
+        },
+    )
 }
 
 fn plan_with(state: &CanvasState, size: (f32, f32), m: Metrics) -> (f32, BrewPlan) {
