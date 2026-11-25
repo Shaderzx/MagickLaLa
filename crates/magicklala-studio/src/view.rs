@@ -1849,7 +1849,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             .wires
             .iter()
             .find(|w| is_input && !socket.ty.is_flow() && w.to_node == card.id && w.to_socket == socket.name)
-            .map(|w| format!("{} · {}", app.canvas.display_title(&w.from_node), w.from_socket));
+            .map(|w| (app.canvas.display_title(&w.from_node), w.from_socket.clone()));
         let has_plug_button = is_input && !socket.ty.is_flow() && !app.is_running();
         let stand_in = is_input && app.is_stand_in(&card.id, &socket.name);
         let name_weight = if socket.ty.is_flow() || flagged { 650.0 } else { 500.0 };
@@ -1864,7 +1864,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                     .label(format!("Unplug {name}"))
                     .min_h(24.0)
                     .min_w(24.0)
-                    .max_w(if compact { 118.0 } else { 150.0 })
+                    .max_w(if compact { 168.0 } else { 190.0 })
                     .pl(9.0)
                     .pr(7.0)
                     .gap(5.0)
@@ -1876,11 +1876,13 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                     .shadow(1.0, 3.0, with_alpha(t.ink, 0.08))
                     .shrink()
                     .children(stand_in.then(|| label("stand-in", 10.0, 700.0, t.gold)))
-                    .children(fed_from.clone().map(|source| label(source, 10.5, 600.0, t.ink).key(format!("plug-source-{name}")).truncate().shrink()))
+                    .children(fed_from.clone().map(|(step, _)| label(step, 10.5, 650.0, t.ink).key(format!("plug-source-{name}"))))
+                    .children(fed_from.clone().map(|(_, output)| label(format!("· {output}"), 10.5, 500.0, t.ink_2).truncate().shrink()))
                     .child(label("✕", 10.5, 700.0, t.ink_2))
                     .on_press(move |app: &mut StudioApp| app.unplug_wire(&wire)),
                 None => row()
                     .key(format!("plug-{name}"))
+                    .label(format!("Plug in {name}"))
                     .min_h(24.0)
                     .min_w(24.0)
                     .px(10.0)
@@ -1896,7 +1898,9 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             };
             right_meta = right_meta.child(action);
         }
-        right_meta = right_meta.child(label(format!("{:?}", socket.ty), if compact { 10.5 } else { 11.0 }, 550.0, if flagged { t.hex } else { t.mute }));
+        if !(compact && fed_from.is_some()) {
+            right_meta = right_meta.child(label(format!("{:?}", socket.ty), if compact { 10.5 } else { 11.0 }, 550.0, if flagged { t.hex } else { t.mute }));
+        }
         row()
             .w_full()
             .min_h(socket_h)
@@ -1937,6 +1941,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             menu = menu.child(
                 row()
                     .key(format!("plug-{}-{}-{}", socket.name, source.node.0, source.socket))
+                    .label(format!("Plug {caption} into {}", socket.name))
                     .w_full()
                     .px(8.0)
                     .py(5.0)

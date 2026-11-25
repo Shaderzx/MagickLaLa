@@ -1914,6 +1914,7 @@ impl StudioApp {
         if self.is_running() || !self.canvas.wires.iter().any(|candidate| &candidate.id == wire) {
             return;
         }
+        let was_hexed = matches!(self.validation, ValidationState::Invalid(_));
         self.undo_stack.push(UndoEntry::Edit(Box::new(self.edit_snapshot(None))));
         self.redo_stack.clear();
         let cut = self
@@ -1934,6 +1935,9 @@ impl StudioApp {
         self.canvas.wires.retain(|candidate| &candidate.id != wire);
         self.validation = ValidationState::Unchecked;
         self.sync_spell();
+        if was_hexed {
+            self.validate();
+        }
     }
 
     fn place_ingredient(&mut self, kind: &str, screen: [f32; 2], wire_in: bool) -> Option<NodeId> {
