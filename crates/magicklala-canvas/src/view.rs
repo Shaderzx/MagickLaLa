@@ -483,9 +483,10 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     }
     if let Some(pill) = status_pill {
         let clear = if step_num.is_some() { badge_side + 2.0 } else { 10.0 };
-        let lane = row().w(dims[0]).pl(if mirrored { 10.0 } else { clear }).pr(if mirrored { clear } else { 10.0 }).absolute(0.0, -12.0);
+        let icon_side = if dense || crammed { 10.0 + badge + 6.0 } else { 10.0 };
+        let lane = row().w(dims[0]).pl(if mirrored { icon_side } else { clear }).pr(if mirrored { clear } else { icon_side }).absolute(0.0, -12.0);
         let lane = if mirrored { lane.justify_start() } else { lane.justify_end() };
-        let room = dims[0] - clear - 10.0;
+        let room = dims[0] - clear - icon_side;
         shell = shell.child(lane.child(el().key(format!("status-pill-{}", card.id.0)).max_w(room).min_w(0.0).child(pill.max_w(room))));
     }
     shell
@@ -579,6 +580,20 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     let title_col = if untaken { p.untaken_title() } else { p.ink };
     let sub_col = if untaken { p.untaken_sub() } else { p.mute };
     let long_tag = crate::brew::potion_ends(state).len() <= 3;
+    let crowded_tag = legible(11.0) > 11.0 * 1.15;
+    let inline_badge = !long_tag || crowded_tag;
+    let side = legible(11.0) * 1.55;
+    let step_badge = step_num.map(|num| {
+        el().key(format!("step-badge-{}", card.id.0)).child(
+            row()
+                .size(side, side)
+                .radius(side * 0.5)
+                .items_center()
+                .justify_center()
+                .fill(if hexed { p.hex } else { p.primary_bg })
+                .child(text(num.to_string()).font(TextStyle::new(legible(10.5), 750.0).features("'tnum' 1")).color(p.primary_ink)),
+        )
+    });
     let tag_inner = col()
         .key(format!("bottle-tag-{}", card.id.0))
         .w_full()
@@ -590,30 +605,25 @@ pub(crate) fn branch_bottle_view<S: 'static>(
         .fill(card_bg)
         .border(if taken || card.selected { 1.6 } else { 1.1 }, card_border)
         .shadow(2.0, 8.0, if untaken { Color::TRANSPARENT } else { p.shadow_card })
-        .child(match route_key {
-            Some(key) => col()
-                .key(key)
-                .w_full()
-                .min_w(0.0)
-                .child(text(title).font(TextStyle::new(legible(12.5), 750.0)).color(title_col).wrap_anywhere().max_lines(if long_tag { 4 } else { 2 })),
-            None => col()
-                .w_full()
-                .min_w(0.0)
-                .child(text(title).font(TextStyle::new(legible(12.5), 750.0)).color(title_col).wrap_anywhere().max_lines(if long_tag { 4 } else { 2 })),
-        })
+        .child(
+            row().w_full().min_w(0.0).child(match route_key {
+                Some(key) => col()
+                    .key(key)
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .child(text(title).font(TextStyle::new(legible(12.5), 750.0)).color(title_col).wrap_anywhere().max_lines(if long_tag { 4 } else { 2 })),
+                None => col()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .child(text(title).font(TextStyle::new(legible(12.5), 750.0)).color(title_col).wrap_anywhere().max_lines(if long_tag { 4 } else { 2 })),
+            }),
+        )
         .children((!terse).then(|| text(&card.kind).font(TextStyle::new(legible(11.0), 500.0).mono()).color(sub_col).truncate()));
-    let mut tag_wrap = el().w_full().child(tag_inner).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(pill));
-    if let Some(num) = step_num {
-        let side = legible(11.0) * 1.55;
-        let step_badge = row()
-            .size(side, side)
-            .radius(side * 0.5)
-            .items_center()
-            .justify_center()
-            .fill(if hexed { p.hex } else { p.primary_bg })
-            .child(text(num.to_string()).font(TextStyle::new(legible(11.0), 750.0).features("'tnum' 1")).color(p.primary_ink));
-        tag_wrap = tag_wrap.child(el().key(format!("step-badge-{}", card.id.0)).absolute(-6.0, -side - 3.0).child(step_badge));
-    }
+    let tag_wrap = el()
+        .w_full()
+        .child(tag_inner)
+        .children((!(crowded_tag && taken)).then(|| row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(pill)))
+        .children(step_badge.clone().filter(|_| !inline_badge).map(|badge| badge.absolute(-6.0, -side - 3.0)));
     let tag = col().w_full().child(tag_wrap);
     let select_id = card.id.clone();
     col()
@@ -624,6 +634,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
         .absolute(pos_x, pos_y)
         .child(bottle_art)
         .child(tag)
+        .children(step_badge.filter(|_| inline_badge).map(|badge| badge.absolute(width * 0.5 + 4.0, bottle_h - side - 2.0)))
         .on_press(move |s: &mut S| lens(s).select(Some(select_id.clone())))
 }
 

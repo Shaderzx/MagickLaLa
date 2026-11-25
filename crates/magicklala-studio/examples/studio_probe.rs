@@ -3545,11 +3545,18 @@ fn kitchen_brewed_tidy() -> Result<serde_json::Value, String> {
                 let title = rt.state.canvas.display_title(&card.id);
                 let lines = text_lines_under(&rt, &format!("node-{id}-header"));
                 let Some((_, name)) = lines.iter().find(|(line, _)| line.replace('\u{a0}', " ") == title) else { continue };
-                if lines.iter().any(|(line, rect)| line.replace('\u{a0}', " ") != title && !line.chars().all(|ch| ch.is_ascii_digit()) && rects_overlap(*rect, *name)) {
+                if lines
+                    .iter()
+                    .any(|(line, rect)| line.replace('\u{a0}', " ") != title && !line.chars().all(|ch| ch.is_ascii_digit()) && rects_overlap(*rect, *name))
+                {
                     covered_names.push(title.clone());
                 }
+                let column = layout_rect(&rt, &format!("node-{id}-header")).unwrap_or(tag);
                 if let Some(badge) = layout_rect(&rt, &format!("step-badge-{id}"))
-                    && !(badge[0] >= tag[0] - 0.5 && badge[0] + badge[2] <= tag[0] + tag[2] + 0.5 && badge[1] >= tag[1] - 0.5 && badge[1] + badge[3] <= tag[1] + tag[3] + 0.5)
+                    && !(badge[0] >= column[0] - 0.5
+                        && badge[0] + badge[2] <= column[0] + column[2] + 0.5
+                        && badge[1] >= column[1] - 0.5
+                        && badge[1] + badge[3] <= tag[1] + 0.5)
                 {
                     loose_badges.push(title.clone());
                 }
