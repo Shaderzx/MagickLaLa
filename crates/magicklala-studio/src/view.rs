@@ -1833,12 +1833,8 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         };
         let mut right_meta = row().gap(8.0).items_center();
         if flagged {
-            right_meta = right_meta.child(row().px(6.0).py(1.0).radius(6.0).border(1.0, t.hex).fill(t.hex_tint).child(label(
-                if socket.mistyped { "Wrong type" } else { "Missing" },
-                9.5,
-                700.0,
-                t.hex,
-            )));
+            right_meta = right_meta
+                .child(label(if socket.mistyped { "Wrong type" } else { "Missing" }, 10.5, 700.0, t.hex).key(format!("socket-missing-{}", socket.name)));
         }
         if is_input && !socket.ty.is_flow() && !supplied && !app.is_running() {
             let name = socket.name.clone();
@@ -1847,20 +1843,31 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             let action = match wire_id {
                 Some(wire) => row()
                     .key(format!("unplug-{name}"))
-                    .px(6.0)
-                    .py(1.5)
-                    .radius(6.0)
+                    .min_h(26.0)
+                    .min_w(26.0)
+                    .px(10.0)
+                    .radius(8.0)
+                    .continuous_corners()
+                    .items_center()
+                    .justify_center()
+                    .fill(t.card)
                     .border(1.0, t.rule_2)
-                    .child(label("Unplug", 9.8, 650.0, t.ink_2))
+                    .shadow(1.0, 3.0, with_alpha(t.ink, 0.08))
+                    .child(label("Unplug", 11.0, 650.0, t.ink))
                     .on_press(move |app: &mut StudioApp| app.unplug_wire(&wire)),
                 None => row()
                     .key(format!("plug-{name}"))
-                    .px(6.0)
-                    .py(1.5)
-                    .radius(6.0)
-                    .fill(if flagged { t.hex_tint } else { Color::TRANSPARENT })
+                    .min_h(26.0)
+                    .min_w(26.0)
+                    .px(10.0)
+                    .radius(8.0)
+                    .continuous_corners()
+                    .items_center()
+                    .justify_center()
+                    .fill(if flagged { t.hex } else { t.card })
                     .border(1.0, if flagged { t.hex } else { t.rule_2 })
-                    .child(label("Plug in", 9.8, 700.0, if flagged { t.hex } else { t.ink_2 }))
+                    .shadow(1.0, 3.0, with_alpha(t.ink, 0.08))
+                    .child(label("Plug in", 11.0, 700.0, if flagged { t.primary_ink } else { t.ink }))
                     .on_press(move |app: &mut StudioApp| app.toggle_plug_menu(&node, &name)),
             };
             right_meta = right_meta.child(action);
