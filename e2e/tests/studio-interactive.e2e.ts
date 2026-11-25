@@ -2268,3 +2268,11 @@ test('Bottles whose long route names differ only at the start still get differen
     expect(report[size].distinct).toBe(4);
   }
 });
+
+test('A lone bottle the brew skipped reads Untaken and stays empty glass: when a Switch sends the message down an unwired route, its only Send bottle shows Untaken, and the release seal fills it only before any brew', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['skipped-solo']);
+
+  expect(report.tag).toMatch(/Untaken/);
+  expect(report.sealedBefore).toBe(true);
+  expect(report.sealedAfter).toBe(false);
+});

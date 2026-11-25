@@ -3535,6 +3535,52 @@ fn twin_tails() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn skipped_solo() -> Result<serde_json::Value, String> {
+    let mut spell = SpellGraph::new("Skipped Solo");
+    spell.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("switch", "flow/switch", 280.0, json!({ "cases": ["refund"] })),
+        studio_node("reply", "io/send_message", 560.0, serde_json::Value::Null),
+    ];
+    spell.wires = vec![
+        studio_wire("w1", ("trigger", "out"), ("switch", "in")),
+        studio_wire("w2", ("trigger", "content"), ("switch", "value")),
+        studio_wire("w3", ("switch", "refund"), ("reply", "in")),
+        studio_wire("w4", ("trigger", "content"), ("reply", "content")),
+    ];
+    let run = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4d41";
+    let at = "2026-11-25T10:00:00Z";
+    let spell_id = spell.id.0.to_string();
+    let summary = json!({ "run_id": run, "spell_id": spell_id, "started_at": at, "finished_at": at, "status": "succeeded", "nodes_executed": 2, "outputs": {}, "error": null });
+    let events: Vec<magicklala_graph::TraceEvent> = [
+        json!({ "event": "run_started", "run_id": run, "spell_id": spell_id, "at": at }),
+        json!({ "event": "node_finished", "run_id": run, "node_id": "trigger", "at": at, "duration_ms": 1 }),
+        json!({ "event": "wire_activated", "run_id": run, "wire_id": "w1", "at": at }),
+        json!({ "event": "node_finished", "run_id": run, "node_id": "switch", "at": at, "duration_ms": 1 }),
+        json!({ "event": "run_finished", "run_id": run, "at": at, "summary": summary }),
+    ]
+    .into_iter()
+    .map(|event| serde_json::from_value(event).map_err(|error| error.to_string()))
+    .collect::<Result<_, _>>()?;
+    let mut rt = runtime_for(spell);
+    rt.update(|app, _| {
+        app.active_release_version = Some(1);
+        app.canvas.release_badge = Some("v1".to_owned());
+    });
+    rt.frame(1.0);
+    let sealed_before = magicklala_canvas::view::solo_bottle_sealed(&rt.state.canvas);
+    rt.update(move |app, _| {
+        app.pending_trace.extend(events.clone());
+        while app.step_trace() {}
+    });
+    rt.frame(2.0);
+    rt.frame(3.0);
+    Ok(json!({
+        "tag": texts_under(&mut rt, "node-reply-header"),
+        "sealedBefore": sealed_before,
+        "sealedAfter": magicklala_canvas::view::solo_bottle_sealed(&rt.state.canvas),
+    }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -10209,6 +10255,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("set-before-read") => set_before_read(),
         Some("long-route-row") => long_route_row(),
         Some("twin-tails") => twin_tails(),
+        Some("skipped-solo") => skipped_solo(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),
