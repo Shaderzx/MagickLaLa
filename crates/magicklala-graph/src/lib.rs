@@ -11,7 +11,7 @@ mod value;
 pub use engine::{
     DEFAULT_WHILE_LOOP_MAX_ITERATIONS, DO_ONCE_KIND, EngineServices, MAX_ACTIVATION_LOG_BYTES, MAX_REPLIES, MAX_REPLY_BYTES, NodeCatalog, RunBinding,
     RunTrigger, START_TRIGGER_KIND, SUBGRAPH_KIND, SpellEngine, SubgraphResolver, TRIGGER_PAYLOAD_SOCKET, UNBOUND_SETTINGS, WAIT_FOR_ALL_KIND, WHILE_LOOP_KIND,
-    bound_variable,
+    bound_variable, whole_number,
 };
 pub use error::{NodeError, SpellError, ValidationError};
 pub use ir::{NodeId, NodeInstance, SPELL_SCHEMA_VERSION, ShelfEntry, SpellGraph, SpellId, SubgraphRef, VariableDef, Wire, WireId};

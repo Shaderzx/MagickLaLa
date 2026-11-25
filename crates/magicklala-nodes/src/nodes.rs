@@ -162,7 +162,7 @@ fn required_config(ctx: &dyn NodeContext, key: &str) -> Result<String, NodeError
 }
 
 pub(crate) fn config_u64(ctx: &dyn NodeContext, key: &str, default: u64) -> u64 {
-    ctx.node().config.get(key).and_then(serde_json::Value::as_u64).unwrap_or(default)
+    ctx.node().config.get(key).and_then(magicklala_graph::whole_number).unwrap_or(default)
 }
 
 fn config_bool(ctx: &dyn NodeContext, key: &str, default: bool) -> bool {
@@ -561,7 +561,7 @@ async fn llm_request(ctx: &mut dyn NodeContext, extra_system: Option<String>) ->
         model: config_text(ctx, "model").unwrap_or_else(|| "gpt-4o-mini".to_owned()),
         messages,
         temperature: config.get("temperature").and_then(serde_json::Value::as_f64).map(|temperature| temperature as f32),
-        max_tokens: config.get("max_tokens").and_then(serde_json::Value::as_u64).and_then(|tokens| u32::try_from(tokens).ok()),
+        max_tokens: config.get("max_tokens").and_then(magicklala_graph::whole_number).and_then(|tokens| u32::try_from(tokens).ok()),
         stop: config_list(ctx, "stop").unwrap_or_default(),
         credential_id: config_text(ctx, "credential_id"),
     })

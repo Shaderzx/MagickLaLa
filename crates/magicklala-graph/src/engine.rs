@@ -728,14 +728,10 @@ impl RunState {
             return Ok(DEFAULT_WHILE_LOOP_MAX_ITERATIONS);
         };
         let Some(name) = bound_variable(setting) else {
-            return Ok(setting.as_u64().unwrap_or(DEFAULT_WHILE_LOOP_MAX_ITERATIONS).max(1));
+            return Ok(whole_number(setting).unwrap_or(DEFAULT_WHILE_LOOP_MAX_ITERATIONS).max(1));
         };
         let value = locked(&self.variables).get(name).map(Value::to_json);
-        let whole = match &value {
-            Some(serde_json::Value::String(text)) => text.trim().parse::<u64>().ok(),
-            Some(number) => number.as_u64(),
-            None => None,
-        };
+        let whole = value.as_ref().and_then(whole_number);
         whole.filter(|limit| *limit >= 1).ok_or_else(|| {
             let shown = value.map_or_else(|| "nothing".to_owned(), |value| value.to_string());
             NodeError::Other(format!("while loop max_iterations must be a whole number of at least 1, but {{{{{name}}}}} is {shown}"))
@@ -930,6 +926,10 @@ struct ExecContext {
 }
 
 pub const UNBOUND_SETTINGS: [&str; 3] = ["template", "prompt", "script"];
+
+pub fn whole_number(value: &serde_json::Value) -> Option<u64> {
+    value.as_u64().or_else(|| value.as_f64().filter(|number| *number >= 0.0 && number.fract() == 0.0 && *number <= u64::MAX as f64).map(|number| number as u64))
+}
 
 pub fn bound_variable(value: &serde_json::Value) -> Option<&str> {
     value.as_str()?.trim().strip_prefix("{{")?.strip_suffix("}}").map(str::trim).filter(|name| !name.is_empty() && !name.contains(['{', '}']))
