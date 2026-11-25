@@ -6515,14 +6515,20 @@ fn undo_order() -> Result<serde_json::Value, String> {
         });
         rt.frame(0.0);
     };
-    let fed_by_trigger =
-        |app: &StudioApp| app.canvas.wires.iter().any(|wire| wire.from_node.0 == "trigger" && wire.from_socket == "content" && wire.to_node.0 == "reply" && wire.to_socket == "content");
+    let fed_by_trigger = |app: &StudioApp| {
+        app.canvas
+            .wires
+            .iter()
+            .any(|wire| wire.from_node.0 == "trigger" && wire.from_socket == "sender" && wire.to_node.0 == "reply" && wire.to_socket == "content")
+    };
     let mut later = runtime_for(tasting_spell());
     later.on_key = Some(magicklala_studio::studio_key);
     remove_echo(&mut later);
     let removed = later.state.canvas.card(&NodeId::from("echo")).is_none();
     later.update(|app, _| {
-        let _ = app.canvas.connect_sockets(&SocketRef::new(NodeId::from("trigger"), "content".to_owned()), &SocketRef::new(NodeId::from("reply"), "content".to_owned()));
+        let _ = app
+            .canvas
+            .connect_sockets(&SocketRef::new(NodeId::from("trigger"), "sender".to_owned()), &SocketRef::new(NodeId::from("reply"), "content".to_owned()));
         app.sync_edits();
     });
     later.frame(0.0);
@@ -6553,7 +6559,8 @@ fn undo_order() -> Result<serde_json::Value, String> {
         "undoAfterTracked": undo_after_tracked,
         "typedThenUndo": typed_then_undo,
     }))
-}fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
+}
+fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),

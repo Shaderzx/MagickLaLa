@@ -833,6 +833,7 @@ pub struct StudioApp {
     pub var_name_edits: Vec<TextEdit>,
     pub var_default_edits: Vec<TextEdit>,
     pub undo_stack: Vec<UndoEntry>,
+    undo_seen: usize,
     pub aside_wires: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
     pub aside_bridges: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
     pub aside_refused: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
@@ -958,6 +959,7 @@ impl StudioApp {
             var_name_edits: Vec::new(),
             var_default_edits: Vec::new(),
             undo_stack: Vec::new(),
+            undo_seen: 0,
             aside_wires: HashMap::new(),
             aside_bridges: HashMap::new(),
             aside_refused: HashMap::new(),
@@ -2284,18 +2286,24 @@ impl StudioApp {
             && subgraphs == self.spell.subgraphs
             && shelf == self.spell.shelf
         {
+            self.undo_seen = self.undo_stack.len();
             return false;
         }
         let shelf_changed = shelf != self.spell.shelf;
-        self.spell.shelf = shelf;
         let unplaced = |list: &[NodeInstance]| list.iter().map(|node| (node.id.clone(), node.kind.clone(), node.config.clone())).collect::<Vec<_>>();
-        if vars_changed
+        let recipe_changed = vars_changed
             || problems_changed
             || wires != self.spell.wires
             || subgraphs != self.spell.subgraphs
             || shelf_changed
-            || unplaced(&nodes) != unplaced(&self.spell.nodes)
-        {
+            || unplaced(&nodes) != unplaced(&self.spell.nodes);
+        if recipe_changed && self.undo_stack.len() == self.undo_seen {
+            self.undo_stack.clear();
+            self.undo_banner = None;
+        }
+        self.undo_seen = self.undo_stack.len();
+        self.spell.shelf = shelf;
+        if recipe_changed {
             self.canvas.clear_run_marks();
             self.canvas.last_brew = None;
             self.canvas.brew_total_ms = None;
