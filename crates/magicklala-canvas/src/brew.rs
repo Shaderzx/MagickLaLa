@@ -8,6 +8,8 @@ pub const VIAL_SIZE: [f32; 2] = [196.0, 58.0];
 pub const POT_SIZE: [f32; 2] = [300.0, 290.0];
 pub const SINGLE_BOTTLE_SIZE: [f32; 2] = [148.0, 196.0];
 pub const MULTI_BOTTLE_SIZE: [f32; 2] = [150.0, 148.0];
+pub const POT_RIM_TOP: f32 = 0.34;
+pub const POT_STEAM_TOP: f32 = 0.08;
 const ROW_GAP: f32 = 22.0;
 const COL_GAP: f32 = 28.0;
 const SHELF_TO_POT: f32 = 52.0;
@@ -61,6 +63,11 @@ impl BrewPlan {
 
     pub fn pot_center(&self) -> [f32; 2] {
         [self.pot[0] + self.pot[2] * 0.5, self.pot[1] + self.pot[3] * 0.5]
+    }
+
+    pub fn pot_body(&self, steaming: bool) -> [f32; 4] {
+        let share = if steaming { POT_STEAM_TOP } else { POT_RIM_TOP };
+        [self.pot[0], self.pot[1] + self.pot[3] * share, self.pot[2], self.pot[3] * (1.0 - share)]
     }
 
     pub fn pour_radius(&self) -> f32 {
@@ -262,16 +269,35 @@ enum Arrangement {
     TightStacked,
 }
 
+const MIN_POT_PX: f32 = 140.0;
+
+type Planner = fn(&CanvasState, (f32, f32), Metrics) -> (f32, BrewPlan);
+
+fn with_visible_pot(state: &CanvasState, size: (f32, f32), m: Metrics, plan: Planner) -> (f32, BrewPlan) {
+    let mut metrics = m;
+    let mut made = plan(state, size, metrics);
+    for _ in 0..4 {
+        let shown = metrics.pot[0] * made.0;
+        if shown >= MIN_POT_PX - 0.5 || metrics.pot[0] >= m.pot[0] * 2.5 {
+            break;
+        }
+        let grow = (MIN_POT_PX / shown.max(1.0)) * 1.04;
+        metrics.pot = [metrics.pot[0] * grow, metrics.pot[1] * grow];
+        made = plan(state, size, metrics);
+    }
+    made
+}
+
 impl Arrangement {
     fn build(self, state: &CanvasState, size: (f32, f32)) -> (f32, BrewPlan) {
         let small_pot = [204.0, 198.0];
         match self {
-            Arrangement::CrowdedRing => plan_with(state, size, CROWDED),
-            Arrangement::CrowdedFlank => plan_flanked(state, size, CROWDED),
-            Arrangement::TightFlank => plan_flanked(state, size, TIGHT),
-            Arrangement::Stacked => plan_stacked(state, size, Metrics { pot: small_pot, col_gap: 24.0, ..CROWDED }),
-            Arrangement::TightRing => plan_with(state, size, TIGHT),
-            Arrangement::TightStacked => plan_stacked(state, size, Metrics { pot: small_pot, ..TIGHT }),
+            Arrangement::CrowdedRing => with_visible_pot(state, size, CROWDED, plan_with),
+            Arrangement::CrowdedFlank => with_visible_pot(state, size, CROWDED, plan_flanked),
+            Arrangement::TightFlank => with_visible_pot(state, size, TIGHT, plan_flanked),
+            Arrangement::Stacked => with_visible_pot(state, size, Metrics { pot: small_pot, col_gap: 24.0, ..CROWDED }, plan_stacked),
+            Arrangement::TightRing => with_visible_pot(state, size, TIGHT, plan_with),
+            Arrangement::TightStacked => with_visible_pot(state, size, Metrics { pot: small_pot, ..TIGHT }, plan_stacked),
         }
     }
 }

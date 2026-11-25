@@ -509,8 +509,23 @@ fn vial_mouth(placed: &BrewCard, plan: &BrewPlan) -> [f32; 2] {
     let scale = placed.rect[3] / plan.vial[1];
     let dense = plan.vial[1] < 50.0;
     let narrow = plan.vial[0] < 170.0;
-    let badge = if dense || narrow { 30.0 } else { 38.0 };
-    let centre_y = if narrow && !dense { placed.rect[1] + ((plan.vial[1] - 46.0) * 0.5 + 15.0) * scale } else { placed.rect[1] + placed.rect[3] * 0.5 };
+    let crammed = plan.scale < crate::view::LEGIBLE_PX / 13.0;
+    if crammed && plan.lanes.is_none() {
+        let badge = 24.0;
+        let edge = if placed.mirrored { placed.rect[0] } else { placed.rect[0] + placed.rect[2] };
+        let centre = [edge, placed.rect[1] + placed.rect[3] * 0.5];
+        let lean = if placed.mirrored { -0.22 } else { 0.22 };
+        return [centre[0] + badge * lean * scale, centre[1] - badge * 0.36 * scale];
+    }
+    let badge = if crammed {
+        24.0
+    } else if dense || narrow {
+        30.0
+    } else {
+        38.0
+    };
+    let centre_y =
+        if narrow && !dense && !crammed { placed.rect[1] + ((plan.vial[1] - 46.0) * 0.5 + 15.0) * scale } else { placed.rect[1] + placed.rect[3] * 0.5 };
     if placed.mirrored {
         let center = [placed.rect[0] + (9.0 + badge * 0.5) * scale, centre_y];
         return [center[0] - badge * 0.22 * scale, center[1] - badge * 0.36 * scale];
@@ -761,13 +776,15 @@ fn plaque(state: &CanvasState, mood: CauldronMood, plan: &BrewPlan, p: &HearthPa
         CauldronMood::Empty => p.mute,
     };
     let hexed = mood == CauldronMood::Hexed;
-    let width = 360.0;
     let [cx, _] = plan.pot_center();
     let shrink = plan.scale.min(1.0);
-    row().w(width).h(28.0).justify_center().absolute(cx - width * 0.5, plan.plaque_top - 14.0 * (1.0 - shrink)).scale(shrink).child(
+    let size = crate::view::legible_size(12.0, shrink);
+    let tall = (size + 16.0).max(28.0);
+    let width = 360.0 * (size / 12.0).max(1.0);
+    row().w(width).h(tall).justify_center().absolute(cx - width * 0.5, plan.plaque_top - tall * 0.5 * (1.0 - shrink)).scale(shrink).child(
         row()
             .key("cauldron-plaque")
-            .h(28.0)
+            .h(tall)
             .px(12.0)
             .gap(7.0)
             .radius(14.0)
@@ -777,7 +794,7 @@ fn plaque(state: &CanvasState, mood: CauldronMood, plan: &BrewPlan, p: &HearthPa
             .border(1.2, if hexed { p.hex } else { p.rule_2 })
             .shadow(3.0, 10.0, p.shadow_card)
             .child(el().size(7.0, 7.0).radius(3.5).fill(dot))
-            .child(text(plaque_text(state, mood, plan)).font(TextStyle::new(12.0, 650.0)).color(if hexed { p.hex } else { p.ink })),
+            .child(text(plaque_text(state, mood, plan)).font(TextStyle::new(size, 650.0)).color(if hexed { p.hex } else { p.ink })),
     )
 }
 
@@ -980,7 +997,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
         let view = if multi {
             branch_bottle_view(state, card, step, [0.0, 0.0, natural[0]], bottle_tint(state, &plan, &placed.id), has_run, false, plan.scale, &p, lens)
         } else {
-            potion_stand_view(state, card, step, [0.0, 0.0, natural[0]], potion_tint(state, &plan), mood, false, &p, lens)
+            potion_stand_view(state, card, step, [0.0, 0.0, natural[0]], potion_tint(state, &plan), mood, false, plan.scale, &p, lens)
         };
         board =
             board.child(el().key(format!("node-{}", placed.id.0)).size(natural[0], natural[1]).absolute(origin[0], origin[1]).child(view).scale(plan.scale));

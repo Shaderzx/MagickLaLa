@@ -5,7 +5,7 @@ pub mod hearth;
 pub mod model;
 pub mod view;
 
-pub use brew::{BrewCard, BrewPlan, BrewRole, brew_plan, brewing_nodes, recipe_nodes, recipe_order};
+pub use brew::{BrewCard, BrewPlan, BrewRole, POT_RIM_TOP, POT_STEAM_TOP, brew_plan, brewing_nodes, recipe_nodes, recipe_order};
 pub use camera::Camera;
 pub use cauldron::{Toss, TossHook};
 pub use hearth::{CategoryTone, CauldronMood, HearthPalette, VialKind};

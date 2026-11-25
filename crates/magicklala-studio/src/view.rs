@@ -198,7 +198,11 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<(El, Option<El>)> 
         if w > slack && h > slack { w * h } else { 0.0 }
     };
     let overlap = |spot: [f32; 2], r: [f32; 4]| overlap_beyond(spot, r, 4.0);
-    let pot_zone = plan.as_ref().map(|plan| [plan.pot[0], plan.pot[1], plan.pot[2], (plan.plaque_top + 34.0 * plan.scale.max(0.6)) - plan.pot[1]]);
+    let steaming = app.is_running() || app.canvas.last_brew.is_some();
+    let pot_zone = plan.as_ref().map(|plan| {
+        let body = plan.pot_body(steaming);
+        [body[0], body[1], body[2], (plan.plaque_top + 34.0 * plan.scale.max(0.6)) - body[1]]
+    });
     let picked = app.canvas.selection.clone();
     let others: Vec<[f32; 4]> = match &plan {
         Some(plan) => plan.cards.iter().filter(|card| Some(&card.id) != picked.as_ref()).map(|card| card.rect).collect(),
@@ -223,6 +227,9 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<(El, Option<El>)> 
             columns.push(zone[0] + zone[2] + 8.0);
         }
         let mut spots = vec![[card[0] + card[2] + 10.0, card[1]], [card[0] - menu_w - 10.0, card[1]]];
+        for x in [card[0] + card[2] + 10.0, card[0] - menu_w - 10.0] {
+            spots.push([x, card[1] + card[3] - menu_h]);
+        }
         spots.extend(columns.iter().flat_map(|column| [[*column, below], [*column, above]]));
         let cost = |spot: [f32; 2]| {
             let pot = pot_zone.map_or(0.0, |zone| overlap_beyond(spot, zone, 0.0));

@@ -2486,6 +2486,12 @@ fn cauldron_reads_cleanly() -> Result<serde_json::Value, String> {
     }))
 }
 
+fn pot_body(rt: &Runtime<StudioApp>) -> Option<[f32; 4]> {
+    let steaming = rt.state.is_running() || rt.state.canvas.last_brew.is_some();
+    let share = if steaming { magicklala_canvas::POT_STEAM_TOP } else { magicklala_canvas::POT_RIM_TOP };
+    layout_rect(rt, "hero-cauldron").map(|pot| [pot[0], pot[1] + pot[3] * share, pot[2], pot[3] * (1.0 - share)])
+}
+
 fn layout_rect(rt: &Runtime<StudioApp>, key: &str) -> Option<[f32; 4]> {
     rt.elements().iter().find(|element| element.key.as_deref() == Some(key) && !element.exiting).map(|element| element.rect)
 }
@@ -5457,7 +5463,7 @@ fn hands_on() -> Result<serde_json::Value, String> {
             let Some(spot) = centre_of(&menu, &format!("node-{}", id.0)) else { continue };
             right_click(&mut menu, spot);
             menu.frame(1.0);
-            if let (Some(panel), Some(pot)) = (layout_rect(&menu, "context-menu"), layout_rect(&menu, "hero-cauldron"))
+            if let (Some(panel), Some(pot)) = (layout_rect(&menu, "context-menu"), pot_body(&menu))
                 && rects_overlap(panel, pot)
             {
                 covered.push(format!("{}x{} {}", size.0, size.1, id.0));
@@ -5807,7 +5813,7 @@ fn steady_hands() -> Result<serde_json::Value, String> {
         rt.frame(1.0);
         let card = layout_rect(&rt, &format!("node-{target}")).ok_or("no card")?;
         let panel = layout_rect(&rt, "context-menu").ok_or("no menu")?;
-        let pot = layout_rect(&rt, "hero-cauldron");
+        let pot = pot_body(&rt);
         let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
         let hides: Vec<String> = plan
             .cards
@@ -6391,7 +6397,8 @@ fn legible_shelves() -> Result<serde_json::Value, String> {
         );
     }
     Ok(json!({ "reference": reference, "cases": report }))
-}fn clear_sight() -> Result<serde_json::Value, String> {
+}
+fn clear_sight() -> Result<serde_json::Value, String> {
     let mut menu_rt = sized_runtime((960.0, 640.0), Theme::Light);
     let trigger = menu_rt.state.canvas.nodes.iter().find(|card| card.kind == "event/on_message").map(|card| card.id.clone()).ok_or("no trigger")?;
     let header = menu_rt.find(&format!("node-{}-header", trigger.0)).ok_or("no trigger card")?;
@@ -6426,7 +6433,8 @@ fn legible_shelves() -> Result<serde_json::Value, String> {
     }
     crowded.dedup();
     Ok(json!({ "menuCovers": covered, "headerSpills": crowded.into_iter().take(8).collect::<Vec<_>>() }))
-}fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
+}
+fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),
