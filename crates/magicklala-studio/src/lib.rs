@@ -2560,29 +2560,57 @@ impl StudioApp {
 
     fn carry_rename(&mut self, old: &str, new: &str) {
         let renamed = format!("{{{{{new}}}}}");
-        let fed: std::collections::HashSet<NodeId> =
-            self.canvas.wires.iter().filter(|wire| wire.to_socket == old && !wire.ty.is_flow()).map(|wire| wire.to_node.clone()).collect();
-        for (id, config) in self.configs.iter_mut() {
-            let reads_wire = fed.contains(id);
-            for (key, value) in config.as_object_mut().into_iter().flat_map(|settings| settings.iter_mut()) {
-                let template_text = magicklala_graph::UNBOUND_SETTINGS.contains(&key.as_str());
-                if !template_text && magicklala_graph::bound_variable(value) == Some(old) {
-                    *value = serde_json::Value::String(renamed.clone());
-                } else if reads_wire {
-                    continue;
-                } else if magicklala_graph::bound_variable(value) == Some(old) {
-                    *value = serde_json::Value::String(renamed.clone());
-                } else if let Some(text) = value.as_str().filter(|text| template_roots(text).iter().any(|root| root == old)) {
-                    *value = serde_json::Value::String(magicklala_nodes::rename_template_root(text, old, new));
-                }
+        let kinds: BTreeMap<NodeId, String> = self.canvas.nodes.iter().map(|card| (card.id.clone(), card.kind.clone())).collect();
+        let aside = self.aside_wires.values().flatten().map(|(_, to)| to.clone()).filter(|to| self.input_type(to).is_some_and(|ty| !ty.is_flow()));
+        let fed: std::collections::HashSet<NodeId> = self
+            .canvas
+            .wires
+            .iter()
+            .filter(|wire| !wire.ty.is_flow())
+            .map(|wire| SocketRef::new(wire.to_node.clone(), wire.to_socket.clone()))
+            .chain(aside)
+            .filter(|to| to.socket == old)
+            .map(|to| to.node)
+            .collect();
+        let binds = |kind: &str, key: &str| self.specs.iter().any(|spec| spec.kind == kind && spec.binds_setting(key));
+        let binding: Vec<(NodeId, String)> = self
+            .configs
+            .iter()
+            .flat_map(|(id, config)| {
+                let kind = kinds.get(id).cloned().unwrap_or_default();
+                config
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter(|(key, value)| binds(&kind, key) && magicklala_graph::bound_variable(value) == Some(old))
+                    .map(|(key, _)| (id.clone(), key.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (id, key) in binding {
+            if let Some(value) = self.configs.get_mut(&id).and_then(|config| config.get_mut(&key)) {
+                *value = serde_json::Value::String(renamed.clone());
             }
         }
-        let kinds: BTreeMap<NodeId, String> = self.canvas.nodes.iter().map(|card| (card.id.clone(), card.kind.clone())).collect();
-        for (id, edit) in self.prompts.iter_mut().filter(|(id, _)| !fed.contains(*id)) {
-            let names_variable = kinds.get(id).is_some_and(|kind| kind.starts_with("var/")) && edit.text.trim() == old;
-            if names_variable {
+        for (id, config) in self.configs.iter_mut() {
+            let kind = kinds.get(id).map_or("", String::as_str);
+            let Some(settings) = config.as_object_mut() else { continue };
+            if kind.starts_with("var/") {
+                if let Some(name) = settings.get_mut("name").filter(|name| name.as_str().is_some_and(|name| name.trim() == old)) {
+                    *name = serde_json::Value::String(new.to_owned());
+                }
+            } else if kind == "text/template" && !fed.contains(id)
+                && let Some(template) = settings.get_mut("template")
+                && let Some(text) = template.as_str().filter(|text| template_roots(text).iter().any(|root| root == old))
+            {
+                *template = serde_json::Value::String(magicklala_nodes::rename_template_root(text, old, new));
+            }
+        }
+        for (id, edit) in self.prompts.iter_mut() {
+            let kind = kinds.get(id).map_or("", String::as_str);
+            if kind.starts_with("var/") && edit.text.trim() == old {
                 *edit = TextEdit::new(new);
-            } else if template_roots(&edit.text).iter().any(|root| root == old) {
+            } else if kind == "text/template" && !fed.contains(id) && template_roots(&edit.text).iter().any(|root| root == old) {
                 *edit = TextEdit::new(magicklala_nodes::rename_template_root(&edit.text, old, new));
             }
         }
