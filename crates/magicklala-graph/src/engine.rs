@@ -602,6 +602,9 @@ impl RunState {
         };
         self.emit(TraceEvent::NodeStarted { run_id: self.run_id(), node_id: node.clone(), at: Utc::now(), subgraph_path: Vec::new() });
         self.shared.executed.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = unset_bound_setting(self, &instance) {
+            return Err(stack.fail(Fault::Node(error)));
+        }
         let waiting_on = WaitCell::default();
         let mut context = ExecContext::data(Arc::clone(self), instance, memo.clone(), scope.clone(), Arc::clone(&waiting_on));
         let future: BoxFuture<Result<NodeOutcome, NodeError>> = Box::pin(async move { executor.execute(&mut context).await });
@@ -823,6 +826,9 @@ impl RunState {
         let started = Instant::now();
         self.emit(TraceEvent::NodeStarted { run_id: self.run_id(), node_id: node.clone(), at: Utc::now(), subgraph_path: Vec::new() });
         self.shared.executed.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = unset_bound_setting(self, &instance) {
+            return Err(self.fault_on(node, Fault::Node(error)));
+        }
         let mut context = ExecContext::flow(self.clone(), instance, socket, scope.clone());
         let cancellation = self.shared.cancellation.clone();
         let result = tokio::select! {
@@ -933,6 +939,16 @@ pub fn whole_number(value: &serde_json::Value) -> Option<u64> {
 
 pub fn bound_variable(value: &serde_json::Value) -> Option<&str> {
     value.as_str()?.trim().strip_prefix("{{")?.strip_suffix("}}").map(str::trim).filter(|name| !name.is_empty() && !name.contains(['{', '}']))
+}
+
+fn unset_bound_setting(state: &RunState, node: &NodeInstance) -> Option<NodeError> {
+    let settings = node.config.as_object()?;
+    let variables = locked(&state.variables);
+    settings.iter().filter(|(key, _)| !UNBOUND_SETTINGS.contains(&key.as_str())).find_map(|(key, value)| {
+        let name = bound_variable(value)?;
+        let empty = variables.get(name).is_none_or(|held| held.to_json().is_null());
+        empty.then(|| NodeError::Other(format!("{key} reads {{{{{name}}}}}, but the variable {name} has no value")))
+    })
 }
 
 fn bound_settings(state: &RunState, mut node: NodeInstance) -> NodeInstance {
