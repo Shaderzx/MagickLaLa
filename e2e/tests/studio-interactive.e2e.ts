@@ -1672,3 +1672,13 @@ test('Undo keeps time in order: after a newer untracked edit such as a new wire 
   expect(report.undoAfterTracked).toBe(true);
   expect(report.typedThenUndo).toEqual({ variables: 1, undoLeft: 0 });
 });
+test('Potion rack: four or more bottles stand in rows on shelf planks fed by one glass pipe per row instead of a branch per bottle, and crowded ingredient names stay whole instead of being cut', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['potion-rack']);
+
+  for (const [scene, rack] of Object.entries<any>(report)) {
+    expect({ scene, cut: rack.cut }).toEqual({ scene, cut: [] });
+    expect({ scene, rack: rack.rack }).toEqual({ scene, rack: true });
+    expect({ scene, pipes: rack.pipes }).toEqual({ scene, pipes: rack.rows });
+    expect(rack.rows, scene).toBeLessThanOrEqual(3);
+  }
+});

@@ -6560,6 +6560,59 @@ fn undo_order() -> Result<serde_json::Value, String> {
         "typedThenUndo": typed_then_undo,
     }))
 }
+fn potion_rack() -> Result<serde_json::Value, String> {
+    let cases = [
+        ("kitchen-pantry@960", crowded_kitchen(), (960.0_f32, 640.0_f32), true, false),
+        ("kitchen-brewed@1280", crowded_kitchen(), (1280.0, 800.0), false, true),
+        ("eight-brewed@1280", many_bottle_spell(8), (1280.0, 800.0), false, true),
+        ("eight@960", many_bottle_spell(8), (960.0, 640.0), false, false),
+    ];
+    let mut report = serde_json::Map::new();
+    for (name, spell, size, pantry, brew) in cases {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        if pantry {
+            click(&mut rt, "expand-nodes")?;
+        }
+        if brew {
+            click(&mut rt, "run-spell")?;
+            live_finish(&mut rt)?;
+        }
+        rt.frame(3.0);
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let mut measure = studio_text_system();
+        let cut: Vec<String> = rt
+            .state
+            .canvas
+            .nodes
+            .iter()
+            .filter(|card| plan.card(&card.id).is_some_and(|placed| placed.role == magicklala_canvas::BrewRole::Ingredient))
+            .filter_map(|card| {
+                let title = rt.state.canvas.display_title(&card.id);
+                let (_, rect) = text_lines_under(&rt, &format!("node-{}", card.id.0)).into_iter().find(|(line, _)| line.replace('\u{a0}', " ") == title)?;
+                let (natural, line_h) = measure.measure(&title, rune::TextStyle::new(13.0_f32.max(10.5 / plan.scale), 750.0), 1.0);
+                let lines = (rect[3] / (line_h * plan.scale)).round().max(1.0);
+                (natural * plan.scale > rect[2] * lines + 3.0).then_some(title)
+            })
+            .collect();
+        let mut tops: Vec<f32> = plan.with_role(magicklala_canvas::BrewRole::Bottle).map(|card| card.rect[1]).collect();
+        tops.sort_by(f32::total_cmp);
+        tops.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+        let mut pipes: Vec<f32> = magicklala_canvas::cauldron::ribbon_paths(&plan)
+            .iter()
+            .filter_map(|ribbon| ribbon.get(ribbon.len().saturating_sub(2)).map(|point| point[1]))
+            .collect();
+        pipes.sort_by(f32::total_cmp);
+        pipes.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+        report.insert(
+            name.to_owned(),
+            json!({ "cut": cut.into_iter().take(6).collect::<Vec<_>>(), "rack": rt.presented("bottle-rack").is_some(), "rows": tops.len(), "pipes": pipes.len() }),
+        );
+    }
+    Ok(json!(report))
+}
 fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
@@ -7476,6 +7529,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("clear-sight") => clear_sight(),
         Some("mixed-shelves") => mixed_shelves(args),
         Some("undo-order") => undo_order(),
+        Some("potion-rack") => potion_rack(),
         Some("honest-edits") => honest_edits(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
