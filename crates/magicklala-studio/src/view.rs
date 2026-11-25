@@ -451,7 +451,8 @@ fn starter_shelf(app: &StudioApp, t: &HearthPalette) -> El {
     let vial = [176.0_f32, 34.0_f32];
     let gap = 8.0;
     let stack_h = triggers.len() as f32 * (vial[1] + gap) - gap;
-    let x = (pot[0] - vial[0] - 36.0).max(12.0);
+    let left = pot[0] - vial[0] - 36.0;
+    let x = if left >= 12.0 { left } else { (pot[0] + pot[2] + 36.0).min(size.0 - vial[0] - 12.0) };
     let y = (pot[1] + pot[3] * 0.5 - stack_h * 0.5).max(12.0);
     let tone = category_tone("events", light);
     triggers.iter().enumerate().fold(el().key("starter-shelf").absolute(0.0, 0.0), |shelf, (index, spec)| {
@@ -483,7 +484,8 @@ fn canvas_with_menu(app: &StudioApp, t: &HearthPalette) -> El {
     let mut board = interactive_canvas_view::<StudioApp>(&app.canvas, app.canvas_size(), |app| &mut app.canvas, StudioApp::toss);
     if app.canvas.nodes.is_empty() {
         board = board.child(empty_canvas_overlay(app, t));
-        if app.canvas.mode == WorkbenchMode::Cauldron {
+        let pantry_open = app.left_tab == LeftTab::Palette && !app.left_rail_collapsed();
+        if app.canvas.mode == WorkbenchMode::Cauldron && !pantry_open {
             board = board.child(starter_shelf(app, t));
         }
     }

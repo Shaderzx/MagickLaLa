@@ -6122,6 +6122,7 @@ fn last_mile(db_path: &Path) -> Result<serde_json::Value, String> {
     brewing.update(|app, _| app.cancel_run());
 
     let mut empty = runtime_for(SpellGraph::new("Fresh"));
+    empty.update(|app, _| app.left_tab = LeftTab::Agents);
     empty.frame(1.0);
     let starters_in_pot: Vec<String> = text_lines_under(&empty, "canvas").into_iter().map(|(line, _)| line).filter(|line| line.starts_with("On ")).collect();
     let starters_in_panel: Vec<String> =
@@ -6811,7 +6812,13 @@ fn starter_shelf_room() -> Result<serde_json::Value, String> {
             _ => {}
         }
         rt.frame(1.0);
-        let starters: Vec<[f32; 4]> = rt.state.specs.iter().filter(|spec| spec.is_trigger).filter_map(|spec| layout_rect(&rt, &format!("starter-{}", spec.kind.replace('/', "-")))).collect();
+        let starters: Vec<[f32; 4]> = rt
+            .state
+            .specs
+            .iter()
+            .filter(|spec| spec.is_trigger)
+            .filter_map(|spec| layout_rect(&rt, &format!("starter-{}", spec.kind.replace('/', "-"))))
+            .collect();
         let pot = pot_body(&rt);
         let pantry_open = rt.state.left_tab == LeftTab::Palette && !rt.state.left_rail_collapsed();
         Ok(json!({
@@ -6826,7 +6833,8 @@ fn starter_shelf_room() -> Result<serde_json::Value, String> {
         "compactClosed": scene((960.0, 640.0), None)?,
         "compactWithPantry": scene((960.0, 640.0), Some(true))?,
     }))
-}fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
+}
+fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),
