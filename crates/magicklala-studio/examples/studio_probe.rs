@@ -4494,6 +4494,40 @@ fn literal_braces() -> Result<serde_json::Value, String> {
     let undeclared = validation_of(&mut bare)?;
     Ok(json!({ "undeclared": undeclared["validation"], "errors": undeclared["errors"] }))
 }
+fn rename_reach() -> Result<serde_json::Value, String> {
+    use magicklala_graph::{Value, VariableDef};
+    let mut spell = SpellGraph::new("Rename Reach");
+    spell.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("keep", "var/set", 200.0, json!({ "name": "value" })),
+        studio_node("words", "text/template", 400.0, json!({ "template": "Say {{ value.amount }} and {{value}}" })),
+        studio_node("llm", "ai/generate_text", 600.0, json!({ "prompt": "Hello {{value}}" })),
+        studio_node("reply", "io/send_message", 800.0, serde_json::Value::Null),
+    ];
+    spell.wires = vec![
+        studio_wire("w1", ("trigger", "out"), ("keep", "in")),
+        studio_wire("w2", ("trigger", "content"), ("keep", "value")),
+        studio_wire("w3", ("keep", "out"), ("llm", "in")),
+        studio_wire("w4", ("llm", "out"), ("reply", "in")),
+        studio_wire("w5", ("words", "text"), ("reply", "content")),
+    ];
+    spell.variables = vec![VariableDef { name: "value".to_owned(), ty: SocketType::Json, default: Some(Value::Json(json!({ "amount": 2 }))), exposed: true }];
+    let mut rt = runtime_for(spell);
+    rt.update(|app, _| {
+        if let Some(edit) = app.var_name_edits.get_mut(0) {
+            *edit = rune::TextEdit::new("amount");
+        }
+        app.sync_edits();
+    });
+    rt.frame(0.0);
+    let setting = |app: &StudioApp, id: &str, key: &str| app.spell.nodes.iter().find(|node| node.id.0 == id).and_then(|node| node.config.get(key).cloned()).unwrap_or_default();
+    Ok(json!({
+        "variables": rt.state.spell.variables.iter().map(|variable| variable.name.clone()).collect::<Vec<_>>(),
+        "setName": setting(&rt.state, "keep", "name"),
+        "template": setting(&rt.state, "words", "template"),
+        "aiPrompt": setting(&rt.state, "llm", "prompt"),
+    }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11264,6 +11298,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("quiet-hex") => quiet_hex(),
         Some("fix-fits") => fix_fits(),
         Some("literal-braces") => literal_braces(),
+        Some("rename-reach") => rename_reach(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),
