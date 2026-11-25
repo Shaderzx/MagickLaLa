@@ -527,6 +527,7 @@ test('Typing a variable rename one key at a time never takes over a step input: 
     queryWired: true,
     check: 'valid',
     landedOnInput: { check: ['query: a step input already uses this name'], name: 'query_limit' },
+    sharedName: { limit: '{{topk}}', template: 'Need {{query}} now' },
   });
 });
 

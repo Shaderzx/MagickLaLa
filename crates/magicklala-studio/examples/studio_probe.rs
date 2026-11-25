@@ -4422,7 +4422,29 @@ fn rename_keystrokes() -> Result<serde_json::Value, String> {
     });
     rt.frame(0.0);
     let landed = validation_of(&mut rt)?;
+    let mut shared = SpellGraph::new("Shared Name");
+    shared.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("words", "text/template", 260.0, json!({ "template": "Need {{query}} now" })),
+        studio_node("search", "knowledge/search", 260.0, json!({ "limit": "{{query}}" })),
+    ];
+    shared.wires = vec![
+        link("s1", ("trigger", "out"), ("search", "in")),
+        link("s2", ("trigger", "content"), ("search", "query")),
+        link("s3", ("trigger", "content"), ("words", "query")),
+    ];
+    shared.variables = vec![VariableDef { name: "query".to_owned(), ty: SocketType::Int, default: Some(Value::Int(3)), exposed: true }];
+    let mut sharing = runtime_for(shared);
+    sharing.update(|app, _| {
+        if let Some(edit) = app.var_name_edits.first_mut() {
+            *edit = rune::TextEdit::new("topk");
+        }
+        app.sync_edits();
+    });
+    sharing.frame(0.0);
+    let shared_name = json!({ "limit": setting(&sharing.state, "search", "limit"), "template": setting(&sharing.state, "words", "template") });
     Ok(json!({
+        "sharedName": shared_name,
         "landedOnInput": { "check": landed["errors"], "name": rt.state.spell.variables.first().map(|variable| variable.name.clone()) },
         "name": name,
         "template": template,
