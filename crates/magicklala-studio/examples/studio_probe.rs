@@ -2174,6 +2174,37 @@ fn downhill() -> Result<serde_json::Value, String> {
     }
     Ok(json!({ "uphill": uphill, "misordered": misordered, "cutKinds": cut_kinds }))
 }
+fn failed_stub() -> Result<serde_json::Value, String> {
+    let mut upward: Vec<String> = Vec::new();
+    let mut crowding: Vec<String> = Vec::new();
+    for size in [(960.0_f32, 640.0_f32), (1280.0, 800.0)] {
+        let mut app = StudioApp::with_spell(example("parallel_research.json")?, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        click(&mut rt, "run-spell")?;
+        live_finish(&mut rt)?;
+        rt.frame(2.0);
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let paths = magicklala_canvas::cauldron::pour_paths(&rt.state.canvas, &plan);
+        let failed: Vec<NodeId> = rt.state.canvas.nodes.iter().filter(|card| card.status == ExecutionStatus::Failed).map(|card| card.id.clone()).collect();
+        for (id, points) in paths.iter().filter(|(id, _)| failed.contains(id)) {
+            let stub = magicklala_canvas::cauldron::hexed_stub(points);
+            let end = stub[stub.len() - 1];
+            let before = stub[stub.len().saturating_sub(4)];
+            let heading_down = stub.len() < 2 || end[1] - before[1] >= 0.5 * (end[0] - before[0]).abs();
+            if !heading_down {
+                upward.push(format!("{}@{}", id.0, size.0));
+            }
+            for (other, line) in paths.iter().filter(|(other, _)| other != id && !failed.contains(other)) {
+                let near = line.iter().map(|point| (point[0] - end[0]).hypot(point[1] - end[1])).fold(f32::MAX, f32::min);
+                if near < 8.0 * plan.scale {
+                    crowding.push(format!("{}@{} near {}", id.0, size.0, other.0));
+                }
+            }
+        }
+    }
+    Ok(json!({ "upward": upward, "crowding": crowding }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8392,6 +8423,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("pantry-whole") => pantry_whole(),
         Some("empty-start") => empty_start(),
         Some("downhill") => downhill(),
+        Some("failed-stub") => failed_stub(),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("pot-rect") => pot_rect(),
         Some("gateway-hint") => gateway_hint(),
