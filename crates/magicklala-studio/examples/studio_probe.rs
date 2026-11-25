@@ -4354,6 +4354,36 @@ fn stand_in() -> Result<serde_json::Value, String> {
         bridged.iter().map(|socket| (socket.clone(), json!(texts_under(&mut rt, &format!("unplug-{socket}"))))).collect();
     Ok(json!({ "bridged": bridged, "chips": chips, "banner": rt.state.undo_banner.clone() }))
 }
+fn mend_matches_list() -> Result<serde_json::Value, String> {
+    let press = |rt: &mut Runtime<StudioApp>, key: rune::Key, cmd: bool| {
+        rt.key(rune::KeyEvent { key, mods: rune::Mods { cmd, ..Default::default() } });
+        rt.frame(1.0);
+    };
+    let mut demo = StudioApp::from_registry().spell.clone();
+    demo.wires.retain(|wire| !(wire.to_node.0 == "recall" && wire.to_socket == "query"));
+    let mut rt = runtime_for(demo);
+    rt.on_key = Some(magicklala_studio::studio_key);
+    let _ = validation_of(&mut rt)?;
+    rt.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("recall")));
+        app.right_tab = RightTab::Inspector;
+    });
+    rt.frame(1.0);
+    let fix_caption = texts_under(&mut rt, "inspector-fix");
+    let first_listed = rt
+        .state
+        .earlier_fitting_outputs(&NodeId::from("recall"), "query")
+        .first()
+        .map(|source| format!("{} · {}", rt.state.canvas.display_title(&source.node), source.socket));
+    click(&mut rt, "inspector-fix")?;
+    rt.frame(2.0);
+    let after_fix = rt.state.validation.label();
+    let fed = rt.state.spell.wires.iter().any(|wire| wire.to_node.0 == "recall" && wire.to_socket == "query");
+    press(&mut rt, rune::Key::Command('z'), true);
+    let fed_after_undo = rt.state.spell.wires.iter().any(|wire| wire.to_node.0 == "recall" && wire.to_socket == "query");
+    let words: Vec<String> = all_texts(&rt).into_iter().filter(|line| line.starts_with("Pour ") && line.contains(" · ")).collect();
+    Ok(json!({ "fixCaption": fix_caption, "firstListed": first_listed, "afterFix": after_fix, "fed": fed, "fedAfterUndo": fed_after_undo, "pourWords": words }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11117,6 +11147,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("hex-chips-clear") => hex_chips_clear(),
         Some("error-actions") => error_actions(),
         Some("stand-in") => stand_in(),
+        Some("mend-matches-list") => mend_matches_list(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

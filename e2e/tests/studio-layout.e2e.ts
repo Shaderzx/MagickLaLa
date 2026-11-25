@@ -759,3 +759,12 @@ test('A stand-in wire is never silent: setting Search Memory aside routes its so
   expect(report.banner).toMatch(/Set aside Search Memory/);
   expect(report.banner).toMatch(/On Message/);
 });
+
+test('The red box and the Plug in list agree: the fix button on a step missing its query reads Plug in with the first source the list offers, pressing it wires that source and re-checks to valid, and Cmd+Z takes it back out', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['mend-matches-list']);
+
+  expect(report.fixCaption).toBe(`Plug in ${report.firstListed}`);
+  expect(report.afterFix).toBe('valid');
+  expect(report.fed).toBe(true);
+  expect(report.fedAfterUndo).toBe(false);
+});
