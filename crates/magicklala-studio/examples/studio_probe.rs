@@ -3668,6 +3668,65 @@ fn small_rack_rows() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn plank_clear() -> Result<serde_json::Value, String> {
+    let mut report = serde_json::Map::new();
+    let scenes = [
+        ("router-brewed@1280", example("webhook_router.json")?, (1280.0_f32, 800.0_f32), true),
+        ("router@960", example("webhook_router.json")?, (960.0, 640.0), false),
+        ("eight-brewed@1280", many_bottle_spell(8), (1280.0, 800.0), true),
+        ("eight-brewed@960", many_bottle_spell(8), (960.0, 640.0), true),
+        ("three-brewed@1280", many_bottle_spell(3), (1280.0, 800.0), true),
+    ];
+    for (name, spell, size, brew) in scenes {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        if brew {
+            click(&mut rt, "run-spell")?;
+            live_finish(&mut rt)?;
+        }
+        rt.frame(3.0);
+        rt.frame(6.0);
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let s = plan.scale;
+        let origin = rt.presented("canvas").map(|(rect, _)| [rect[0], rect[1]]).ok_or("no canvas")?;
+        let Some((frame, rows)) = magicklala_canvas::cauldron::rack_planks(&plan) else {
+            report.insert(name.to_owned(), json!({ "rack": false }));
+            continue;
+        };
+        let bands: Vec<[f32; 4]> = rows
+            .iter()
+            .flat_map(|row| {
+                let top = origin[1] + frame[1] + row[0] + 2.0 * s;
+                let (x0, x1) = (origin[0] + frame[0] + row[1].max(0.0) + 2.0 * s, origin[0] + frame[0] + row[2] - 2.0 * s);
+                let foot = magicklala_canvas::cauldron::RACK_BRACKET_DROP * s;
+                [[x0, top, x1 - x0, 9.0 * s], [x0 + 3.0 * s - 1.5 * s, top + 9.0 * s, 13.5 * s, foot], [x1 - 15.0 * s, top + 9.0 * s, 13.5 * s, foot]]
+            })
+            .collect();
+        let mut clashes: Vec<String> = Vec::new();
+        for card in plan.with_role(magicklala_canvas::BrewRole::Bottle) {
+            let id = &card.id.0;
+            let title = rt.state.canvas.display_title(&card.id);
+            let mut parts: Vec<(String, [f32; 4])> = text_lines_under(&rt, &format!("node-{id}-header"));
+            if let Some(tag) = rt.presented(&format!("bottle-tag-{id}")).map(|(rect, _)| rect) {
+                parts.push(("tag".to_owned(), tag));
+            }
+            if let Some(badge) = rt.presented(&format!("step-badge-{id}")).map(|(rect, _)| rect) {
+                parts.push(("step seal".to_owned(), badge));
+            }
+            for (part, rect) in parts {
+                if bands.iter().any(|band| rects_overlap(rect, *band)) {
+                    clashes.push(format!("{title}: {part}"));
+                }
+            }
+        }
+        clashes.sort();
+        clashes.dedup();
+        report.insert(name.to_owned(), json!({ "rack": true, "clashes": clashes }));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -9091,7 +9150,7 @@ fn potion_rack() -> Result<serde_json::Value, String> {
                     .filter_map(|row| {
                         let row_bottles: Vec<&magicklala_canvas::BrewCard> = plan
                             .with_role(magicklala_canvas::BrewRole::Bottle)
-                            .filter(|card| (card.rect[1] + 68.0 * plan.scale - frame[1] - row[0]).abs() < 1.0)
+                            .filter(|card| (card.rect[1] + magicklala_canvas::cauldron::RACK_LEDGE * plan.scale - frame[1] - row[0]).abs() < 1.0)
                             .collect();
                         let left = row_bottles.iter().map(|card| card.rect[0]).fold(f32::MAX, f32::min) - frame[0];
                         let right = row_bottles.iter().map(|card| card.rect[0] + card.rect[2]).fold(f32::MIN, f32::max) - frame[0];
@@ -10348,6 +10407,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("skipped-solo") => skipped_solo(),
         Some("two-failures-strip") => two_failures_strip(),
         Some("small-rack-rows") => small_rack_rows(),
+        Some("plank-clear") => plank_clear(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

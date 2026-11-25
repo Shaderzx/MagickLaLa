@@ -2294,3 +2294,12 @@ test('A small rack that wraps to two rows keeps its pipes clear of the tags abov
     expect({ scene, crossings: rack.crossings }).toEqual({ scene, crossings: [] });
   }
 });
+
+test('Shelf planks stay clear of everything on the tags: on racks of three and eight bottles, brewed or not, at both sizes, no tag, tag text, status chip or step seal touches a plank or its iron brackets', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['plank-clear']);
+
+  for (const [scene, rack] of Object.entries<any>(report)) {
+    expect({ scene, rack: rack.rack }).toEqual({ scene, rack: true });
+    expect({ scene, clashes: rack.clashes }).toEqual({ scene, clashes: [] });
+  }
+});
