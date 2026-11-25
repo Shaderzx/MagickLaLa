@@ -6983,6 +6983,7 @@ fn potion_rack() -> Result<serde_json::Value, String> {
             live_finish(&mut rt)?;
         }
         rt.frame(3.0);
+        rt.frame(6.0);
         let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
         let mut measure = studio_text_system();
         let cut: Vec<String> = rt
@@ -7015,7 +7016,9 @@ fn potion_rack() -> Result<serde_json::Value, String> {
             .nodes
             .iter()
             .filter(|card| plan.card(&card.id).is_some_and(|placed| placed.role == magicklala_canvas::BrewRole::Bottle))
-            .filter_map(|card| rt.presented(&format!("node-{}-header", card.id.0)).map(|(rect, _)| (card.id.0.clone(), rect, rt.state.canvas.display_title(&card.id))))
+            .filter_map(|card| {
+                rt.presented(&format!("node-{}-header", card.id.0)).map(|(rect, _)| (card.id.0.clone(), rect, rt.state.canvas.display_title(&card.id)))
+            })
             .collect();
         let wrapped: Vec<String> = bottles
             .iter()
@@ -7031,7 +7034,8 @@ fn potion_rack() -> Result<serde_json::Value, String> {
         let overlaps = |a: [f32; 4], b: [f32; 4]| a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
         let kind = rt.presented("rack-kind").map(|(rect, _)| rect);
         let rack = rt.presented("bottle-rack").map(|(rect, _)| rect);
-        let kind_clash: Vec<String> = kind.map_or_else(Vec::new, |kind| bottles.iter().filter(|(_, rect, _)| overlaps(kind, *rect)).map(|(_, _, title)| title.clone()).collect());
+        let kind_clash: Vec<String> =
+            kind.map_or_else(Vec::new, |kind| bottles.iter().filter(|(_, rect, _)| overlaps(kind, *rect)).map(|(_, _, title)| title.clone()).collect());
         let kind_centered = match (kind, rack) {
             (Some(kind), Some(rack)) => ((kind[0] + kind[2] * 0.5) - (rack[0] + rack[2] * 0.5)).abs() < 3.0,
             _ => true,
@@ -7064,7 +7068,8 @@ fn potion_rack() -> Result<serde_json::Value, String> {
                             .collect();
                         let left = row_bottles.iter().map(|card| card.rect[0]).fold(f32::MAX, f32::min) - frame[0];
                         let right = row_bottles.iter().map(|card| card.rect[0] + card.rect[2]).fold(f32::MIN, f32::max) - frame[0];
-                        (row[1] < left - 14.0 * plan.scale || row[2] > right + 14.0 * plan.scale).then(|| format!("{:.0}..{:.0} for {left:.0}..{right:.0}", row[1], row[2]))
+                        (row[1] < left - 14.0 * plan.scale || row[2] > right + 14.0 * plan.scale)
+                            .then(|| format!("{:.0}..{:.0} for {left:.0}..{right:.0}", row[1], row[2]))
                     })
                     .collect()
             })

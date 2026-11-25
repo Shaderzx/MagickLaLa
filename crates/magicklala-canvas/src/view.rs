@@ -551,11 +551,9 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     };
     let title_col = if untaken { p.untaken_title() } else { p.ink };
     let sub_col = if untaken { p.untaken_sub() } else { p.mute };
-    let badge_room = if step_num.is_some() { (legible(11.0) * 1.55 - 1.0).max(10.0) } else { 10.0 };
     let tag_inner = col()
         .w_full()
-        .pl(badge_room)
-        .pr(10.0)
+        .px(if width >= crate::brew::RACK_BOTTLE_SIZE[0] + 1.0 { 9.0 } else { 5.0 })
         .py(8.0)
         .gap(2.0)
         .radius(12.0)
@@ -580,7 +578,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
             .justify_center()
             .fill(if hexed { p.hex } else { p.primary_bg })
             .child(text(num.to_string()).font(TextStyle::new(legible(11.0), 750.0).features("'tnum' 1")).color(p.primary_ink));
-        tag_wrap = tag_wrap.child(el().key(format!("step-badge-{}", card.id.0)).absolute(-6.0, -7.0).child(step_badge));
+        tag_wrap = tag_wrap.child(el().key(format!("step-badge-{}", card.id.0)).absolute(-6.0, -side - 3.0).child(step_badge));
     }
     let tag = col().w_full().child(tag_wrap);
     let select_id = card.id.clone();

@@ -284,7 +284,7 @@ pub fn rack_glass(plan: &BrewPlan) -> Vec<Vec<[f32; 2]>> {
     glass
 }
 
-pub fn rack_planks(plan: &BrewPlan) -> Option<([f32; 4], Vec<f32>)> {
+pub fn rack_planks(plan: &BrewPlan) -> Option<([f32; 4], Vec<[f32; 3]>)> {
     let bottles: Vec<&BrewCard> = plan.with_role(BrewRole::Bottle).collect();
     if bottles.len() < RACK_FROM {
         return None;
@@ -294,10 +294,20 @@ pub fn rack_planks(plan: &BrewPlan) -> Option<([f32; 4], Vec<f32>)> {
     let right = bottles.iter().map(|card| card.rect[0] + card.rect[2]).fold(f32::MIN, f32::max) + 10.0 * s;
     let top = bottles.iter().map(|card| card.rect[1]).fold(f32::MAX, f32::min);
     let bottom = bottles.iter().map(|card| card.rect[1] + card.rect[3]).fold(f32::MIN, f32::max);
-    let mut ledges: Vec<f32> = bottles.iter().map(|card| card.rect[1] + 68.0 * s - top).collect();
-    ledges.sort_by(f32::total_cmp);
-    ledges.dedup_by(|a, b| (*a - *b).abs() < 1.0);
-    Some(([left, top, right - left, bottom - top], ledges))
+    let mut rows: Vec<[f32; 3]> = Vec::new();
+    for card in &bottles {
+        let y = card.rect[1] + 68.0 * s - top;
+        let (x0, x1) = (card.rect[0] - 10.0 * s - left, card.rect[0] + card.rect[2] + 10.0 * s - left);
+        match rows.iter_mut().find(|row| (row[0] - y).abs() < 1.0) {
+            Some(row) => {
+                row[1] = row[1].min(x0);
+                row[2] = row[2].max(x1);
+            }
+            None => rows.push([y, x0, x1]),
+        }
+    }
+    rows.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    Some(([left, top, right - left, bottom - top], rows))
 }
 
 fn grid_ribbons(plan: &BrewPlan, bottles: &[&BrewCard]) -> Option<Vec<Vec<[f32; 2]>>> {
@@ -860,6 +870,33 @@ fn plaque(state: &CanvasState, mood: CauldronMood, plan: &BrewPlan, p: &HearthPa
     )
 }
 
+fn rack_tag_floor(plan: &BrewPlan, bottles: &[&BrewCard]) -> f32 {
+    let title = crate::view::legible_size(12.5, plan.scale) * 1.35;
+    bottles.iter().map(|card| card.rect[1] + (66.0 + 12.0 + 16.0 + title + 2.0) * plan.scale).fold(f32::MIN, f32::max)
+}
+
+fn rack_plank_shape(size: [f32; 2], rows: &[[f32; 3]], s: f32, p: &HearthPalette) -> Shape {
+    let mut shape = Shape::new();
+    let thick = 9.0 * s;
+    for &[ledge, x0, x1] in rows {
+        let y = ledge + 2.0 * s;
+        let (x0, x1) = (x0.max(0.0) + 2.0 * s, x1.min(size[0]) - 2.0 * s);
+        for (foot, reach) in [(x0 + 3.0 * s, 12.0 * s), (x1 - 3.0 * s, -12.0 * s)] {
+            let arm = Path::new().move_to([foot, y + thick]).line_to([foot, y + thick + 12.0 * s]).line_to([foot + reach, y + thick]);
+            shape = shape.stroke_path(&arm, 2.6 * s, LineCap::Round, p.iron_rim);
+        }
+        let board = Path::new().move_to([x0, y]).line_to([x1, y]).line_to([x1, y + thick]).line_to([x0, y + thick]).close();
+        shape = shape.fill_path(&board, p.wood);
+        shape = shape.line([x0 + s, y + 1.2 * s], [x1 - s, y + 1.2 * s], 1.6 * s, LineCap::Round, p.wood_hi);
+        shape = shape.line([x0 + s, y + thick], [x1 - s, y + thick], 1.2 * s, LineCap::Round, with_alpha(p.iron_rim, 0.55));
+        for grain in [0.22_f32, 0.47, 0.71] {
+            let x = x0 + (x1 - x0) * grain;
+            shape = shape.line([x, y + thick * 0.45], [x + 22.0 * s, y + thick * 0.55], 0.9 * s, LineCap::Round, with_alpha(p.iron_rim, 0.28));
+        }
+    }
+    shape
+}
+
 fn shelf_plank_shape(size: [f32; 2], ledges: &[f32], s: f32, p: &HearthPalette) -> Shape {
     let mut shape = Shape::new();
     let thick = 9.0 * s;
@@ -1053,15 +1090,17 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
     }
     if let Some((frame, ledges)) = rack_planks(&plan) {
         board = board.child(el().key("bottle-rack").size(frame[2], frame[3]).absolute(frame[0], frame[1]).child(
-            canvas(shelf_plank_shape([frame[2], frame[3]], &ledges, plan.scale.max(0.4), &p)).key("rack-plank").size(frame[2], frame[3]).absolute(0.0, 0.0),
+            canvas(rack_plank_shape([frame[2], frame[3]], &ledges, plan.scale.max(0.4), &p)).key("rack-plank").size(frame[2], frame[3]).absolute(0.0, 0.0),
         ));
         let kinds: Vec<&str> = bottles.iter().filter_map(|placed| state.card(&placed.id).map(|card| card.kind.as_str())).collect();
         if let Some(kind) = kinds.first().filter(|kind| kinds.iter().all(|other| other == *kind)) {
             let size = crate::view::legible_size(11.0, plan.scale);
             board = board.child(
-                el().key("rack-kind")
-                    .absolute(frame[0] + 10.0 * plan.scale, frame[1] + frame[3] + 6.0 * plan.scale)
-                    .child(text(*kind).font(TextStyle::new(size * plan.scale, 500.0).mono()).color(p.mute)),
+                row()
+                    .w(frame[2])
+                    .justify_center()
+                    .absolute(frame[0], rack_tag_floor(&plan, &bottles).max(frame[1] + frame[3]) + 6.0 * plan.scale)
+                    .child(el().key("rack-kind").child(text(*kind).font(TextStyle::new(size * plan.scale, 500.0).mono()).color(p.mute))),
             );
         }
     }
