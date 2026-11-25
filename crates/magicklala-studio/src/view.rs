@@ -2047,7 +2047,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             }
             _ => None,
         };
-        let mut actions = if app.compact_toolbar() { col().pt(2.0).gap(6.0).items_start() } else { row().pt(2.0).gap(8.0).items_center() };
+        let mut actions = if app.compact_toolbar() { col().pt(2.0).gap(6.0).items_start() } else { row().w_full().pt(2.0).gap(8.0).items_center().flex_wrap() };
         if let Some(button) = fix_button {
             actions = actions.child(button);
         }
