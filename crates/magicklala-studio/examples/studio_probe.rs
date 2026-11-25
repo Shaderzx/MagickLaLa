@@ -4431,6 +4431,28 @@ fn recipe_chip_details() -> Result<serde_json::Value, String> {
         .collect();
     Ok(json!({ "cutSources": cut_sources, "afterUnplug": after_unplug, "stillFlagged": still_flagged, "plugLabel": plug_label, "optionLabels": option_labels }))
 }
+fn quiet_hex() -> Result<serde_json::Value, String> {
+    let mut demo = StudioApp::from_registry().spell.clone();
+    demo.wires.retain(|wire| !(wire.to_node.0 == "recall" && wire.to_socket == "query"));
+    let mut rt = runtime_for(demo);
+    let _ = validation_of(&mut rt)?;
+    rt.update(|app, _| app.canvas.select(None));
+    rt.frame(1.0);
+    let unselected = json!({ "plaque": texts_under(&mut rt, "cauldron-plaque"), "cardChip": rt.find("status-pill-recall").is_some() });
+    rt.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("recall")));
+        app.right_tab = RightTab::Inspector;
+    });
+    rt.frame(2.0);
+    let all = all_texts(&rt);
+    let selected = json!({
+        "plaque": texts_under(&mut rt, "cauldron-plaque"),
+        "cardChip": rt.find("status-pill-recall").is_some(),
+        "recipeSays": texts_under(&mut rt, "inspector-error"),
+        "missingQueryMentions": all.iter().filter(|line| line.contains("\"query\"")).count(),
+    });
+    Ok(json!({ "unselected": unselected, "selected": selected }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -5327,6 +5349,8 @@ fn recipe_honesty() -> Result<serde_json::Value, String> {
     ];
     let mut mistyped = runtime_for(mistyped_spell);
     click(&mut mistyped, "validate")?;
+    mistyped.update(|app, _| app.canvas.select(None));
+    mistyped.frame(1.0);
     let mistyped_report = json!({ "card": texts_under(&mut mistyped, "node-llm"), "plaque": texts_under(&mut mistyped, "cauldron-plaque") });
 
     let mut empty = headless(StudioApp::with_spell(SpellGraph::new("New Potion"), registry_specs()));
@@ -11196,6 +11220,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("stand-in") => stand_in(),
         Some("mend-matches-list") => mend_matches_list(),
         Some("recipe-chip-details") => recipe_chip_details(),
+        Some("quiet-hex") => quiet_hex(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

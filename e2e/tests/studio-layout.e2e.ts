@@ -779,3 +779,14 @@ test('Recipe chips read in full and keep their state: at 960 the prompt and syst
   expect(report.optionLabels.length).toBeGreaterThan(0);
   for (const spoken of report.optionLabels) expect(spoken).toMatch(/^Plug .+ · .+ into query$/);
 });
+
+test('A missing input is told once where you look: with nothing selected the plaque names the missing query and the card wears its chip, and once the card is selected the Recipe names it while the plaque only counts the issues and the card chip steps aside', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['quiet-hex']);
+
+  expect(report.unselected.plaque).toBe('Hexed · missing "query"');
+  expect(report.unselected.cardChip).toBe(true);
+  expect(report.selected.plaque).toBe('Hexed · 1 issue');
+  expect(report.selected.cardChip).toBe(false);
+  expect(report.selected.recipeSays).toContain('"query"');
+  expect(report.selected.missingQueryMentions).toBeLessThanOrEqual(2);
+});
