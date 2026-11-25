@@ -2276,3 +2276,12 @@ test('A lone bottle the brew skipped reads Untaken and stays empty glass: when a
   expect(report.sealedBefore).toBe(true);
   expect(report.sealedAfter).toBe(false);
 });
+
+test('Two failures fit the collapsed Cauldron Log strip: when both parallel research steps fail with long errors, every chip stays inside the strip before the pinned result at both window sizes instead of being sliced mid-word', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['two-failures-strip']);
+
+  for (const size of ['960', '1280']) {
+    expect(report[size].clipped).toEqual([]);
+    expect(report[size].shown.join(' ')).toMatch(/Generate Text|Research/);
+  }
+});

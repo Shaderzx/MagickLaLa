@@ -3581,6 +3581,44 @@ fn skipped_solo() -> Result<serde_json::Value, String> {
         "sealedAfter": magicklala_canvas::view::solo_bottle_sealed(&rt.state.canvas),
     }))
 }
+fn two_failures_strip() -> Result<serde_json::Value, String> {
+    let spell = example("parallel_research.json")?;
+    let run = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4d51";
+    let at = "2026-11-25T10:00:00Z";
+    let spell_id = spell.id.0.to_string();
+    let summary = json!({ "run_id": run, "spell_id": spell_id, "started_at": at, "finished_at": at, "status": "failed", "nodes_executed": 4, "outputs": {}, "error": "service error" });
+    let mut events = vec![json!({ "event": "run_started", "run_id": run, "spell_id": spell_id, "at": at })];
+    for node in ["message", "split", "angle_performance", "angle_ecosystem"] {
+        events.push(json!({ "event": "node_finished", "run_id": run, "node_id": node, "at": at, "duration_ms": 1 }));
+    }
+    for node in ["research_performance", "research_ecosystem"] {
+        events.push(json!({ "event": "node_failed", "run_id": run, "node_id": node, "at": at, "error": "service error: the model provider refused the request because the quota for this key ran out" }));
+    }
+    events.push(json!({ "event": "run_finished", "run_id": run, "at": at, "summary": summary }));
+    let events: Vec<magicklala_graph::TraceEvent> =
+        events.into_iter().map(|event| serde_json::from_value(event).map_err(|error| error.to_string())).collect::<Result<_, _>>()?;
+    let mut report = serde_json::Map::new();
+    for size in [(960.0_f32, 640.0_f32), (1280.0, 800.0)] {
+        let mut app = StudioApp::with_spell(spell.clone(), registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        let events = events.clone();
+        rt.update(move |app, _| {
+            app.pending_trace.extend(events.clone());
+            while app.step_trace() {}
+        });
+        rt.frame(1.0);
+        rt.frame(2.0);
+        let lane = layout_rect(&rt, "trace-scroll").ok_or("no log strip")?;
+        let result = layout_rect(&rt, "log-result");
+        let right = result.map_or(lane[0] + lane[2], |pinned| pinned[0].min(lane[0] + lane[2]));
+        let lines = text_lines_under(&rt, "trace-scroll");
+        let clipped: Vec<String> = lines.iter().filter(|(_, rect)| rect[0] + rect[2] > right + 0.5).map(|(line, _)| line.clone()).collect();
+        report.insert(format!("{}", size.0), json!({ "clipped": clipped, "shown": lines.iter().map(|(line, _)| line.clone()).collect::<Vec<_>>() }));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -10256,6 +10294,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("long-route-row") => long_route_row(),
         Some("twin-tails") => twin_tails(),
         Some("skipped-solo") => skipped_solo(),
+        Some("two-failures-strip") => two_failures_strip(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),
