@@ -4121,6 +4121,29 @@ fn plug_hygiene() -> Result<serde_json::Value, String> {
         "typedPromptPlug": typed_prompt_plug,
     }))
 }
+fn interrupted_bottles() -> Result<serde_json::Value, String> {
+    let read = |rt: &mut Runtime<StudioApp>| {
+        rt.frame(5.0);
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let bottle = plan.with_role(magicklala_canvas::BrewRole::Bottle).next().map(|card| card.id.clone());
+        let tag = bottle.map(|id| texts_under(rt, &format!("node-{}-header", id.0))).unwrap_or_default();
+        let wait = rt.state.canvas.card(&NodeId::from("wait")).map(|card| card.status.label());
+        let stopped_wait = rt.state.canvas.stopped.contains(&NodeId::from("wait"));
+        json!({ "bottleTag": tag, "wait": wait, "waitStopped": stopped_wait, "lastTrace": rt.state.trace.last().map(|line| line.kind) })
+    };
+    let mut cancelled = slow_runtime(30_000, Duration::from_secs(600));
+    click(&mut cancelled, "run-spell")?;
+    cancelled.update(|app, _| {
+        app.wait_until(SETTLE, delay_started);
+    });
+    click_at(&mut cancelled, "cancel-run", 4.0)?;
+    let cancel = read(&mut cancelled);
+    let mut timed = slow_runtime(30_000, Duration::from_millis(300));
+    click(&mut timed, "run-spell")?;
+    settle(&mut timed)?;
+    let timeout = read(&mut timed);
+    Ok(json!({ "cancelled": cancel, "timedOut": timeout }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -10861,6 +10884,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("plug-target-size") => plug_target_size(),
         Some("wide-letters") => wide_letters(),
         Some("plug-hygiene") => plug_hygiene(),
+        Some("interrupted-bottles") => interrupted_bottles(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

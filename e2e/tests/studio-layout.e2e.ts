@@ -709,3 +709,16 @@ test('Recipe wiring behaves like any other edit: Escape closes an open Plug in l
   expect(report.undoUnplug).toBe(1);
   expect(report.typedPromptPlug).toBe(true);
 });
+
+test('A brew cut short leaves its bottle and its running step marked Stopped: after Cancel and after the run deadline the waiting bottle reads Stopped instead of nothing or Failed, the Delay that was running is Stopped, and the log still ends on the cancel or the timeout', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['interrupted-bottles']);
+
+  for (const [ending, last] of [['cancelled', 'RunCancelled'], ['timedOut', 'RunTimedOut']] as const) {
+    const shown = report[ending];
+    expect(shown.bottleTag, ending).toMatch(/Stopped/);
+    expect(shown.bottleTag, ending).not.toMatch(/Failed/);
+    expect(shown.wait, ending).not.toBe('failed');
+    expect(shown.waitStopped, ending).toBe(true);
+    expect(shown.lastTrace, ending).toBe(last);
+  }
+});
