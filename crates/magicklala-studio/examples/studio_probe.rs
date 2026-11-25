@@ -1845,6 +1845,16 @@ fn toss() -> Result<serde_json::Value, String> {
     Ok(json!({ "built": built_report, "pantryDrop": pantry_drop, "pantryFull": pantry_full, "setAside": set_aside }))
 }
 
+fn empty_recipe() -> Result<serde_json::Value, String> {
+    let mut rt = runtime_for(SpellGraph::new("Fresh Potion"));
+    rt.frame(1.0);
+    let texts: Vec<String> = text_lines_under(&rt, "inspector").into_iter().map(|(line, _)| line).collect();
+    Ok(json!({
+        "texts": texts,
+        "placeholder": rt.find("inspector-empty").is_some(),
+        "sections": rt.find("recipe-overview").is_some(),
+    }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -7926,6 +7936,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("true-runs") => true_runs(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("clear-signals") => clear_signals(),
         Some("pantry-settings") => pantry_settings(),
+        Some("empty-recipe") => empty_recipe(),
         Some("pot-rect") => pot_rect(),
         Some("gateway-hint") => gateway_hint(),
         Some("honest-dials") => honest_dials(Path::new(args.get(1).ok_or("missing database path")?)),
