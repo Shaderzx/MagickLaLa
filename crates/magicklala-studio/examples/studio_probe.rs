@@ -3564,6 +3564,7 @@ fn kitchen_brewed_tidy() -> Result<serde_json::Value, String> {
         let mut covered_names = Vec::new();
         let mut loose_badges = Vec::new();
         let mut covered_icons = Vec::new();
+        let mut covered_titles: Vec<String> = Vec::new();
         for card in &rt.state.canvas.nodes {
             let id = &card.id.0;
             let role = plan.card(&card.id).map(|placed| placed.role);
@@ -3588,13 +3589,24 @@ fn kitchen_brewed_tidy() -> Result<serde_json::Value, String> {
                     loose_badges.push(title.clone());
                 }
             } else if role == Some(magicklala_canvas::BrewRole::Ingredient)
-                && let (Some(chip), Some(icon)) = (layout_rect(&rt, &format!("status-pill-{id}")), layout_rect(&rt, &format!("vial-{id}")))
-                && rects_overlap(chip, icon)
+                && let Some(chip) = layout_rect(&rt, &format!("status-pill-{id}"))
             {
-                covered_icons.push(rt.state.canvas.display_title(&card.id));
+                let title = rt.state.canvas.display_title(&card.id);
+                if layout_rect(&rt, &format!("vial-{id}")).is_some_and(|icon| rects_overlap(chip, icon)) {
+                    covered_icons.push(title.clone());
+                }
+                let named = text_lines_under(&rt, &format!("node-{id}")).into_iter().find(|(line, _)| line.replace('\u{a0}', " ") == title);
+                if let Some((_, name)) = named {
+                    let mut measure = studio_text_system();
+                    let (natural, _) = measure.measure(&title, rune::TextStyle::new(13.0_f32.max(10.5 / plan.scale), 750.0), 1.0);
+                    let inked = [name[0], name[1], (natural * plan.scale).min(name[2]), name[3]];
+                    if rects_overlap(chip, inked) {
+                        covered_titles.push(title);
+                    }
+                }
             }
         }
-        report.insert(format!("{}", size.0), json!({ "coveredNames": covered_names, "looseBadges": loose_badges, "coveredIcons": covered_icons }));
+        report.insert(format!("{}", size.0), json!({ "coveredNames": covered_names, "looseBadges": loose_badges, "coveredIcons": covered_icons, "coveredTitles": covered_titles }));
     }
     Ok(serde_json::Value::Object(report))
 }

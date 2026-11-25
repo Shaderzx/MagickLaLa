@@ -2172,11 +2172,11 @@ test('A failed pour stub keeps clear of its neighbours: with Search Memory missi
   }
 });
 
-test('A brewed crowded kitchen stays tidy at both sizes: no time chip covers a bottle name, every bottle step number sits on its own bottle above its tag instead of on the shelf bracket, and no card time chip covers the card icon', { timeout: 900_000 }, async () => {
+test('A brewed crowded kitchen stays tidy at both sizes: no time chip covers a bottle name, every bottle step number sits on its own bottle above its tag instead of on the shelf bracket, and no card time chip covers the card icon or the card name', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['kitchen-brewed-tidy']);
 
   for (const width of ['960', '1280']) {
-    expect({ width, ...report[width] }).toEqual({ width, coveredNames: [], looseBadges: [], coveredIcons: [] });
+    expect({ width, ...report[width] }).toEqual({ width, coveredNames: [], looseBadges: [], coveredIcons: [], coveredTitles: [] });
   }
 });
 
