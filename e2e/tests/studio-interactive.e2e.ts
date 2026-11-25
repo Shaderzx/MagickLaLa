@@ -1682,3 +1682,19 @@ test('Potion rack: four or more bottles stand in rows on shelf planks fed by one
     expect(rack.rows, scene).toBeLessThanOrEqual(3);
   }
 });
+test('True records: Check keeps a good brew lit, an AI prompt may say {{customer}} literally with a note instead of a hex, a Send that hands off is still a bottle, only steps that ran wear step numbers after a brew, a pantry toss undoes as one step, an empty draft with variables saves and asks before you leave it, and a wire message does not follow you to the next potion', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-true-records-'));
+  try {
+    const report = await studioProbe(['true-records', join(dir, 'studio.sqlite')]);
+
+    expect(report.checkKeepsBrew).toEqual({ brew: 'Succeeded', stale: false });
+    expect(report.literalBraces).toEqual({ check: 'valid', noted: true });
+    expect(report.replies).toEqual(['first', 'second']);
+    expect(report.stepNumbers).toEqual({ duplicates: 0, untakenNumbered: [] });
+    expect(report.tossUndo).toEqual({ added: true, removedByUndo: true, variables: 1 });
+    expect(report.emptyDraft).toEqual({ saved: true, asked: true, kept: 2 });
+    expect(report.wireMessageLeft).toBe(false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

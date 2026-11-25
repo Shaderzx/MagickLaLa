@@ -568,7 +568,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
             .justify_center()
             .fill(if hexed { p.hex } else { p.primary_bg })
             .child(text(num.to_string()).font(TextStyle::new(legible(11.0), 750.0).features("'tnum' 1")).color(p.primary_ink));
-        tag_wrap = tag_wrap.child(el().absolute(-6.0, -7.0).child(step_badge));
+        tag_wrap = tag_wrap.child(el().key(format!("step-badge-{}", card.id.0)).absolute(-6.0, -7.0).child(step_badge));
     }
     let tag = col().w_full().child(tag_wrap);
     let select_id = card.id.clone();

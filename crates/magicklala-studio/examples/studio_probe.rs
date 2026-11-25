@@ -6613,7 +6613,114 @@ fn potion_rack() -> Result<serde_json::Value, String> {
     }
     Ok(json!(report))
 }
-fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
+fn true_records(db_path: &Path) -> Result<serde_json::Value, String> {
+    let mut checked = runtime_for(tasting_spell());
+    click(&mut checked, "run-spell")?;
+    live_finish(&mut checked)?;
+    click(&mut checked, "validate")?;
+    let check_keeps_brew = json!({ "brew": checked.state.canvas.last_brew.map(|status| format!("{status:?}")), "stale": checked.state.trace_stale });
+
+    let mut literal = SpellGraph::new("Literal");
+    literal.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("ask", "ai/generate_text", 280.0, json!({ "prompt": "Show the literal example {{customer}} exactly as written" })),
+        studio_node("say", "io/send_message", 560.0, serde_json::Value::Null),
+    ];
+    literal.wires = vec![
+        studio_wire("w1", ("trigger", "out"), ("ask", "in")),
+        studio_wire("w2", ("ask", "out"), ("say", "in")),
+        studio_wire("w3", ("ask", "text"), ("say", "content")),
+    ];
+    let mut braces = runtime_for(literal);
+    click(&mut braces, "validate")?;
+    braces.update(|app, _| app.canvas.select(Some(NodeId::from("ask"))));
+    braces.frame(0.0);
+    let literal_braces = json!({ "check": braces.state.validation.label(), "noted": braces.find("prompt-literal-note").is_some() });
+
+    let mut relay = SpellGraph::new("Two Replies");
+    relay.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("first", "io/send_message", 280.0, serde_json::Value::Null),
+        studio_node("second", "io/send_message", 560.0, serde_json::Value::Null),
+    ];
+    relay.wires = vec![
+        studio_wire("w1", ("trigger", "out"), ("first", "in")),
+        studio_wire("w2", ("first", "out"), ("second", "in")),
+        studio_wire("w3", ("trigger", "content"), ("first", "content")),
+        studio_wire("w4", ("trigger", "content"), ("second", "content")),
+    ];
+    let relay_rt = runtime_for(relay);
+    let relay_plan = magicklala_canvas::brew_plan(&relay_rt.state.canvas, relay_rt.state.canvas_size());
+    let mut replies: Vec<String> = relay_plan.with_role(magicklala_canvas::BrewRole::Bottle).map(|card| card.id.0.clone()).collect();
+    replies.sort();
+
+    let mut router = runtime_for(example("parallel_research.json")?);
+    click(&mut router, "run-spell")?;
+    live_finish(&mut router)?;
+    router.frame(1.0);
+    let ids: Vec<String> = router.state.canvas.nodes.iter().map(|card| card.id.0.clone()).collect();
+    let mut numbers = Vec::new();
+    let mut untaken_numbered = Vec::new();
+    for id in ids {
+        let shown = texts_under(&mut router, &format!("step-badge-{id}"));
+        let shown = shown.trim().to_owned();
+        if shown.is_empty() {
+            continue;
+        }
+        let ran = router.state.canvas.card(&NodeId::from(id.as_str())).is_some_and(|card| matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Failed));
+        if !ran {
+            untaken_numbered.push(id.clone());
+        }
+        numbers.push(shown);
+    }
+    let mut unique = numbers.clone();
+    unique.sort();
+    unique.dedup();
+    let step_numbers = json!({ "duplicates": numbers.len() - unique.len(), "untakenNumbered": untaken_numbered });
+
+    let mut tossed = runtime_for(tasting_spell());
+    tossed.update(|app, _| app.add_variable());
+    tossed.update(|app, _| {
+        app.spawn("flow/do_once");
+        app.sync_edits();
+    });
+    let added = tossed.state.canvas.nodes.iter().any(|card| card.kind == "flow/do_once");
+    tossed.update(|app, _| app.undo());
+    let toss_undo = json!({
+        "added": added,
+        "removedByUndo": !tossed.state.canvas.nodes.iter().any(|card| card.kind == "flow/do_once"),
+        "variables": tossed.state.spell.variables.len(),
+    });
+
+    let mut draft = studio_at(db_path)?;
+    draft.update(|app, _| {
+        app.new_empty_spell();
+        app.add_variable();
+    });
+    let saved = draft.state.save_draft().is_ok();
+    draft.update(|app, _| {
+        app.add_variable();
+        app.request_open_sample("Research Agent");
+    });
+    let empty_draft = json!({ "saved": saved, "asked": draft.state.pending_switch.is_some(), "kept": draft.state.spell.variables.len() });
+
+    let mut moved = runtime_for(tasting_spell());
+    moved.update(|app, _| {
+        app.wire_error = Some("Wire refused: a flow socket and a value socket cannot meet".to_owned());
+        app.open_sample_spell("Research Agent");
+    });
+    let wire_message_left = moved.state.wire_error.is_some();
+
+    Ok(json!({
+        "checkKeepsBrew": check_keeps_brew,
+        "literalBraces": literal_braces,
+        "replies": replies,
+        "stepNumbers": step_numbers,
+        "tossUndo": toss_undo,
+        "emptyDraft": empty_draft,
+        "wireMessageLeft": wire_message_left,
+    }))
+}fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),
@@ -7530,6 +7637,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("mixed-shelves") => mixed_shelves(args),
         Some("undo-order") => undo_order(),
         Some("potion-rack") => potion_rack(),
+        Some("true-records") => true_records(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("honest-edits") => honest_edits(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
