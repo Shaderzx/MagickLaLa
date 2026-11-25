@@ -1715,3 +1715,13 @@ test('Starter shelf: an empty pot offers its glowing trigger vials only while th
   expect(report.wideWithPotions).toEqual({ pantryOpen: false, starters: 6, coverPot: false });
   expect(report.compactClosed).toEqual({ pantryOpen: false, starters: 6, coverPot: false });
 });
+test('Wire records survive the shelf: setting a step aside and pouring it back keeps every original wire id in its original place, in one session and after Save and reopen', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-wire-records-'));
+  try {
+    const report = await studioProbe(['wire-records', join(dir, 'studio.sqlite')]);
+
+    expect(report).toEqual({ sameSession: true, saved: true, afterReopen: true, missing: [] });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -6834,7 +6834,26 @@ fn starter_shelf_room() -> Result<serde_json::Value, String> {
         "compactWithPantry": scene((960.0, 640.0), Some(true))?,
     }))
 }
-fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
+fn wire_records(db_path: &Path) -> Result<serde_json::Value, String> {
+    let ids = |app: &StudioApp| app.spell.wires.iter().map(|wire| wire.id.0.clone()).collect::<Vec<_>>();
+    let mut rt = studio_at(db_path)?;
+    let original = ids(&rt.state);
+    rt.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("recall"))));
+    rt.update(|app, _| app.toss(magicklala_canvas::Toss::IntoPot(NodeId::from("recall"))));
+    let same_session = ids(&rt.state) == original;
+    rt.update(|app, _| app.toss(magicklala_canvas::Toss::Aside(NodeId::from("recall"))));
+    let saved = rt.state.save_draft().is_ok();
+    drop(rt);
+    let mut reopened = studio_at(db_path)?;
+    reopened.update(|app, _| app.toss(magicklala_canvas::Toss::IntoPot(NodeId::from("recall"))));
+    let after = ids(&reopened.state);
+    Ok(json!({
+        "sameSession": same_session,
+        "saved": saved,
+        "afterReopen": after == original,
+        "missing": original.iter().filter(|id| !after.contains(id)).cloned().collect::<Vec<_>>(),
+    }))
+}fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),
@@ -7754,6 +7773,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("true-records") => true_records(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("tidy-bottles") => tidy_bottles(),
         Some("starter-shelf") => starter_shelf_room(),
+        Some("wire-records") => wire_records(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("honest-edits") => honest_edits(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
