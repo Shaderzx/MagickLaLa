@@ -632,11 +632,28 @@ pub fn editable_field(kind: &str) -> Option<&'static str> {
         "text/template" => Some("template"),
         SUBGRAPH_KIND => Some(SUBGRAPH_SPELL_FIELD),
         "var/get" | "var/set" | "var/reset" => Some("name"),
+        "flow/switch" => Some("cases"),
+        "flow/split" => Some("outputs"),
+        "json/destructure" => Some("keys"),
         "ai/embedding" => Some("text"),
         kind if kind.starts_with("code/") => Some("script"),
         kind if kind.starts_with("ai/") => Some("prompt"),
         _ => None,
     }
+}
+
+pub fn listed_field(kind: &str) -> bool {
+    matches!(kind, "flow/switch" | "flow/split" | "json/destructure")
+}
+
+pub fn listed_names(text: &str) -> Vec<String> {
+    let names: Vec<String> = serde_json::from_str::<Vec<String>>(text).unwrap_or_else(|_| text.split([',', '\n']).map(|name| name.trim().to_owned()).collect());
+    names.into_iter().filter(|name| !name.trim().is_empty()).fold(Vec::new(), |mut kept, name| {
+        if !kept.contains(&name) {
+            kept.push(name);
+        }
+        kept
+    })
 }
 
 fn studio_services() -> EngineServices {
@@ -2171,6 +2188,9 @@ impl StudioApp {
         if let Some(field) = editable_field(kind) {
             let text = match config.get(field) {
                 Some(serde_json::Value::String(text)) => text.clone(),
+                Some(serde_json::Value::Array(items)) if listed_field(kind) => {
+                    items.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>().join(", ")
+                }
                 Some(other) => other.to_string(),
                 None if config.is_null() => default_prompt(kind),
                 None => String::new(),
@@ -2219,6 +2239,15 @@ impl StudioApp {
             }
             return config;
         }
+        if listed_field(kind) {
+            if !config.is_object() {
+                config = json!({});
+            }
+            if let Some(map) = config.as_object_mut() {
+                map.insert(field.to_owned(), json!(listed_names(&edit.text)));
+            }
+            return config;
+        }
         if present
             && config.get(field).and_then(serde_json::Value::as_str).is_none()
             && config.get(field).map(ToString::to_string).as_deref() == Some(edit.text.as_str())
@@ -2232,6 +2261,31 @@ impl StudioApp {
             map.insert(field.to_owned(), serde_json::Value::String(edit.text.clone()));
         }
         config
+    }
+
+    fn sync_listed_outputs(&mut self) {
+        let listed: Vec<(NodeId, Vec<String>, SocketType, Vec<String>)> = self
+            .canvas
+            .nodes
+            .iter()
+            .filter(|card| listed_field(&card.kind))
+            .filter_map(|card| {
+                let spec = self.specs.iter().find(|spec| spec.kind == card.kind)?;
+                let open = spec.outputs.iter().find(|socket| socket.name == magicklala_graph::DYNAMIC_SOCKET)?;
+                let field = editable_field(&card.kind)?;
+                let names = self
+                    .prompted_config(&card.id, &card.kind)
+                    .get(field)
+                    .and_then(serde_json::Value::as_array)
+                    .map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect())
+                    .unwrap_or_default();
+                let fixed = spec.outputs.iter().filter(|socket| socket.name != magicklala_graph::DYNAMIC_SOCKET).map(|socket| socket.name.clone()).collect();
+                Some((card.id.clone(), names, open.ty, fixed))
+            })
+            .collect();
+        for (id, names, ty, fixed) in listed {
+            self.canvas.list_outputs(&id, &names, ty, &fixed);
+        }
     }
 
     pub fn sync_spell(&mut self) {
@@ -2253,6 +2307,7 @@ impl StudioApp {
         if self.is_running() {
             return false;
         }
+        self.sync_listed_outputs();
         let refusal = self.canvas.last_connect_error.take().map(|error| Self::wire_refusal(&error));
         if refusal.is_some() {
             self.wire_error = refusal.clone();
@@ -2736,7 +2791,12 @@ impl StudioApp {
                 let field = self.specs.iter().find(|spec| spec.kind == node.kind)?.config.iter().find(|field| field.key == key && field.required)?;
                 let blank = node.config.get(key).is_none_or(|value| value.is_null() || value.as_str().is_some_and(|text| text.trim().is_empty()));
                 blank.then(|| {
-                    let readable = format!("{}: needs a {}", self.canvas.display_title(&node.id), field.label.to_lowercase());
+                    let label = field.label.to_lowercase();
+                    let readable = if label.ends_with('s') {
+                        format!("{}: needs {label}", self.canvas.display_title(&node.id))
+                    } else {
+                        format!("{}: needs a {label}", self.canvas.display_title(&node.id))
+                    };
                     HexFinding { node: Some(node.id.clone()), socket: None, readable: readable.clone(), message: readable, mistyped: false }
                 })
             })

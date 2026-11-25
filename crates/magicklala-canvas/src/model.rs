@@ -286,6 +286,20 @@ impl CanvasState {
                 state.wire_model(wire.id.clone(), &from, &to)
             })
             .collect();
+        for node in &graph.nodes {
+            let Some(spec) = specs.iter().find(|spec| spec.kind == node.kind) else { continue };
+            let Some(open) = spec.outputs.iter().find(|socket| socket.name == DYNAMIC_SOCKET) else { continue };
+            let listed = spec.config.iter().filter(|field| field.kind == magicklala_graph::FieldKind::Json).find_map(|field| {
+                node.config
+                    .get(&field.key)
+                    .and_then(|value| value.as_array())
+                    .map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect::<Vec<_>>())
+            });
+            if let Some(names) = listed {
+                let fixed: Vec<String> = spec.outputs.iter().filter(|socket| socket.name != DYNAMIC_SOCKET).map(|socket| socket.name.clone()).collect();
+                state.list_outputs(&node.id, &names, open.ty, &fixed);
+            }
+        }
         state
     }
 
@@ -359,6 +373,25 @@ impl CanvasState {
             [near[0] + angle.cos() * lap * (size[0] + 32.0) * 0.5, near[1] + angle.sin() * lap * (size[1] + 32.0)]
         };
         std::iter::once(near).chain((0..48).map(ring)).find(|at| clear(*at)).unwrap_or(near)
+    }
+
+    pub fn list_outputs(&mut self, id: &NodeId, names: &[String], ty: SocketType, fixed: &[String]) -> bool {
+        let wired: Vec<String> = self.wires.iter().filter(|wire| &wire.from_node == id).map(|wire| wire.from_socket.clone()).collect();
+        let Some(card) = self.card_mut(id) else { return false };
+        let before: Vec<String> = card.outputs.iter().map(|socket| socket.name.clone()).collect();
+        card.outputs.retain(|socket| names.contains(&socket.name) || fixed.contains(&socket.name) || wired.contains(&socket.name));
+        for name in names {
+            card.ensure_socket(name, ty, true);
+        }
+        card.outputs.sort_by_key(|socket| names.iter().position(|name| name == &socket.name).unwrap_or(names.len()));
+        for (row, socket) in card.outputs.iter_mut().enumerate() {
+            socket.offset = [CARD_WIDTH, CARD_HEADER + BODY_TOP + SOCKET_ROW * (row as f32 + 0.5)];
+        }
+        card.size[1] = card_height(card.inputs.len().max(card.outputs.len()));
+        let changed = card.outputs.iter().map(|socket| &socket.name).ne(before.iter());
+        let position = card.position;
+        self.move_node(id, position);
+        changed
     }
 
     pub fn move_node(&mut self, id: &NodeId, position: [f32; 2]) -> bool {
