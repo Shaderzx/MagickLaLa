@@ -3211,6 +3211,57 @@ fn rack_errors() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn waiting_not_untaken() -> Result<serde_json::Value, String> {
+    let link = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+        id: WireId::from(id),
+        from_node: NodeId::from(from.0),
+        from_socket: from.1.to_owned(),
+        to_node: NodeId::from(to.0),
+        to_socket: to.1.to_owned(),
+    };
+    let mut spell = SpellGraph::new("Two Waits");
+    spell.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("first", "time/delay", 260.0, json!({ "ms": 400 })),
+        studio_node("second", "time/delay", 520.0, json!({ "ms": 400 })),
+        studio_node("reply", "io/send_message", 780.0, serde_json::Value::Null),
+    ];
+    spell.wires = vec![
+        link("a", ("trigger", "out"), ("first", "in")),
+        link("b", ("first", "out"), ("second", "in")),
+        link("c", ("second", "out"), ("reply", "in")),
+        link("d", ("trigger", "content"), ("reply", "content")),
+    ];
+    let run = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4d21";
+    let at = "2026-11-25T10:00:00Z";
+    let spell_id = spell.id.0.to_string();
+    let event = |value: serde_json::Value| serde_json::from_value::<magicklala_graph::TraceEvent>(value).map_err(|error| error.to_string());
+    let midway = vec![
+        event(json!({ "event": "run_started", "run_id": run, "spell_id": spell_id, "at": at }))?,
+        event(json!({ "event": "node_finished", "run_id": run, "node_id": "trigger", "at": at, "duration_ms": 1 }))?,
+        event(json!({ "event": "wire_activated", "run_id": run, "wire_id": "a", "at": at }))?,
+        event(json!({ "event": "node_started", "run_id": run, "node_id": "first", "at": at }))?,
+    ];
+    let summary = json!({ "run_id": run, "spell_id": spell_id, "started_at": at, "finished_at": at, "status": "cancelled", "nodes_executed": 1, "outputs": {}, "error": "quenched" });
+    let quenched = vec![event(json!({ "event": "run_finished", "run_id": run, "at": at, "summary": summary }))?];
+    let mut rt = runtime_for(spell);
+    let untaken_cards = |rt: &mut Runtime<StudioApp>| -> Vec<String> {
+        ["first", "second", "reply"].iter().filter(|id| texts_under(rt, &format!("node-{id}")).contains("Untaken") || texts_under(rt, &format!("node-{id}-header")).contains("Untaken")).map(|id| id.to_string()).collect()
+    };
+    rt.update(move |app, _| {
+        app.pending_trace.extend(midway.clone());
+        while app.step_trace() {}
+    });
+    rt.frame(1.0);
+    let while_brewing = untaken_cards(&mut rt);
+    rt.update(move |app, _| {
+        app.pending_trace.extend(quenched.clone());
+        while app.step_trace() {}
+    });
+    rt.frame(2.0);
+    let after_quench = untaken_cards(&mut rt);
+    Ok(json!({ "whileBrewing": while_brewing, "afterQuench": after_quench }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9490,6 +9541,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("fresh-split") => fresh_split(),
         Some("check-matches-brew") => check_matches_brew(),
         Some("rack-errors") => rack_errors(),
+        Some("waiting-not-untaken") => waiting_not_untaken(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),

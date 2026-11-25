@@ -2098,3 +2098,9 @@ test('A crowded rack of broken bottles stays readable: with fourteen Sends missi
     expect({ width, ...report[width] }).toEqual({ width, check: 'invalid', unmarked: [], clashes: [], recipeTells: true });
   }
 });
+
+test('Untaken means skipped by a finished brew: while the first Delay is still running the steps after it never say Untaken, and a Quenched brew leaves no step marked Untaken either', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['waiting-not-untaken']);
+
+  expect(report).toEqual({ whileBrewing: [], afterQuench: [] });
+});
