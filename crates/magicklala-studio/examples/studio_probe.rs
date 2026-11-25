@@ -4019,6 +4019,69 @@ fn wide_letters() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn plug_hygiene() -> Result<serde_json::Value, String> {
+    let press = |rt: &mut Runtime<StudioApp>, key: rune::Key, cmd: bool| {
+        rt.key(rune::KeyEvent { key, mods: rune::Mods { cmd, ..Default::default() } });
+        rt.frame(1.0);
+    };
+    let mut spell = SpellGraph::new("Plug Hygiene");
+    spell.nodes =
+        vec![studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null), studio_node("reply", "io/send_message", 280.0, serde_json::Value::Null)];
+    spell.wires = vec![studio_wire("w1", ("trigger", "out"), ("reply", "in"))];
+    let feeds = |rt: &Runtime<StudioApp>| rt.state.spell.wires.iter().filter(|wire| wire.to_node.0 == "reply" && wire.to_socket == "content").count();
+    let mut rt = runtime_for(spell);
+    rt.on_key = Some(magicklala_studio::studio_key);
+    let before = validation_of(&mut rt)?;
+    rt.update(|app, _| app.canvas.select(Some(NodeId::from("reply"))));
+    rt.frame(1.0);
+    click(&mut rt, "plug-content")?;
+    press(&mut rt, rune::Key::Escape, false);
+    let escape = json!({ "menuClosed": rt.state.plug_menu.is_none(), "stillSelected": rt.state.canvas.selection.as_ref().map(|id| id.0.clone()) });
+    click(&mut rt, "plug-content")?;
+    press(&mut rt, rune::Key::Delete, false);
+    let delete_keeps_step = rt.state.canvas.card(&NodeId::from("reply")).is_some();
+    if rt.state.plug_menu.is_none() {
+        click(&mut rt, "plug-content")?;
+    }
+    click(&mut rt, "plug-content-trigger-content")?;
+    rt.frame(2.0);
+    let after_plug = json!({
+        "checkBefore": before["validation"],
+        "check": rt.state.validation.label(),
+        "flagged": rt.state.canvas.card(&NodeId::from("reply")).map(|card| card.inputs.iter().filter(|input| input.flagged).count()),
+        "source": texts_under(&mut rt, "plug-source-content"),
+    });
+    press(&mut rt, rune::Key::Command('z'), true);
+    let undo_plug = feeds(&rt);
+    let menu_after_undo = rt.state.plug_menu.is_some();
+    rt.update(|app, _| app.canvas.select(Some(NodeId::from("reply"))));
+    rt.frame(3.0);
+    click(&mut rt, "plug-content")?;
+    rt.frame(3.5);
+    click(&mut rt, "plug-content-trigger-content")?;
+    rt.frame(4.0);
+    click(&mut rt, "unplug-content")?;
+    let after_unplug = feeds(&rt);
+    press(&mut rt, rune::Key::Command('z'), true);
+    let undo_unplug = feeds(&rt);
+
+    let mut demo = runtime_for(StudioApp::from_registry().spell.clone());
+    let writer = node_of_kind(&demo.state, "ai/generate_text").ok_or("no generate text")?;
+    let chosen = NodeId::from(writer.as_str());
+    demo.update(move |app, _| app.canvas.select(Some(chosen.clone())));
+    demo.frame(1.0);
+    let typed_prompt_plug = demo.find("plug-prompt").is_some() || demo.find("unplug-prompt").is_some();
+    Ok(json!({
+        "escape": escape,
+        "deleteKeepsStep": delete_keeps_step,
+        "afterPlug": after_plug,
+        "undoPlug": undo_plug,
+        "menuAfterUndo": menu_after_undo,
+        "afterUnplug": after_unplug,
+        "undoUnplug": undo_unplug,
+        "typedPromptPlug": typed_prompt_plug,
+    }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -10736,6 +10799,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("recipe-plug") => recipe_plug(),
         Some("plug-target-size") => plug_target_size(),
         Some("wide-letters") => wide_letters(),
+        Some("plug-hygiene") => plug_hygiene(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

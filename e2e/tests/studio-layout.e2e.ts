@@ -690,3 +690,19 @@ test('Wide letters get the room they need: three Send bottles on WWWW, MMMM and 
     expect({ scene, cut: shelf.cut, overlaps: shelf.overlaps }).toEqual({ scene, cut: [], overlaps: [] });
   }
 });
+
+test('Recipe wiring behaves like any other edit: Escape closes an open Plug in list and keeps the step selected, Delete with the list open keeps the step, plugging re-runs a failed Check so the input stops being flagged and shows where it comes from, Cmd+Z undoes a plug and an unplug and closes the list, and a prompt with typed text still offers Plug in', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['plug-hygiene']);
+
+  expect(report.escape).toEqual({ menuClosed: true, stillSelected: 'reply' });
+  expect(report.deleteKeepsStep).toBe(true);
+  expect(report.afterPlug.checkBefore).toBe('invalid');
+  expect(report.afterPlug.check).toBe('valid');
+  expect(report.afterPlug.flagged).toBe(0);
+  expect(report.afterPlug.source).toContain('On Message');
+  expect(report.undoPlug).toBe(0);
+  expect(report.menuAfterUndo).toBe(false);
+  expect(report.afterUnplug).toBe(0);
+  expect(report.undoUnplug).toBe(1);
+  expect(report.typedPromptPlug).toBe(true);
+});
