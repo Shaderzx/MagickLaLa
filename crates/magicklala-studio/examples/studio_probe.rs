@@ -3759,6 +3759,26 @@ fn perched_clear() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn icon_size() -> Result<serde_json::Value, String> {
+    let mut report = serde_json::Map::new();
+    for (name, spell, size) in [("kitchen@960", crowded_kitchen(), (960.0_f32, 640.0_f32)), ("dozen@960", dozen_ingredient_spell(), (960.0, 640.0)), ("support@1280", StudioApp::from_registry().spell.clone(), (1280.0, 800.0))] {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.frame(3.0);
+        let smallest = rt
+            .state
+            .canvas
+            .nodes
+            .iter()
+            .filter_map(|card| layout_rect(&rt, &format!("vial-{}", card.id.0)))
+            .map(|rect| rect[2].min(rect[3]) * 0.76)
+            .fold(f32::MAX, f32::min);
+        report.insert(name.to_owned(), json!(smallest.round()));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -10053,6 +10073,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("rename-keystrokes") => rename_keystrokes(),
         Some("seal-clear") => seal_clear(),
         Some("perched-clear") => perched_clear(),
+        Some("icon-size") => icon_size(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),

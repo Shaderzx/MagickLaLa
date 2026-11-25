@@ -2218,3 +2218,11 @@ test('Grimoire status tags never touch the card above: after brewing the webhook
     expect({ width, touching: report[width].touching }).toEqual({ width, touching: [] });
   }
 });
+
+test('Card icons stay readable on crowded pots: the smallest ingredient icon is at least 14 points across in the crowded kitchen and the dozen-step potion at 960 by 640 and in the Support Agent at 1280', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['icon-size']);
+
+  for (const scene of ['kitchen@960', 'dozen@960', 'support@1280']) {
+    expect({ scene, readable: report[scene] >= 14 }).toEqual({ scene, readable: true });
+  }
+});
