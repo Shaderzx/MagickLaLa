@@ -3766,6 +3766,7 @@ fn stacked_pot_clear() -> Result<serde_json::Value, String> {
         ("kitchen-brewed@960", crowded_kitchen(), (960.0_f32, 640.0_f32), false, true),
         ("kitchen@1280", crowded_kitchen(), (1280.0, 800.0), false, false),
         ("research-pantry@960", example("parallel_research.json")?, (960.0, 640.0), true, false),
+        ("router-brewed@1280", example("webhook_router.json")?, (1280.0, 800.0), false, true),
     ];
     for (name, spell, size, pantry, brew) in scenes {
         let mut app = StudioApp::with_spell(spell, registry_specs());
@@ -3787,11 +3788,18 @@ fn stacked_pot_clear() -> Result<serde_json::Value, String> {
         let landings: Vec<f32> = pours.iter().filter_map(|(_, points)| points.last().map(|point| point[0])).collect();
         let origin = rt.presented("canvas").map(|(rect, _)| [rect[0], rect[1]]).ok_or("no canvas")?;
         let crowded = plan.lanes.is_some() && pours.len() >= 8;
+        let rise = if brew { 88.0 } else { 52.0 } * s;
+        let froth = magicklala_canvas::cauldron::rim_froth(&rt.state.canvas, &plan);
         let bubbles_on_pours: Vec<String> = (0..8)
             .filter_map(|index| layout_rect(&rt, &format!("pot-bubble-{index}")).map(|rect| (index, rect)))
             .filter(|(_, rect)| {
                 let centre = rect[0] + rect[2] * 0.5 - origin[0];
+                let base = magicklala_canvas::cauldron::rim_line(&plan);
+                let reach = rect[2] * 0.5 + 4.0;
                 landings.iter().any(|x| (centre - x).abs() < 16.0 * s)
+                    || pours
+                        .iter()
+                        .any(|(_, points)| points.iter().any(|point| (point[0] - centre).abs() < reach && point[1] < base && point[1] > base - rect[3] - rise))
             })
             .map(|(index, _)| format!("bubble {index}"))
             .collect();
@@ -3812,7 +3820,8 @@ fn stacked_pot_clear() -> Result<serde_json::Value, String> {
                 "stacked": plan.lanes.is_some(),
                 "crowded": crowded,
                 "ladle": magicklala_canvas::cauldron::ladle_stir(&rt.state.canvas, &plan).is_some(),
-                "froth": magicklala_canvas::cauldron::rim_froth(&rt.state.canvas, &plan),
+                "froth": !froth.is_empty(),
+                "frothOnStreams": froth.iter().any(|[bx, by, br]| pours.iter().flat_map(|(_, points)| points.iter()).any(|point| (point[0] - plan.pot[0] - bx).hypot(point[1] - plan.pot[1] - by) < br + 2.0 * s)),
                 "bubblesOnPours": bubbles_on_pours,
                 "floorGap": if tightest == f32::MAX { serde_json::Value::Null } else { json!((tightest / s * 10.0).round() / 10.0) },
             }),
@@ -4128,6 +4137,7 @@ fn kitchen_brewed_tidy() -> Result<serde_json::Value, String> {
         let mut loose_badges = Vec::new();
         let mut covered_icons = Vec::new();
         let mut covered_titles: Vec<String> = Vec::new();
+        let mut chips_on_cards_above: Vec<String> = Vec::new();
         for card in &rt.state.canvas.nodes {
             let id = &card.id.0;
             let role = plan.card(&card.id).map(|placed| placed.role);
@@ -4155,6 +4165,13 @@ fn kitchen_brewed_tidy() -> Result<serde_json::Value, String> {
                 && let Some(chip) = layout_rect(&rt, &format!("status-pill-{id}"))
             {
                 let title = rt.state.canvas.display_title(&card.id);
+                let grazed = rt.state.canvas.nodes.iter().filter(|other| other.id != card.id).any(|other| {
+                    layout_rect(&rt, &format!("node-{}", other.id.0))
+                        .is_some_and(|above| above[1] < chip[1] && rects_overlap([chip[0], chip[1] - 1.0, chip[2], chip[3]], above))
+                });
+                if grazed {
+                    chips_on_cards_above.push(title.clone());
+                }
                 if layout_rect(&rt, &format!("vial-{id}")).is_some_and(|icon| rects_overlap(chip, icon)) {
                     covered_icons.push(title.clone());
                 }
@@ -4171,7 +4188,7 @@ fn kitchen_brewed_tidy() -> Result<serde_json::Value, String> {
         }
         report.insert(
             scene.to_owned(),
-            json!({ "coveredNames": covered_names, "looseBadges": loose_badges, "coveredIcons": covered_icons, "coveredTitles": covered_titles }),
+            json!({ "coveredNames": covered_names, "looseBadges": loose_badges, "coveredIcons": covered_icons, "coveredTitles": covered_titles, "chipsOnCardsAbove": chips_on_cards_above }),
         );
     }
     Ok(serde_json::Value::Object(report))
