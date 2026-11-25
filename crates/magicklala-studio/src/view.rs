@@ -1983,6 +1983,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                     .key("model-picker")
                     .grow(1.0)
                     .min_w(0.0)
+                    .justify_between()
                     .px(if narrow_inspector { 7.0 } else { 9.0 })
                     .py(tile_py)
                     .gap(3.0)
@@ -2008,6 +2009,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                     .key("temperature-tile")
                     .grow(1.0)
                     .min_w(0.0)
+                    .justify_between()
                     .px(if narrow_inspector { 6.0 } else { 8.0 })
                     .py(tile_py)
                     .gap(3.0)
@@ -2016,6 +2018,9 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                     .fill(t.card)
                     .border(1.0, t.rule_2)
                     .child(match app.selected_temperature_source() {
+                        Some(source) if source.eq_ignore_ascii_case("temperature") => {
+                            label("Temperature", 10.5, 650.0, if light { t.broth_deep } else { t.broth_foam })
+                        }
                         Some(source) if compact => label(source, 10.5, 650.0, if light { t.broth_deep } else { t.broth_foam }).wrap(),
                         Some(source) => label(format!("Temperature · {source}"), 10.5, 650.0, if light { t.broth_deep } else { t.broth_foam }).wrap(),
                         None => label("Temperature", 10.5, 600.0, t.mute),
