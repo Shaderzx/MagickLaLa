@@ -26,6 +26,17 @@ fn rim_point(plan: &BrewPlan, share: f32) -> [f32; 2] {
     [pot[0] + pot[2] * (0.30 + 0.40 * share), pot[1] + pot[3] * 0.44]
 }
 
+pub fn hexed_stub(points: &[[f32; 2]]) -> &[[f32; 2]] {
+    let first = (points.len() * 46 / 100).max(4).min(points.len());
+    let last = (points.len() * 80 / 100).max(first).min(points.len());
+    let dips = |end: usize| {
+        let (tip, back) = (points[end - 1], points[end.saturating_sub(4)]);
+        tip[1] - back[1] >= (tip[0] - back[0]).abs()
+    };
+    let end = (first..=last).find(|end| dips(*end)).unwrap_or(last);
+    &points[..end]
+}
+
 pub fn spout_point(plan: &BrewPlan) -> [f32; 2] {
     let (cx, cy, u) = pot_frame(plan.pot);
     [cx + 94.0 * u, cy + 30.0 * u]
@@ -689,7 +700,7 @@ fn lane_stream(shape: Shape, points: &[[f32; 2]], style: StreamStyle, p: &Hearth
         style.color
     };
     if style.hexed {
-        let cut = &points[..(points.len() * 46 / 100).max(2).min(points.len())];
+        let cut = hexed_stub(points);
         let end = cut[cut.len() - 1];
         let shape = crate::hearth::dashed_polyline(shape, cut, 7.0, 5.0, 2.4, ink, None);
         let shape = shape.line([end[0] - 5.0, end[1] - 5.0], [end[0] + 5.0, end[1] + 5.0], 2.2, rune::LineCap::Round, ink);
@@ -723,7 +734,7 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
         let (to, lift) = landing(plan, placed, index, spread);
         let style = stream_for(state, card, mood, p, lift);
         let bowed = column_clearance(plan, placed, vial_mouth(placed, plan)).is_some();
-        shape = match (plan.lanes.is_some() || bowed, paths.iter().find(|(id, _)| id == &placed.id)) {
+        shape = match (plan.lanes.is_some() || bowed || style.hexed, paths.iter().find(|(id, _)| id == &placed.id)) {
             (true, Some((_, points))) => lane_stream(shape, points, style, p),
             _ => pouring_stream_shape(shape, vial_mouth(placed, plan), to, style),
         };

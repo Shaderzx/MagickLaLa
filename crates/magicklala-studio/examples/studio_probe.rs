@@ -2191,7 +2191,7 @@ fn failed_stub() -> Result<serde_json::Value, String> {
             let stub = magicklala_canvas::cauldron::hexed_stub(points);
             let end = stub[stub.len() - 1];
             let before = stub[stub.len().saturating_sub(4)];
-            let heading_down = stub.len() < 2 || end[1] - before[1] >= 0.5 * (end[0] - before[0]).abs();
+            let heading_down = stub.len() < 2 || end[1] - before[1] >= (end[0] - before[0]).abs() || stub.len() >= points.len() * 80 / 100;
             if !heading_down {
                 upward.push(format!("{}@{}", id.0, size.0));
             }

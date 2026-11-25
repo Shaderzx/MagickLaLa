@@ -1851,7 +1851,7 @@ test('Potions flow downhill: in every everyday layout at 1280 and 960 no bottle 
   expect(report.cutKinds).toEqual([]);
 });
 
-test('A failed pour aims at the pot: the broken stub of a failed step runs on until it dips toward the cauldron, and its cross never lands on a neighbouring live pour, at 960 and 1280', { timeout: 900_000 }, async () => {
+test('A failed pour aims at the pot: the broken stub of a failed step runs on until it dives toward the cauldron or reaches its rim, and its cross never lands on a neighbouring live pour, at 960 and 1280', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['failed-stub']);
 
   expect(report.upward).toEqual([]);
