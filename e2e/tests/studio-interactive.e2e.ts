@@ -1679,7 +1679,7 @@ test('Undo keeps time in order and reaches every edit: Cmd or Ctrl Z first takes
   expect(report.typed).toEqual({ promptAfterOne: 'You asked: {{content}}', variablesAfterOne: 1, variablesAfterTwo: 0 });
   expect(report.listed).toEqual({ before: ['refund', 'billing', 'default'], after: ['default'] });
 });
-test('Potion rack: four or more bottles stand in rows on shelf planks fed by one glass pipe per row instead of a branch per bottle, and crowded ingredient names stay whole instead of being cut', { timeout: 900_000 }, async () => {
+test('Potion rack: four or more bottles stand in rows on shelf planks fed by one glass pipe per row instead of a branch per bottle, crowded ingredient names stay whole, every bottle name keeps one line, the shared kind sits centred under the rack clear of every tag, pipes keep air above the tags below them, and each plank ends at its own bottles', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['potion-rack']);
 
   for (const [scene, rack] of Object.entries<any>(report)) {
@@ -1687,6 +1687,10 @@ test('Potion rack: four or more bottles stand in rows on shelf planks fed by one
     expect({ scene, rack: rack.rack }).toEqual({ scene, rack: true });
     expect({ scene, pipes: rack.pipes }).toEqual({ scene, pipes: rack.rows });
     expect(rack.rows, scene).toBeLessThanOrEqual(3);
+    expect({ scene, wrapped: rack.wrapped }).toEqual({ scene, wrapped: [] });
+    expect({ scene, kindClash: rack.kindClash, kindCentered: rack.kindCentered }).toEqual({ scene, kindClash: [], kindCentered: true });
+    expect({ scene, grazes: rack.grazes }).toEqual({ scene, grazes: [] });
+    expect({ scene, planks: rack.overhangingPlanks }).toEqual({ scene, planks: [] });
   }
 });
 test('True records: Check keeps a good brew lit, an AI prompt may say {{customer}} literally with a note instead of a hex, a Send that hands off is still a bottle, only steps that ran wear step numbers after a brew, a pantry toss undoes as one step, an empty draft with variables saves and asks before you leave it, and a wire message does not follow you to the next potion', { timeout: 900_000 }, async () => {

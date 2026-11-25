@@ -7008,9 +7008,80 @@ fn potion_rack() -> Result<serde_json::Value, String> {
             .collect();
         pipes.sort_by(f32::total_cmp);
         pipes.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+        let origin = rt.presented("canvas").map(|(rect, _)| [rect[0], rect[1]]).ok_or("no canvas")?;
+        let bottles: Vec<(String, [f32; 4], String)> = rt
+            .state
+            .canvas
+            .nodes
+            .iter()
+            .filter(|card| plan.card(&card.id).is_some_and(|placed| placed.role == magicklala_canvas::BrewRole::Bottle))
+            .filter_map(|card| rt.presented(&format!("node-{}-header", card.id.0)).map(|(rect, _)| (card.id.0.clone(), rect, rt.state.canvas.display_title(&card.id))))
+            .collect();
+        let wrapped: Vec<String> = bottles
+            .iter()
+            .filter(|(id, _, title)| {
+                let (_, line_h) = measure.measure(title, rune::TextStyle::new(12.5_f32.max(10.5 / plan.scale), 750.0), 1.0);
+                text_lines_under(&rt, &format!("node-{id}-header"))
+                    .iter()
+                    .find(|(line, _)| line.replace('\u{a0}', " ") == *title)
+                    .is_none_or(|(_, rect)| rect[3] > line_h * plan.scale * 1.5)
+            })
+            .map(|(_, _, title)| title.clone())
+            .collect();
+        let overlaps = |a: [f32; 4], b: [f32; 4]| a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
+        let kind = rt.presented("rack-kind").map(|(rect, _)| rect);
+        let rack = rt.presented("bottle-rack").map(|(rect, _)| rect);
+        let kind_clash: Vec<String> = kind.map_or_else(Vec::new, |kind| bottles.iter().filter(|(_, rect, _)| overlaps(kind, *rect)).map(|(_, _, title)| title.clone()).collect());
+        let kind_centered = match (kind, rack) {
+            (Some(kind), Some(rack)) => ((kind[0] + kind[2] * 0.5) - (rack[0] + rack[2] * 0.5)).abs() < 3.0,
+            _ => true,
+        };
+        let mut grazes: Vec<String> = Vec::new();
+        for pipe in magicklala_canvas::cauldron::rack_glass(&plan) {
+            for pair in pipe.windows(2) {
+                let (a, b) = ([pair[0][0] + origin[0], pair[0][1] + origin[1]], [pair[1][0] + origin[0], pair[1][1] + origin[1]]);
+                if (a[1] - b[1]).abs() > 0.5 {
+                    continue;
+                }
+                let (left, right) = (a[0].min(b[0]), a[0].max(b[0]));
+                for (_, rect, title) in &bottles {
+                    let above = rect[1] + rect[3] <= a[1] + 1.0 && rect[1] < a[1];
+                    if above && rect[0] < right && left < rect[0] + rect[2] && a[1] - (rect[1] + rect[3]) < 6.0 * plan.scale {
+                        grazes.push(format!("{title} {:.1}", a[1] - (rect[1] + rect[3])));
+                    }
+                }
+            }
+        }
+        grazes.sort();
+        grazes.dedup();
+        let planks: Vec<String> = magicklala_canvas::cauldron::rack_planks(&plan)
+            .map(|(frame, rows)| {
+                rows.iter()
+                    .filter_map(|row| {
+                        let row_bottles: Vec<&magicklala_canvas::BrewCard> = plan
+                            .with_role(magicklala_canvas::BrewRole::Bottle)
+                            .filter(|card| (card.rect[1] + 68.0 * plan.scale - frame[1] - row[0]).abs() < 1.0)
+                            .collect();
+                        let left = row_bottles.iter().map(|card| card.rect[0]).fold(f32::MAX, f32::min) - frame[0];
+                        let right = row_bottles.iter().map(|card| card.rect[0] + card.rect[2]).fold(f32::MIN, f32::max) - frame[0];
+                        (row[1] < left - 14.0 * plan.scale || row[2] > right + 14.0 * plan.scale).then(|| format!("{:.0}..{:.0} for {left:.0}..{right:.0}", row[1], row[2]))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         report.insert(
             name.to_owned(),
-            json!({ "cut": cut.into_iter().take(6).collect::<Vec<_>>(), "rack": rt.presented("bottle-rack").is_some(), "rows": tops.len(), "pipes": pipes.len() }),
+            json!({
+                "cut": cut.into_iter().take(6).collect::<Vec<_>>(),
+                "rack": rt.presented("bottle-rack").is_some(),
+                "rows": tops.len(),
+                "pipes": pipes.len(),
+                "wrapped": wrapped,
+                "kindClash": kind_clash,
+                "kindCentered": kind_centered,
+                "grazes": grazes,
+                "overhangingPlanks": planks,
+            }),
         );
     }
     Ok(json!(report))
