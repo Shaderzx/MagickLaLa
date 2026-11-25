@@ -6962,7 +6962,8 @@ fn mixed_shelves(args: &[String]) -> Result<serde_json::Value, String> {
                     for card in plan.cards.iter().filter(|card| card.id != id) {
                         let r = card.rect;
                         let halo = 3.0 * s;
-                        if body.iter().any(|p| p[0] > r[0] - halo && p[0] < r[0] + r[2] + halo && p[1] > r[1] - halo && p[1] < r[1] + r[3] + halo) {
+                        let badge = if card.role == magicklala_canvas::BrewRole::Ingredient && plan.lanes.is_some() { 10.0 * s } else { 0.0 };
+                        if body.iter().any(|p| p[0] > r[0] - halo - badge && p[0] < r[0] + r[2] + halo && p[1] > r[1] - halo && p[1] < r[1] + r[3] + halo) {
                             through.push(format!("{}>{}", id.0, card.id.0));
                         }
                     }
@@ -6987,8 +6988,7 @@ fn mixed_shelves(args: &[String]) -> Result<serde_json::Value, String> {
                 } else {
                     "ring"
                 };
-                let free_arcs_through = if plan.lanes.is_some() { Vec::new() } else { through };
-                report.push(json!({ "case": case, "shape": shape, "through": free_arcs_through }));
+                report.push(json!({ "case": case, "shape": shape, "through": through }));
             }
         }
     }
