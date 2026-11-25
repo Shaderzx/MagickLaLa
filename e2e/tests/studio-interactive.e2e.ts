@@ -1974,3 +1974,14 @@ test('A newer saved draft never hides the version that is still live: after publ
   expect(report.openRow).toBe('Tasting Agent 2 ingredients · v1 live Draft');
   expect(report.elsewhereRow).toBe('Tasting Agent 2 ingredients · v1 live Open ›');
 });
+
+test('Check holds a bound setting to the same rules as a typed one: a temperature variable of 5 and a memory limit variable of 500 are flagged as out of range, and a temperature variable that holds a word is flagged as not a number', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['bound-checks']);
+
+  expect(report.clean).toBe('valid');
+  expect(report.ranged).toEqual([
+    'Generate Text: temperature needs a number from 0 to 2, but the variable temperature is 5',
+    'Search Memory: limit needs a number from 1 to 100, but the variable max_memories is 500',
+  ]);
+  expect(report.worded).toEqual(['Generate Text: temperature needs a number from 0 to 2, but the variable temperature is "hot"']);
+});

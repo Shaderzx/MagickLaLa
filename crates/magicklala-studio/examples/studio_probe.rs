@@ -2677,6 +2677,35 @@ fn live_after_draft() -> Result<serde_json::Value, String> {
     let _ = std::fs::remove_file(&db_path);
     Ok(json!({ "openRow": open_row, "elsewhereRow": elsewhere }))
 }
+fn bound_checks() -> Result<serde_json::Value, String> {
+    let index_of = |app: &StudioApp, name: &str| app.spell.variables.iter().position(|variable| variable.name == name);
+    let typed = |rt: &mut Runtime<StudioApp>, name: &'static str, text: &'static str| {
+        rt.update(move |app, _| {
+            if let Some(index) = app.spell.variables.iter().position(|variable| variable.name == name)
+                && let Some(edit) = app.var_default_edits.get_mut(index)
+            {
+                *edit = rune::TextEdit::new(text);
+            }
+            app.sync_spell();
+        });
+        rt.frame(0.0);
+    };
+    let mut rt = runtime_for(StudioApp::from_registry().spell.clone());
+    let clean = validation_of(&mut rt)?;
+    typed(&mut rt, "temperature", "5");
+    typed(&mut rt, "max_memories", "500");
+    let ranged = validation_of(&mut rt)?;
+    let index = index_of(&rt.state, "temperature").ok_or("no temperature variable")?;
+    rt.update(move |app, _| {
+        app.set_variable_type_at(index, SocketType::String);
+        app.confirm_variable_type_reset();
+    });
+    rt.frame(0.0);
+    typed(&mut rt, "temperature", "hot");
+    typed(&mut rt, "max_memories", "5");
+    let worded = validation_of(&mut rt)?;
+    Ok(json!({ "clean": clean["validation"], "ranged": ranged["errors"], "worded": worded["errors"] }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8942,6 +8971,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("split-cleared") => split_cleared(),
         Some("step-numbers") => step_numbers(),
         Some("live-after-draft") => live_after_draft(),
+        Some("bound-checks") => bound_checks(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
