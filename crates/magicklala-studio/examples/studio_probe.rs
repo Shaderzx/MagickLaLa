@@ -3072,6 +3072,43 @@ fn lone_trigger_ships() -> Result<serde_json::Value, String> {
     let _ = std::fs::remove_file(&db_path);
     Ok(json!({ "shipped": shipped }))
 }
+fn rename_safe() -> Result<serde_json::Value, String> {
+    let setting = |app: &StudioApp, id: &str, key: &str| app.spell.nodes.iter().find(|node| node.id.0 == id).and_then(|node| node.config.get(key).cloned()).unwrap_or_default();
+    let type_name = |rt: &mut Runtime<StudioApp>, text: &'static str| {
+        rt.update(move |app, _| {
+            if let Some(index) = app.spell.variables.iter().position(|variable| variable.name == "max_memories" || variable.name.starts_with("temperature") && variable.name != "temperature" || variable.name == "recall")
+                && let Some(edit) = app.var_name_edits.get_mut(index)
+            {
+                *edit = rune::TextEdit::new(text);
+            }
+            app.sync_edits();
+        });
+        rt.frame(0.0);
+    };
+    let mut pathed = runtime_for(StudioApp::from_registry().spell.clone());
+    pathed.update(|app, _| {
+        app.prompts.insert(NodeId::from("llm"), rune::TextEdit::new("Use {{ max_memories.value }} and {{max_memories}}"));
+        app.sync_edits();
+    });
+    pathed.frame(0.0);
+    type_name(&mut pathed, "recall");
+    let pathed_prompt = setting(&pathed.state, "llm", "prompt");
+
+    let mut through = runtime_for(StudioApp::from_registry().spell.clone());
+    type_name(&mut through, "temperature");
+    let clash_check = validation_of(&mut through)?;
+    let names_mid: Vec<String> = through.state.spell.variables.iter().map(|variable| variable.name.clone()).collect();
+    type_name(&mut through, "temperaturex");
+    let names_after: Vec<String> = through.state.spell.variables.iter().map(|variable| variable.name.clone()).collect();
+    Ok(json!({
+        "pathedPrompt": pathed_prompt,
+        "clashCheck": clash_check["validation"],
+        "namesMid": names_mid,
+        "namesAfter": names_after,
+        "limit": setting(&through.state, "recall", "limit"),
+        "temperature": setting(&through.state, "llm", "temperature"),
+    }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9347,6 +9384,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("twin-switch-names") => twin_switch_names(),
         Some("redo-across") => redo_across(),
         Some("lone-trigger-ships") => lone_trigger_ships(),
+        Some("rename-safe") => rename_safe(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),

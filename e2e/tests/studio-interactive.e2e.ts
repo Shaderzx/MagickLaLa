@@ -2064,3 +2064,14 @@ test('Publishing ships every trigger that was not set aside: a recipe with a wir
 
   expect([...report.shipped].sort()).toEqual(['hook', 'say', 'start']);
 });
+
+test('A variable rename only lands on a valid unused name and carries every use: {{ max_memories.value }} follows the rename with its path, and typing through another variable name keeps the old name and flags Check until the name is unique, so neither variable steals the other one uses', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['rename-safe']);
+
+  expect(report.pathedPrompt).toBe('Use {{ recall.value }} and {{recall}}');
+  expect(report.clashCheck).toBe('invalid');
+  expect(report.namesMid).toEqual(['max_memories', 'temperature']);
+  expect(report.namesAfter).toEqual(['temperaturex', 'temperature']);
+  expect(report.limit).toBe('{{temperaturex}}');
+  expect(report.temperature).toBe('{{temperature}}');
+});
