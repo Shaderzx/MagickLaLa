@@ -1507,7 +1507,8 @@ impl StudioApp {
     }
 
     fn has_unsaved_work(&self) -> bool {
-        self.dirty && (!self.canvas.nodes.is_empty() || !self.spell.variables.is_empty())
+        self.dirty
+            && (!self.canvas.nodes.is_empty() || !self.spell.variables.is_empty() || self.saved_potions.iter().any(|(saved, _)| saved == &self.spell.name))
     }
 
     pub fn request_new_spell(&mut self) {
@@ -2964,7 +2965,7 @@ impl StudioApp {
 
     fn show_findings(&mut self, findings: Vec<HexFinding>) -> &ValidationState {
         let old_run = self.canvas.last_brew.is_some() || self.trace.iter().any(|line| line.kind != "RunRejected");
-        if old_run && findings.is_empty() && self.canvas.last_brew == Some(RunStatus::Succeeded) {
+        if old_run && findings.is_empty() && self.canvas.last_brew.is_some() {
             self.hex_findings.clear();
             self.trace.retain(|line| line.kind != "RunRejected");
             self.validation = ValidationState::Valid;
@@ -3915,19 +3916,8 @@ fn trace_line(event: &TraceEvent, at_ms: u64, canvas: &CanvasState) -> TraceLine
     TraceLine { at_ms, kind, detail, status, node }
 }
 
-fn template_roots(text: &str) -> Vec<String> {
-    let mut roots = Vec::new();
-    let mut rest = text;
-    while let Some(open) = rest.find("{{") {
-        let after = &rest[open + 2..];
-        let Some(close) = after.find("}}") else { break };
-        let root = after[..close].trim().split('.').next().unwrap_or_default().to_owned();
-        if !root.is_empty() && root.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') && !roots.contains(&root) {
-            roots.push(root);
-        }
-        rest = &after[close + 2..];
-    }
-    roots
+pub fn template_roots(text: &str) -> Vec<String> {
+    magicklala_nodes::template_roots(text)
 }
 
 fn default_prompt(kind: &str) -> String {

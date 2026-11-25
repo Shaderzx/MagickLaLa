@@ -10,6 +10,7 @@ use std::sync::Arc;
 use magicklala_graph::{NodeCatalog, NodeExecutor, NodeSpec};
 
 pub use llm::{HttpLlmGateway, LlmGatewayConfig, LlmProvider};
+pub use nodes::template_roots;
 pub use stores::{InMemoryKnowledge, InMemoryMemory};
 
 #[derive(Clone, Default)]

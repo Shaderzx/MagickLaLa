@@ -223,6 +223,16 @@ async fn delay(ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeError> {
 static PLACEHOLDER_PATTERN: std::sync::LazyLock<Result<Regex, String>> =
     std::sync::LazyLock::new(|| Regex::new(r"\{\{\s*([A-Za-z0-9_\-]+)((?:\.[A-Za-z0-9_\-]+)*)\s*\}\}").map_err(|error| error.to_string()));
 
+pub fn template_roots(source: &str) -> Vec<String> {
+    let Ok(pattern) = placeholder_pattern() else { return Vec::new() };
+    pattern.captures_iter(source).filter_map(|captures| captures.get(1).map(|root| root.as_str().to_owned())).fold(Vec::new(), |mut roots, root| {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+        roots
+    })
+}
+
 fn placeholder_pattern() -> Result<&'static Regex, NodeError> {
     PLACEHOLDER_PATTERN.as_ref().map_err(|error| NodeError::Other(error.clone()))
 }

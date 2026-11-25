@@ -553,7 +553,7 @@ fn toolbar(app: &StudioApp, t: &HearthPalette) -> El {
     let check_kind = if empty_graph || app.is_running() { ButtonKind::Disabled } else { ButtonKind::Secondary };
     let brew_kind = if empty_graph || hexed || !app.has_recipe_trigger() { ButtonKind::Disabled } else { ButtonKind::Primary };
     let bottle_kind = if empty_graph || hexed || published_unchanged || app.is_running() { ButtonKind::Disabled } else { ButtonKind::Secondary };
-    let save_kind = if empty_graph || app.is_running() { ButtonKind::Disabled } else { ButtonKind::Secondary };
+    let save_kind = if (empty_graph && !app.dirty) || app.is_running() { ButtonKind::Disabled } else { ButtonKind::Secondary };
     let theme_caption = if app.theme == Theme::Dark { "Midnight" } else { "Sunlit" };
     let theme_a11y = if app.theme == Theme::Dark { "Switch to Sunlit" } else { "Switch to Midnight" };
     let theme_btn = if compact {

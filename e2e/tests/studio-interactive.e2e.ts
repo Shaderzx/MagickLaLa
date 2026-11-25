@@ -1405,7 +1405,7 @@ test('Studio keeps its promises: a prompt typed over a shelf shortcut stays type
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
-});test('What you see is what runs: a bottle added to the router stays out of routes it cannot feed, a child potion with a spare reply set aside passes its caller Check, undoing a deleted trigger keeps its place, undo keeps a refused shortcut refused, Check after a brew replaces the old result, Tasting never fires a webhook, a reply with no trigger waits aside, an unpinned sub-spell caller stays live after Save, undo never doubles a socket, and timer and variable triggers brew with sample words', { timeout: 900_000 }, async () => {
+});test('What you see is what runs: a bottle added to the router stays out of routes it cannot feed, a child potion with a spare reply set aside passes its caller Check, undoing a deleted trigger keeps its place, undo keeps a refused shortcut refused, Check keeps a failed brew until an edit, Tasting never fires a webhook, a reply with no trigger waits aside, an unpinned sub-spell caller stays live after Save, undo never doubles a socket, and timer and variable triggers brew with sample words', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-runs-'));
   try {
     const report = await studioProbe(['true-runs', join(dir, 'studio.sqlite')]);
@@ -1417,8 +1417,8 @@ test('Studio keeps its promises: a prompt typed over a shelf shortcut stays type
     expect(report.undoRefusalWired).toBe(false);
     expect(report.checkAfter.staleLogSaysBrewed).toBe(false);
     expect(report.checkAfter.staleLogSaysHexed).toBe(true);
-    expect(report.checkAfter.failedPill).not.toContain('Failed');
-    expect(report.checkAfter.failedPlaque).not.toContain('Failed');
+    expect(report.checkAfter.failedPill).toContain('Failed');
+    expect(report.checkAfter.failedPlaque).toContain('Failed');
     expect(report.hookChat).toBe(0);
     expect(report.loneReply).toBe('Aside');
     expect(report.unpinnedSeal).toEqual({ afterSave: 1, releases: [1, 2] });
