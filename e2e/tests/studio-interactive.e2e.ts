@@ -2019,3 +2019,12 @@ test('A lone bottle tag sits centred until it has a step to show: before a brew 
   expect(report.failedStep).toBe(5);
   expect(report.failedBadge).toBe('5');
 });
+
+test('Rack glass carries the potion the whole way: every stream runs inside the glass from tap to bottle neck, no glass runs on dry past the last bottle, and an untaken route starts its dashes only where it leaves the brewed flow', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['rack-pipes']);
+
+  for (const key of ['router@1280', 'eight@1280', 'eight@960']) {
+    expect(report[key].glass).toBeGreaterThan(0);
+    expect({ key, leaks: report[key].leaks, dry: report[key].dry, overGold: report[key].overGold }).toEqual({ key, leaks: 0, dry: 0, overGold: 0 });
+  }
+});

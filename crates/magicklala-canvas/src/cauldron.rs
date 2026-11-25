@@ -26,14 +26,20 @@ fn rim_point(plan: &BrewPlan, share: f32) -> [f32; 2] {
     [pot[0] + pot[2] * (0.30 + 0.40 * share), pot[1] + pot[3] * 0.44]
 }
 
-pub fn hexed_stub(points: &[[f32; 2]]) -> &[[f32; 2]] {
+pub fn hexed_stub(points: &[[f32; 2]], clearance: f32) -> &[[f32; 2]] {
     let first = (points.len() * 46 / 100).max(4).min(points.len());
     let last = (points.len() * 80 / 100).max(first).min(points.len());
+    let landing = points.last().map_or(0.0, |point| point[1]);
     let dips = |end: usize| {
         let (tip, back) = (points[end - 1], points[end.saturating_sub(4)]);
         tip[1] - back[1] >= (tip[0] - back[0]).abs()
     };
-    let end = (first..=last).find(|end| dips(*end)).unwrap_or(last);
+    let close = |end: &usize| landing - points[end - 1][1] <= clearance;
+    let end = (first..=last)
+        .find(|end| dips(*end) && close(end))
+        .or_else(|| (first..points.len()).find(|end| dips(*end) && close(end)))
+        .or_else(|| (first..=last).find(|end| dips(*end)))
+        .unwrap_or(last);
     &points[..end]
 }
 
@@ -293,6 +299,10 @@ pub fn rack_glass(plan: &BrewPlan) -> Vec<Vec<[f32; 2]>> {
     let mut glass = vec![vec![tap, [trunk_x, tap[1]]], vec![[trunk_x, top], [trunk_x, bottom]]];
     glass.extend(rows.iter().map(|(y, end)| vec![[trunk_x, *y], [*end + 7.0 * plan.scale, *y]]));
     glass
+}
+
+pub fn untaken_tail<'a>(ribbon: &'a [[f32; 2]], _taken: &[Vec<[f32; 2]>], _scale: f32) -> &'a [[f32; 2]] {
+    ribbon
 }
 
 pub fn rack_planks(plan: &BrewPlan) -> Option<([f32; 4], Vec<[f32; 3]>)> {
@@ -689,7 +699,9 @@ pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32
         .collect()
 }
 
-fn lane_stream(shape: Shape, points: &[[f32; 2]], style: StreamStyle, p: &HearthPalette) -> Shape {
+pub const STUB_CLEARANCE: f32 = 36.0;
+
+fn lane_stream(shape: Shape, points: &[[f32; 2]], style: StreamStyle, clearance: f32, p: &HearthPalette) -> Shape {
     let Some((first, rest)) = points.split_first() else { return shape };
     let path = rest.iter().fold(rune::Path::new().move_to(*first), |path, point| path.line_to(*point));
     let ink = if style.untaken || style.blocked {
@@ -700,7 +712,7 @@ fn lane_stream(shape: Shape, points: &[[f32; 2]], style: StreamStyle, p: &Hearth
         style.color
     };
     if style.hexed {
-        let cut = hexed_stub(points);
+        let cut = hexed_stub(points, clearance);
         let end = cut[cut.len() - 1];
         let shape = crate::hearth::dashed_polyline(shape, cut, 7.0, 5.0, 2.4, ink, None);
         let shape = shape.line([end[0] - 5.0, end[1] - 5.0], [end[0] + 5.0, end[1] + 5.0], 2.2, rune::LineCap::Round, ink);
@@ -735,7 +747,7 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
         let style = stream_for(state, card, mood, p, lift);
         let bowed = column_clearance(plan, placed, vial_mouth(placed, plan)).is_some();
         shape = match (plan.lanes.is_some() || bowed || style.hexed, paths.iter().find(|(id, _)| id == &placed.id)) {
-            (true, Some((_, points))) => lane_stream(shape, points, style, p),
+            (true, Some((_, points))) => lane_stream(shape, points, style, STUB_CLEARANCE * plan.scale, p),
             _ => pouring_stream_shape(shape, vial_mouth(placed, plan), to, style),
         };
     }

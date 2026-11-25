@@ -2191,7 +2191,7 @@ fn failed_stub() -> Result<serde_json::Value, String> {
         let paths = magicklala_canvas::cauldron::pour_paths(&rt.state.canvas, &plan);
         let failed: Vec<NodeId> = rt.state.canvas.nodes.iter().filter(|card| card.status == ExecutionStatus::Failed).map(|card| card.id.clone()).collect();
         for (id, points) in paths.iter().filter(|(id, _)| failed.contains(id)) {
-            let stub = magicklala_canvas::cauldron::hexed_stub(points);
+            let stub = magicklala_canvas::cauldron::hexed_stub(points, magicklala_canvas::cauldron::STUB_CLEARANCE * plan.scale);
             let end = stub[stub.len() - 1];
             let before = stub[stub.len().saturating_sub(4)];
             let heading_down = stub.len() < 2 || end[1] - before[1] >= (end[0] - before[0]).abs() || stub.len() >= points.len() * 80 / 100;
@@ -2805,6 +2805,56 @@ fn stand_badge() -> Result<serde_json::Value, String> {
     Ok(
         json!({ "idleInset": idle_inset, "idleBadge": idle_badge, "failedBadge": failed_badge, "failedStep": failed.state.canvas.card(&NodeId::from("reply")).and_then(|card| card.step_order) }),
     )
+}
+fn rack_pipes() -> Result<serde_json::Value, String> {
+    let near = |point: [f32; 2], lines: &[Vec<[f32; 2]>]| -> f32 {
+        lines
+            .iter()
+            .flat_map(|line| line.windows(2))
+            .map(|pair| {
+                let (a, b) = (pair[0], pair[1]);
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let length = dx * dx + dy * dy;
+                let t = if length > 0.0 { (((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / length).clamp(0.0, 1.0) } else { 0.0 };
+                (point[0] - a[0] - t * dx).hypot(point[1] - a[1] - t * dy)
+            })
+            .fold(f32::MAX, f32::min)
+    };
+    let mut report = serde_json::Map::new();
+    for (name, spell, size) in [
+        ("router@1280", example("webhook_router.json")?, (1280.0_f32, 800.0_f32)),
+        ("eight@1280", many_bottle_spell(8), (1280.0, 800.0)),
+        ("eight@960", many_bottle_spell(8), (960.0, 640.0)),
+    ] {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        click(&mut rt, "run-spell")?;
+        live_finish(&mut rt)?;
+        rt.frame(3.0);
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let s = plan.scale.max(0.4);
+        let glass = magicklala_canvas::cauldron::rack_glass(&plan);
+        let bottles: Vec<NodeId> = plan.with_role(magicklala_canvas::BrewRole::Bottle).map(|card| card.id.clone()).collect();
+        let ribbons: Vec<Vec<[f32; 2]>> = magicklala_canvas::cauldron::ribbon_paths(&plan).into_iter().take(bottles.len()).collect();
+        let leaks = ribbons.iter().filter(|ribbon| ribbon.iter().any(|point| near(*point, &glass) > 4.5 * s)).count();
+        let dry: Vec<[f32; 2]> = glass.iter().flatten().filter(|point| near(**point, &ribbons) > 4.5 * s).copied().collect();
+        let taken: Vec<Vec<[f32; 2]>> = bottles
+            .iter()
+            .zip(&ribbons)
+            .filter(|(id, _)| rt.state.canvas.card(id).is_some_and(|card| card.status == ExecutionStatus::Succeeded))
+            .map(|(_, ribbon)| ribbon.clone())
+            .collect();
+        let over_gold: usize = bottles
+            .iter()
+            .zip(&ribbons)
+            .filter(|(id, _)| rt.state.canvas.card(id).is_some_and(|card| card.status != ExecutionStatus::Succeeded))
+            .map(|(_, ribbon)| magicklala_canvas::cauldron::untaken_tail(ribbon, &taken, s).iter().filter(|point| near(**point, &taken) < 2.0 * s).count())
+            .sum();
+        report.insert(name.to_owned(), json!({ "glass": glass.len(), "leaks": leaks, "dry": dry.len(), "overGold": over_gold, "taken": taken.len() }));
+    }
+    Ok(serde_json::Value::Object(report))
 }
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
@@ -9075,6 +9125,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("spawned-notes") => spawned_notes(),
         Some("pantry-filtered") => pantry_filtered(),
         Some("stand-badge") => stand_badge(),
+        Some("rack-pipes") => rack_pipes(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
