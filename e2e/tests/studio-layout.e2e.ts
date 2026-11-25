@@ -722,3 +722,12 @@ test('A brew cut short leaves its bottle and its running step marked Stopped: af
     expect(shown.lastTrace, ending).toBe(last);
   }
 });
+
+test('Bottle names never repeat: a Send numbered among its twins and a Send on a route named 1 get different names on their tags at both sizes', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['twin-tags']);
+
+  for (const size of ['960', '1280']) {
+    expect(report[size].distinct, size).toBe(3);
+    expect(report[size].tags.every((tag: string) => tag.length > 0), size).toBe(true);
+  }
+});

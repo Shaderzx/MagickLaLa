@@ -4144,6 +4144,39 @@ fn interrupted_bottles() -> Result<serde_json::Value, String> {
     let timeout = read(&mut timed);
     Ok(json!({ "cancelled": cancel, "timedOut": timeout }))
 }
+fn twin_tags() -> Result<serde_json::Value, String> {
+    let mut report = serde_json::Map::new();
+    for size in [(960.0_f32, 640.0_f32), (1280.0, 800.0)] {
+        let mut spell = SpellGraph::new("Twin Tags");
+        spell.nodes = vec![
+            studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+            studio_node("switch", "flow/switch", 280.0, json!({ "cases": ["1", "2"] })),
+            studio_node("plain", "io/send_message", 560.0, serde_json::Value::Null),
+            studio_node("one", "io/send_message", 560.0, serde_json::Value::Null),
+            studio_node("two", "io/send_message", 560.0, serde_json::Value::Null),
+        ];
+        spell.wires = vec![
+            studio_wire("w0", ("trigger", "out"), ("switch", "in")),
+            studio_wire("wv", ("trigger", "content"), ("switch", "value")),
+            studio_wire("w1", ("switch", "1"), ("one", "in")),
+            studio_wire("w2", ("switch", "2"), ("two", "in")),
+            studio_wire("w3", ("trigger", "out"), ("plain", "in")),
+        ];
+        for id in ["plain", "one", "two"] {
+            spell.wires.push(studio_wire(&format!("c-{id}"), ("trigger", "content"), (id, "content")));
+        }
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.frame(1.0);
+        let tags: Vec<String> = ["plain", "one", "two"].iter().map(|id| texts_under(&mut rt, &format!("bottle-tag-{id}"))).collect();
+        let titles: Vec<String> = ["plain", "one", "two"].iter().map(|id| rt.state.canvas.display_title(&NodeId::from(*id))).collect();
+        let distinct: std::collections::BTreeSet<&String> = titles.iter().collect();
+        report.insert(format!("{}", size.0), json!({ "tags": tags, "titles": titles, "distinct": distinct.len() }));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -10885,6 +10918,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("wide-letters") => wide_letters(),
         Some("plug-hygiene") => plug_hygiene(),
         Some("interrupted-bottles") => interrupted_bottles(),
+        Some("twin-tags") => twin_tags(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),
