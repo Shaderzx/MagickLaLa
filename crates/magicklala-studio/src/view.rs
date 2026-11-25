@@ -982,6 +982,7 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         let published = app.active_release_version;
         let shelved_live = (!active).then(|| app.saved_live.iter().find(|(saved, _)| saved == name).map(|(_, version)| *version)).flatten();
         let draft_tested = active && app.canvas.has_run() && !spell_invalid && published.is_some();
+        let live_pill = format!("v{} Live", published.unwrap_or(1));
         let (sub_label, badge_label, badge_bg, badge_border, badge_ink, is_action) = if active && spell_invalid {
             (format!("{ingr_count} {ingr_word}"), "Hexed", t.hex_tint, t.hex, t.hex, false)
         } else if draft_tested {
@@ -995,8 +996,8 @@ fn agents_and_releases(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             )
         } else if active && published.is_some() {
             (
-                format!("{ingr_count} {ingr_word} · v{} live", published.unwrap_or(1)),
-                "Live",
+                format!("{ingr_count} {ingr_word}"),
+                live_pill.as_str(),
                 if light { hex(0xE6F6EF) } else { with_alpha(t.broth_mid, 0.24) },
                 t.broth_mid,
                 if light { t.broth_deep } else { t.broth_foam },
@@ -1991,7 +1992,11 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                     .continuous_corners()
                     .fill(t.card)
                     .border(1.0, t.rule_2)
-                    .child(label("Temperature", 10.0, 600.0, t.mute))
+                    .child(match app.selected_temperature_source() {
+                        Some(source) if compact => label(source, 10.5, 650.0, if light { t.broth_deep } else { t.broth_foam }).wrap(),
+                        Some(source) => label(format!("Temperature · {source}"), 10.5, 650.0, if light { t.broth_deep } else { t.broth_foam }).wrap(),
+                        None => label("Temperature", 10.5, 600.0, t.mute),
+                    })
                     .child(
                         row()
                             .w_full()

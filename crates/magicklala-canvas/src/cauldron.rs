@@ -885,7 +885,7 @@ fn plaque(state: &CanvasState, mood: CauldronMood, plan: &BrewPlan, p: &HearthPa
 fn title_lines(state: &CanvasState, plan: &BrewPlan, bottles: usize, id: &NodeId) -> f32 {
     let size = crate::view::legible_size(12.5, plan.scale);
     let inner = crate::brew::RACK_BOTTLE_SIZE[0] - 10.0;
-    if bottles <= 3 { (state.display_title(id).chars().count() as f32 * 0.62 * size / inner).ceil().clamp(1.0, 4.0) } else { 1.0 }
+    if bottles <= 3 { (state.display_title(id).chars().count() as f32 * 0.56 * size / inner).ceil().clamp(1.0, 4.0) } else { 1.0 }
 }
 
 fn extra_title_lines(state: &CanvasState, plan: &BrewPlan, bottles: &[&BrewCard], id: &NodeId) -> f32 {
@@ -1127,7 +1127,7 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
                 row()
                     .w(frame[2])
                     .justify_center()
-                    .absolute(frame[0], rack_tag_floor(state, &plan, &bottles).max(frame[1] + frame[3]) + 6.0 * plan.scale)
+                    .absolute(frame[0], rack_tag_floor(state, &plan, &bottles) + 6.0 * plan.scale)
                     .child(el().key("rack-kind").child(text(*kind).font(TextStyle::new(size * plan.scale, 500.0).mono()).color(p.mute))),
             );
         }

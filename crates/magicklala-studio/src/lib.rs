@@ -642,10 +642,18 @@ pub fn editable_field(kind: &str) -> Option<&'static str> {
     }
 }
 
-fn card_note(kind: &str, config: &serde_json::Value) -> Option<String> {
+fn card_note(kind: &str, config: &serde_json::Value, variables: &[VariableDef]) -> Option<String> {
+    let bound = |name: &str| {
+        let value = variables.iter().find(|variable| variable.name == name).and_then(|variable| variable.default.as_ref()).map(|value| value.to_json());
+        match value {
+            Some(serde_json::Value::String(text)) => format!("{text} · {name}"),
+            Some(value) if !value.is_null() => format!("{value} · {name}"),
+            _ => name.to_owned(),
+        }
+    };
     let setting = |key: &str| {
         config.get(key).and_then(|value| match value {
-            serde_json::Value::String(text) => Some(magicklala_graph::bound_variable(value).map_or_else(|| text.clone(), str::to_owned)),
+            serde_json::Value::String(text) => Some(magicklala_graph::bound_variable(value).map_or_else(|| text.clone(), bound)),
             serde_json::Value::Number(number) => Some(number.to_string()),
             _ => None,
         })
@@ -893,7 +901,10 @@ pub struct EditSnapshot {
     prompts: BTreeMap<NodeId, TextEdit>,
     versions: BTreeMap<NodeId, TextEdit>,
     subgraphs: Vec<SubgraphRef>,
-    typing: Option<NodeId>,
+    variables: Vec<VariableDef>,
+    var_name_edits: Vec<TextEdit>,
+    var_default_edits: Vec<TextEdit>,
+    typing: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -926,6 +937,8 @@ pub struct StudioApp {
     pub undo_stack: Vec<UndoEntry>,
     undo_seen: usize,
     last_synced: Option<Box<EditSnapshot>>,
+    redo_stack: Vec<EditSnapshot>,
+    restoring: bool,
     pub aside_wires: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
     pub aside_bridges: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
     pub aside_refused: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
@@ -1056,6 +1069,8 @@ impl StudioApp {
             undo_stack: Vec::new(),
             undo_seen: 0,
             last_synced: None,
+            redo_stack: Vec::new(),
+            restoring: false,
             aside_wires: HashMap::new(),
             aside_bridges: HashMap::new(),
             aside_refused: HashMap::new(),
@@ -1749,6 +1764,12 @@ impl StudioApp {
         }
     }
 
+    pub fn selected_temperature_source(&self) -> Option<String> {
+        let id = self.canvas.selection.as_ref()?;
+        let setting = self.configs.get(id)?.get("temperature")?;
+        self.temperature_variable(setting).map(|index| self.spell.variables[index].name.clone())
+    }
+
     fn temperature_variable(&self, setting: &serde_json::Value) -> Option<usize> {
         let name = magicklala_graph::bound_variable(setting)?;
         self.spell.variables.iter().position(|variable| variable.name == name)
@@ -2407,7 +2428,11 @@ impl StudioApp {
     }
 
     fn card_notes(&self) -> BTreeMap<NodeId, String> {
-        self.canvas.nodes.iter().filter_map(|card| card_note(&card.kind, &self.node_config(&card.id, &card.kind)).map(|note| (card.id.clone(), note))).collect()
+        self.canvas
+            .nodes
+            .iter()
+            .filter_map(|card| card_note(&card.kind, &self.node_config(&card.id, &card.kind), &self.spell.variables).map(|note| (card.id.clone(), note)))
+            .collect()
     }
 
     fn sync_listed_outputs(&mut self) {
@@ -2434,6 +2459,29 @@ impl StudioApp {
         }
     }
 
+    fn carry_rename(&mut self, old: &str, new: &str) {
+        let token = format!("{{{{{old}}}}}");
+        let renamed = format!("{{{{{new}}}}}");
+        for config in self.configs.values_mut() {
+            for value in config.as_object_mut().into_iter().flat_map(|settings| settings.values_mut()) {
+                if magicklala_graph::bound_variable(value) == Some(old) {
+                    *value = serde_json::Value::String(renamed.clone());
+                } else if let Some(text) = value.as_str().filter(|text| text.contains(&token)) {
+                    *value = serde_json::Value::String(text.replace(&token, &renamed));
+                }
+            }
+        }
+        let kinds: BTreeMap<NodeId, String> = self.canvas.nodes.iter().map(|card| (card.id.clone(), card.kind.clone())).collect();
+        for (id, edit) in &mut self.prompts {
+            let names_variable = kinds.get(id).is_some_and(|kind| kind.starts_with("var/")) && edit.text.trim() == old;
+            if names_variable {
+                *edit = TextEdit::new(new);
+            } else if edit.text.contains(&token) {
+                *edit = TextEdit::new(edit.text.replace(&token, &renamed));
+            }
+        }
+    }
+
     fn where_they_stand(&self, mut nodes: Vec<NodeCardModel>) -> Vec<NodeCardModel> {
         for card in &mut nodes {
             if let Some(now) = self.canvas.card(&card.id) {
@@ -2443,7 +2491,7 @@ impl StudioApp {
         nodes
     }
 
-    fn edit_snapshot(&self, typing: Option<NodeId>) -> EditSnapshot {
+    fn edit_snapshot(&self, typing: Option<String>) -> EditSnapshot {
         EditSnapshot {
             nodes: self.canvas.nodes.clone(),
             wires: self.canvas.wires.clone(),
@@ -2452,6 +2500,9 @@ impl StudioApp {
             prompts: self.prompts.clone(),
             versions: self.versions.clone(),
             subgraphs: self.spell.subgraphs.clone(),
+            variables: self.spell.variables.clone(),
+            var_name_edits: self.var_name_edits.clone(),
+            var_default_edits: self.var_default_edits.clone(),
             typing,
         }
     }
@@ -2518,10 +2569,13 @@ impl StudioApp {
         }
         self.aside_bridges.retain(|_, bridges| !bridges.is_empty());
         let mut vars_changed = std::mem::take(&mut self.variables_touched);
+        let variables_before = self.spell.variables.clone();
+        let mut renames: Vec<(String, String)> = Vec::new();
         for (idx, var) in self.spell.variables.iter_mut().enumerate() {
             if let Some(edit) = self.var_name_edits.get(idx) {
                 let next_name = edit.text.trim();
                 if !next_name.is_empty() && next_name != var.name {
+                    renames.push((var.name.clone(), next_name.to_owned()));
                     var.name = next_name.to_owned();
                     vars_changed = true;
                 }
@@ -2543,6 +2597,17 @@ impl StudioApp {
                 vars_changed = true;
             }
         }
+        for (old, new) in renames {
+            self.carry_rename(&old, &new);
+        }
+        let edited_variable = (self.spell.variables.len() == variables_before.len())
+            .then(|| {
+                let mut changed =
+                    self.spell.variables.iter().zip(&variables_before).enumerate().filter(|(_, (now, before))| now != before).map(|(index, _)| index);
+                let first = changed.next()?;
+                changed.next().is_none().then(|| format!("variable:{first}"))
+            })
+            .flatten();
         let problems = self.variable_errors();
         let problems_changed = problems != self.var_problems;
         self.var_problems = problems;
@@ -2572,8 +2637,11 @@ impl StudioApp {
             || subgraphs != self.spell.subgraphs
             || shelf_changed
             || unplaced(&nodes) != unplaced(&self.spell.nodes);
+        if recipe_changed && !self.restoring {
+            self.redo_stack.clear();
+        }
         if recipe_changed && self.undo_stack.len() == self.undo_seen {
-            let typing = self.typed_node(&nodes, &wires, &subgraphs, &shelf);
+            let typing = edited_variable.clone().or_else(|| self.typed_node(&nodes, &wires, &subgraphs, &shelf).map(|id| format!("node:{}", id.0)));
             let same_typing = typing.is_some() && matches!(self.undo_stack.last(), Some(UndoEntry::Edit(kept)) if kept.typing == typing);
             match self.last_synced.take() {
                 Some(_) if same_typing => {}
@@ -3618,12 +3686,58 @@ impl StudioApp {
         }
     }
 
+    fn restore_edit(&mut self, before: EditSnapshot) {
+        let EditSnapshot { nodes, wires, shelved, configs, prompts, versions, subgraphs, variables, var_name_edits, var_default_edits, .. } = before;
+        self.spell.variables = variables;
+        self.var_name_edits = var_name_edits;
+        self.var_default_edits = var_default_edits;
+        self.variables_touched = true;
+        self.canvas.nodes = self.where_they_stand(nodes);
+        self.canvas.wires = wires;
+        let spots: Vec<(NodeId, [f32; 2])> = self.canvas.nodes.iter().map(|card| (card.id.clone(), card.position)).collect();
+        for (id, spot) in spots {
+            self.canvas.move_node(&id, spot);
+        }
+        self.canvas.shelved = shelved;
+        self.configs = configs;
+        self.prompts = prompts;
+        self.versions = versions;
+        self.spell.subgraphs = subgraphs;
+        self.canvas.select(None);
+        self.validation = ValidationState::Unchecked;
+        self.canvas.validated = false;
+        self.dirty = true;
+        self.sync_spell();
+    }
+
+    pub fn redo(&mut self) {
+        if self.is_running() {
+            return;
+        }
+        let Some(after) = self.redo_stack.pop() else { return };
+        let now = self.edit_snapshot(None);
+        self.restoring = true;
+        self.restore_edit(after);
+        self.restoring = false;
+        self.undo_stack.push(UndoEntry::Edit(Box::new(now)));
+        self.undo_seen = self.undo_stack.len();
+        self.undo_banner = None;
+    }
+
     pub fn undo(&mut self) {
         if self.is_running() {
             return;
         }
         let Some(entry) = self.undo_stack.pop() else { return };
+        let now = self.edit_snapshot(None);
         self.undo_banner = None;
+        self.restoring = true;
+        self.apply_undo(entry);
+        self.restoring = false;
+        self.redo_stack.push(now);
+    }
+
+    fn apply_undo(&mut self, entry: UndoEntry) {
         match entry {
             UndoEntry::Aside { id, wires, bridges } => {
                 self.drop_bridges(&bridges);
@@ -3690,25 +3804,7 @@ impl StudioApp {
                     self.sync_spell();
                 }
             }
-            UndoEntry::Edit(before) => {
-                let EditSnapshot { nodes, wires, shelved, configs, prompts, versions, subgraphs, .. } = *before;
-                self.canvas.nodes = self.where_they_stand(nodes);
-                self.canvas.wires = wires;
-                let spots: Vec<(NodeId, [f32; 2])> = self.canvas.nodes.iter().map(|card| (card.id.clone(), card.position)).collect();
-                for (id, spot) in spots {
-                    self.canvas.move_node(&id, spot);
-                }
-                self.canvas.shelved = shelved;
-                self.configs = configs;
-                self.prompts = prompts;
-                self.versions = versions;
-                self.spell.subgraphs = subgraphs;
-                self.canvas.select(None);
-                self.validation = ValidationState::Unchecked;
-                self.canvas.validated = false;
-                self.dirty = true;
-                self.sync_spell();
-            }
+            UndoEntry::Edit(before) => self.restore_edit(*before),
             UndoEntry::Recipe { nodes, wires, shelved } => {
                 self.canvas.nodes = self.where_they_stand(nodes);
                 self.canvas.wires = wires;
@@ -3991,6 +4087,10 @@ pub fn studio_key(app: &mut StudioApp, key: &rune::KeyEvent, _: &mut rune::Tx) -
     match &key.key {
         rune::Key::Delete | rune::Key::Backspace if on_workbench && app.canvas.selection.is_some() && !app.is_running() => {
             app.delete_selected_node();
+            true
+        }
+        _ if !app.has_open_popover() && key.is_command('z') && key.mods.shift && !app.redo_stack.is_empty() && !app.is_running() => {
+            app.redo();
             true
         }
         _ if !app.has_open_popover() && key.is_command('z') && !key.mods.shift && !app.undo_stack.is_empty() && !app.is_running() => {
