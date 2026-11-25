@@ -296,7 +296,14 @@ impl CanvasState {
                     .map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect::<Vec<_>>())
             });
             if let Some(names) = listed {
-                let fixed: Vec<String> = spec.outputs.iter().filter(|socket| socket.name != DYNAMIC_SOCKET).map(|socket| socket.name.clone()).collect();
+                let by_default: Vec<&str> =
+                    spec.config.iter().filter_map(|field| field.default.as_ref()?.as_array()).flatten().filter_map(|name| name.as_str()).collect();
+                let fixed: Vec<String> = spec
+                    .outputs
+                    .iter()
+                    .filter(|socket| socket.name != DYNAMIC_SOCKET && !by_default.contains(&socket.name.as_str()))
+                    .map(|socket| socket.name.clone())
+                    .collect();
                 state.list_outputs(&node.id, &names, open.ty, &fixed);
             }
         }

@@ -1849,7 +1849,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             .scroll(ScrollSpec { stick_bottom: false })
             .child(input);
         if edit.text.is_empty() {
-            box_el = box_el.child(label("Prompt…", 11.5, 450.0, t.placeholder).wrap());
+            box_el = box_el.child(label(format!("{}…", editor_caption(field)), 11.5, 450.0, t.placeholder).wrap());
         }
         let literal: Vec<String> = if card.kind.starts_with("ai/") {
             crate::template_roots(&edit.text).into_iter().map(|word| format!("{{{{{word}}}}}")).collect()
@@ -2097,6 +2097,9 @@ fn editor_caption(field: &str) -> &'static str {
         "name" => "Variable",
         "text" => "Text",
         SUBGRAPH_SPELL_FIELD => "Spell ID",
+        "cases" => "Cases",
+        "outputs" => "Outputs",
+        "keys" => "Keys",
         _ => "Prompt",
     }
 }
