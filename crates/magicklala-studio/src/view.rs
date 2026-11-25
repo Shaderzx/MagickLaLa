@@ -1785,6 +1785,7 @@ fn recipe_overview(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         (!cards.is_empty() || empty_pot).then(|| {
             let list = col().w_full().gap(5.0).child(inspector_section_heading(title, t));
             if cards.is_empty() {
+                let hint = if title == "Bottles" { "The last step fills a bottle" } else { "Start with an event from the Pantry" };
                 list.child(
                     row()
                         .w_full()
@@ -1794,7 +1795,7 @@ fn recipe_overview(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                         .continuous_corners()
                         .items_center()
                         .border(1.0, with_alpha(t.rule_2, 0.8))
-                        .child(label(if title == "Bottles" { "The last step fills a bottle" } else { "Start with an event from the Pantry" }, 11.0, 500.0, t.mute)),
+                        .child(label(hint, 11.0, 500.0, t.mute)),
                 )
             } else {
                 cards.iter().fold(list, |list, card| list.child(entry(card)))

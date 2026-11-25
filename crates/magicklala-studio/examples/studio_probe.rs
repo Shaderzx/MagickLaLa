@@ -4471,7 +4471,12 @@ fn fix_fits() -> Result<serde_json::Value, String> {
         rt.frame(3.0);
         let boxed = layout_rect(&rt, "inspector-error").ok_or("no red box")?;
         let inside = |key: &str| {
-            layout_rect(&rt, key).map(|rect| rect[0] >= boxed[0] - 0.5 && rect[1] >= boxed[1] - 0.5 && rect[0] + rect[2] <= boxed[0] + boxed[2] + 0.5 && rect[1] + rect[3] <= boxed[1] + boxed[3] + 0.5)
+            layout_rect(&rt, key).map(|rect| {
+                rect[0] >= boxed[0] - 0.5
+                    && rect[1] >= boxed[1] - 0.5
+                    && rect[0] + rect[2] <= boxed[0] + boxed[2] + 0.5
+                    && rect[1] + rect[3] <= boxed[1] + boxed[3] + 0.5
+            })
         };
         sizes.push(json!({ "width": size.0, "fix": inside("inspector-fix"), "grimoire": inside("inspector-open-grimoire") }));
     }
