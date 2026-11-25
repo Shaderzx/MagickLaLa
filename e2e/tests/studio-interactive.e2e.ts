@@ -1679,7 +1679,7 @@ test('Undo keeps time in order and reaches every edit: Cmd or Ctrl Z first takes
   expect(report.typed).toEqual({ promptAfterOne: 'You asked: {{content}}', variablesAfterOne: 1, variablesAfterTwo: 0 });
   expect(report.listed).toEqual({ before: ['refund', 'billing', 'default'], after: ['default'] });
 });
-test('Potion rack: four or more bottles stand in rows on shelf planks fed by one glass pipe per row instead of a branch per bottle, crowded ingredient names stay whole, every bottle name keeps one line, the shared kind sits centred under the rack clear of every tag, pipes keep air above the tags below them, and each plank ends at its own bottles', { timeout: 900_000 }, async () => {
+test('Potion rack: four or more bottles stand in rows on shelf planks fed by one glass pipe per row instead of a branch per bottle, crowded ingredient names stay whole, every bottle name keeps one line, no unowned kind caption floats under the shelves, pipes keep air above the tags below them, and each plank ends at its own bottles', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['potion-rack']);
 
   for (const [scene, rack] of Object.entries<any>(report)) {
@@ -1688,10 +1688,9 @@ test('Potion rack: four or more bottles stand in rows on shelf planks fed by one
     expect({ scene, pipes: rack.pipes }).toEqual({ scene, pipes: rack.rows });
     expect(rack.rows, scene).toBeLessThanOrEqual(3);
     expect({ scene, wrapped: rack.wrapped }).toEqual({ scene, wrapped: [] });
-    expect({ scene, kindClash: rack.kindClash, kindCentered: rack.kindCentered }).toEqual({ scene, kindClash: [], kindCentered: true });
+    expect({ scene, kindShown: rack.kindShown }).toEqual({ scene, kindShown: false });
     expect({ scene, grazes: rack.grazes }).toEqual({ scene, grazes: [] });
     expect({ scene, planks: rack.overhangingPlanks }).toEqual({ scene, planks: [] });
-    expect({ scene, kindGap: rack.kindGap <= 20 }).toEqual({ scene, kindGap: true });
   }
 });
 test('True records: Check keeps a good brew lit, an AI prompt may say {{customer}} literally with a note instead of a hex, a Send that hands off is still a bottle, only steps that ran wear step numbers after a brew, a pantry toss undoes as one step, an empty draft with variables saves and asks before you leave it, and a wire message does not follow you to the next potion', { timeout: 900_000 }, async () => {
@@ -2032,11 +2031,11 @@ test('Rack glass carries the potion the whole way: every stream runs inside the 
   }
 });
 
-test('Long bottle names never break the rack: three long route names wrap whole and the shared kind label stays on the canvas, and in an eight-bottle rack every tag keeps the part of its name that differs instead of cutting it off', { timeout: 900_000 }, async () => {
+test('Long bottle names never break the rack: three long route names wrap whole and every tag stays on the canvas, and in an eight-bottle rack every tag keeps the part of its name that differs instead of cutting it off', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['long-routes']);
 
   for (const key of ['three@1280', 'three@960', 'eight@1280', 'eight@960']) {
-    expect({ key, ...report[key] }).toEqual({ key, kindPastEdge: false, hidden: [], belowCanvas: [] });
+    expect({ key, hidden: report[key].hidden, belowCanvas: report[key].belowCanvas }).toEqual({ key, hidden: [], belowCanvas: [] });
   }
 });
 

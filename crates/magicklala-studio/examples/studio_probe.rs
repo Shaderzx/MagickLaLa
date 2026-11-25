@@ -8746,6 +8746,7 @@ fn potion_rack() -> Result<serde_json::Value, String> {
                 "rows": tops.len(),
                 "pipes": pipes.len(),
                 "wrapped": wrapped,
+                "kindShown": kind.is_some(),
                 "kindClash": kind_clash,
                 "kindCentered": kind_centered,
                 "grazes": grazes,
