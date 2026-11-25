@@ -772,8 +772,12 @@ pub(crate) fn potion_stand_view<S: 'static>(
         && !hexed
         && !matches!(output.status, ExecutionStatus::Succeeded | ExecutionStatus::Running | ExecutionStatus::Failed);
     let stopped = !hexed && state.stopped.contains(&output.id);
-    let mut header_row =
-        row().w_full().gap(4.0).items_center().justify_between().child(text(spell_label).font(TextStyle::new(legible(13.0), 750.0)).color(p.ink).truncate());
+    let mut header_row = row()
+        .w_full()
+        .gap(4.0)
+        .items_start()
+        .justify_between()
+        .child(text(spell_label).font(TextStyle::new(legible(13.0), 750.0)).color(p.ink).wrap_anywhere().max_lines(2).grow(1.0).min_w(0.0));
     if sealed_vintage && let Some(vintage) = &state.release_badge {
         header_row = header_row.child(
             row()
@@ -823,7 +827,7 @@ pub(crate) fn potion_stand_view<S: 'static>(
         )
         .shadow(3.0, 10.0, p.shadow_card)
         .child(header_row)
-        .child(text(&out_title).font(TextStyle::new(legible(12.0), 600.0)).color(p.ink_2).truncate())
+        .child(text(&out_title).font(TextStyle::new(legible(12.0), 600.0)).color(p.ink_2).wrap_anywhere().max_lines(2))
         .children((!terse && kind_fits).then(|| text(out_kind).font(TextStyle::new(legible(11.0), 500.0).mono()).color(p.mute)));
     if out_brewed {
         let ms_text = match primary_output.and_then(|c| c.duration_ms) {
