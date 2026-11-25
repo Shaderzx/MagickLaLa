@@ -2228,3 +2228,17 @@ test('Card icons stay readable on crowded pots: the smallest ingredient icon is 
     expect({ scene, readable: report[scene] >= 14 }).toEqual({ scene, readable: true });
   }
 });
+
+test('The live release keeps its Live mark while the draft changes: v1 says Live with no Restore right after publishing, still says Live after an edit and also offers Restore, and once v2 is published v1 offers only Restore while v2 says Live', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['live-mark-kept']);
+
+  expect(report.fresh).toMatch(/Live/);
+  expect(report.fresh).not.toMatch(/Restore/);
+  expect(report.edited).toMatch(/Live/);
+  expect(report.edited).toMatch(/Restore/);
+  expect(report.pending).toBe(1);
+  expect(report.older).toMatch(/Restore/);
+  expect(report.older).not.toMatch(/Live/);
+  expect(report.newest).toMatch(/Live/);
+  expect(report.newest).not.toMatch(/Restore/);
+});

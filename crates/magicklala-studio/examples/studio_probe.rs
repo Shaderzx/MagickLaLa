@@ -3408,6 +3408,34 @@ fn bound_unset() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn live_mark_kept() -> Result<serde_json::Value, String> {
+    let db_path = std::env::temp_dir().join(format!("magicklala-live-mark-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&db_path);
+    let config = StudioConfig { db_path: Some(db_path.clone()), ..StudioConfig::default() };
+    let mut app = StudioApp::open(&config).map_err(|error| error.to_string())?;
+    app.load_graph(tasting_spell());
+    app.left_tab = LeftTab::Agents;
+    let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    click(&mut rt, "publish")?;
+    rt.frame(1.0);
+    let fresh = texts_under(&mut rt, "release-v1");
+    rt.update(|app, _| {
+        app.prompts.insert(NodeId::from("echo"), rune::TextEdit::new("You said: {{content}}"));
+        app.sync_spell();
+    });
+    rt.frame(2.0);
+    let edited = texts_under(&mut rt, "release-v1");
+    click(&mut rt, "restore-v1")?;
+    let pending = rt.state.pending_restore_version;
+    rt.update(|app, _| app.cancel_restore_release());
+    click(&mut rt, "publish")?;
+    rt.frame(3.0);
+    let older = texts_under(&mut rt, "release-v1");
+    let newest = texts_under(&mut rt, "release-v2");
+    let _ = std::fs::remove_file(&db_path);
+    Ok(json!({ "fresh": fresh, "edited": edited, "pending": pending, "older": older, "newest": newest }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -10078,6 +10106,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("redo-then-undo") => redo_then_undo(),
         Some("bound-unset") => bound_unset(),
         Some("finish-then-fail-log") => finish_then_fail_log(),
+        Some("live-mark-kept") => live_mark_kept(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),
