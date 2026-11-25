@@ -3123,6 +3123,15 @@ fn rename_safe() -> Result<serde_json::Value, String> {
         "temperature": setting(&through.state, "llm", "temperature"),
     }))
 }
+fn fresh_split() -> Result<serde_json::Value, String> {
+    let mut rt = runtime_for(SpellGraph::new("Fresh Split"));
+    let mut made = None;
+    rt.update(|app, _| made = app.spawn("flow/split"));
+    rt.frame(0.0);
+    let id = made.ok_or("no split")?;
+    let outlets: Vec<String> = rt.state.canvas.card(&id).map(|card| card.outputs.iter().map(|socket| socket.name.clone()).collect()).unwrap_or_default();
+    Ok(json!({ "outlets": outlets }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9399,6 +9408,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("redo-across") => redo_across(),
         Some("lone-trigger-ships") => lone_trigger_ships(),
         Some("rename-safe") => rename_safe(),
+        Some("fresh-split") => fresh_split(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),

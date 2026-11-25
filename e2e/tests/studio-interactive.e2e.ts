@@ -2076,3 +2076,9 @@ test('A variable rename only lands on a valid unused name and carries every use:
   expect(report.temperature).toBe('{{temperature}}');
   expect(report.spaced).toEqual({ check: ['max memories: a variable name uses only letters, digits, _ and -'], name: 'max_memories' });
 });
+
+test('A Split fresh from the Pantry shows the two outlets it will really fire, out_0 and out_1, until you change or clear its list', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['fresh-split']);
+
+  expect(report.outlets).toEqual(['out_0', 'out_1']);
+});
