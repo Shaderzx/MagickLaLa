@@ -1973,7 +1973,11 @@ fn brew_truth() -> Result<serde_json::Value, String> {
     let mut bad = runtime_for(StudioApp::from_registry().spell.clone());
     click(&mut bad, "run-spell")?;
     live_finish(&mut bad)?;
-    let failed = brew_state(&mut bad);
+    let mut failed = brew_state(&mut bad);
+    bad.update(|app, _| app.trace_expanded = true);
+    bad.frame(1.0);
+    failed["hexedWords"] = json!(all_texts(&bad).into_iter().filter(|line| line.contains("Hexed")).collect::<Vec<_>>());
+    failed["failedWords"] = json!(all_texts(&bad).into_iter().filter(|line| line.contains("Failed")).count());
 
     let mut clock = Clock(0.0);
     let mut slow = slow_runtime(5_000, Duration::from_secs(600));
@@ -4263,7 +4267,7 @@ fn plain_sight() -> Result<serde_json::Value, String> {
         let rt = brewed(example("parallel_research.json")?, size)?;
         let strip = layout_rect(&rt, "trace-strip").ok_or("no log")?;
         let lines = text_lines_under(&rt, "trace-strip");
-        let result = lines.iter().any(|(line, rect)| line.starts_with("Hexed") && inside(strip, *rect) && rect[0] + rect[2] <= strip[0] + strip[2]);
+        let result = lines.iter().any(|(line, rect)| line.starts_with("Failed") && inside(strip, *rect) && rect[0] + rect[2] <= strip[0] + strip[2]);
         let clipped: Vec<String> = lines.iter().filter(|(_, rect)| rect[0] + rect[2] > strip[0] + strip[2] + 0.5).map(|(line, _)| line.clone()).collect();
         logs.push(json!({ "spell": "research", "width": size.0, "resultVisible": result, "clipped": clipped }));
     }
@@ -4986,6 +4990,27 @@ fn clear_signals() -> Result<serde_json::Value, String> {
             .iter()
             .any(|(_, points)| points.windows(2).any(|pair| segments_cross(pair[0], pair[1], a, b)))
     });
+    let everyday = open(tasting_spell(), (1280.0, 800.0));
+    let everyday_plan = magicklala_canvas::brew_plan(&everyday.state.canvas, everyday.state.canvas_size());
+    let everyday_ladle = magicklala_canvas::cauldron::ladle_line(&everyday.state.canvas, &everyday_plan).is_some();
+    let ladle_clearance = magicklala_canvas::cauldron::ladle_line(&dozen.state.canvas, &dozen_plan).map(|(a, b)| {
+        let point_to_segment = |p: [f32; 2], s: [f32; 2], e: [f32; 2]| {
+            let (dx, dy) = (e[0] - s[0], e[1] - s[1]);
+            let along = (((p[0] - s[0]) * dx + (p[1] - s[1]) * dy) / (dx * dx + dy * dy).max(f32::EPSILON)).clamp(0.0, 1.0);
+            ((p[0] - s[0] - dx * along).powi(2) + (p[1] - s[1] - dy * along).powi(2)).sqrt()
+        };
+        magicklala_canvas::cauldron::pour_paths(&dozen.state.canvas, &dozen_plan)
+            .iter()
+            .flat_map(|(_, points)| magicklala_canvas::cauldron::above_broth(points, a[1]).windows(2).map(|pair| (pair[0], pair[1])).collect::<Vec<_>>())
+            .map(|(s, e)| {
+                if segments_cross(s, e, a, b) {
+                    0.0
+                } else {
+                    point_to_segment(s, a, b).min(point_to_segment(e, a, b)).min(point_to_segment(a, s, e)).min(point_to_segment(b, s, e))
+                }
+            })
+            .fold(f32::MAX, f32::min)
+    });
 
     let mut pull = open(echo_spell(), (1280.0, 800.0));
     click(&mut pull, "mode-grimoire")?;
@@ -5011,6 +5036,8 @@ fn clear_signals() -> Result<serde_json::Value, String> {
         "structuredModel": structured_model,
         "temperature": temperature,
         "ladleCrossed": ladle_crossed,
+        "ladleBrushes": ladle_clearance.is_some_and(|room| room < 4.5 * (dozen_plan.pot[2].min(dozen_plan.pot[3]) / 240.0).clamp(0.55, 1.35) + 3.4),
+        "everydayLadle": everyday_ladle,
         "pulledWires": pulled,
     }))
 }
@@ -7331,8 +7358,9 @@ fn brewed_log(spell: SpellGraph, size: (f32, f32)) -> Result<serde_json::Value, 
     rt.frame(3.0);
     let strip = layout_rect(&rt, "trace-strip").ok_or("no log")?;
     let lines = text_lines_under(&rt, "trace-strip");
-    let result_visible =
-        lines.iter().any(|(line, rect)| (line == "Brewed" || line.starts_with("Hexed")) && inside(strip, *rect) && rect[0] + rect[2] <= size.0);
+    let result_visible = lines.iter().any(|(line, rect)| {
+        (line == "Brewed" || line.starts_with("Failed") || line.starts_with("Hexed")) && inside(strip, *rect) && rect[0] + rect[2] <= size.0
+    });
     let clipped: Vec<String> = lines.iter().filter(|(_, rect)| !inside(strip, *rect) || rect[0] + rect[2] > size.0).map(|(line, _)| line.clone()).collect();
     Ok(
         json!({ "width": size.0, "steps": rt.state.trace.iter().filter(|line| line.kind == "NodeFinished").count(), "resultVisible": result_visible, "clipped": clipped }),

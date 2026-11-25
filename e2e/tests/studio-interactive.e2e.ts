@@ -922,7 +922,7 @@ test('Every Studio panel names things in plain words: pantry shelves are Events,
   expect((texts as string[]).filter((line) => line !== 'Add On Message' && hints.test(line))).toEqual([]);
 });
 
-test('The toolbar pill and the cauldron plaque tell the truth about a brew: Brewing while it runs, Brewed only when the run succeeded, Failed when a step failed, Cancelled when it was stopped, and the pot stops simmering the moment a run ends', { timeout: 900_000 }, async () => {
+test('The toolbar pill and the cauldron plaque tell the truth about a brew: Brewing while it runs, Brewed only when the run succeeded, Failed when a step failed with the card, log and summary saying Failed too and never Hexed, Cancelled when it was stopped, and the pot stops simmering the moment a run ends', { timeout: 900_000 }, async () => {
   const { succeeded, failed, running, cancelled } = await studioProbe(['brew-truth']);
 
   expect(running.pill).toBe('Brewing');
@@ -933,6 +933,8 @@ test('The toolbar pill and the cauldron plaque tell the truth about a brew: Brew
   expect(failed.outcome).toBe('Failed');
   expect(failed.pill).toBe('Failed');
   expect(failed.plaque).not.toMatch(/^Brewed/);
+  expect(failed.hexedWords).toEqual([]);
+  expect(failed.failedWords).toBeGreaterThan(1);
   expect(cancelled.outcome).toBe('Cancelled');
   expect(cancelled.pill).toBe('Cancelled');
   expect(cancelled.plaque).not.toMatch(/^Brewed/);
@@ -1425,7 +1427,7 @@ test('Studio keeps its promises: a prompt typed over a shelf shortcut stays type
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
-});test('Every signal is clear: a failed step names its real cause while finished pours stay lit, 960 model tiles never slice, the 960 Grimoire keeps the potion name, a wrong-type wire says so, bad variable names are marked on their rows and the plaque, stacked ribbons never cross and their bottles dim on a hex, long route names stay inside, Structured JSON shows its model, temperature changes one step, the ladle never crosses a pour, and a wire can be pulled off an input', { timeout: 900_000 }, async () => {
+});test('Every signal is clear: a failed step names its real cause while finished pours stay lit, 960 model tiles never slice, the 960 Grimoire keeps the potion name, a wrong-type wire says so, bad variable names are marked on rows and plaque, stacked ribbons never cross and dim on a hex, long route names stay inside, Structured JSON shows its model, temperature changes one step, the ladle never touches a pour yet stays in an everyday pot, and a wire can be pulled off an input', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['clear-signals']);
 
   expect(report.failure).toEqual({ headlineHasCause: true, traceHasCause: true, dimmedFinishedPours: [] });
@@ -1443,6 +1445,8 @@ test('Studio keeps its promises: a prompt typed over a shelf shortcut stays type
   expect(report.structuredModel).toBe(true);
   expect(report.temperature).toEqual({ second: 0.4, variable: 'Float(0.4)' });
   expect(report.ladleCrossed).toBe(false);
+  expect(report.ladleBrushes).toBe(false);
+  expect(report.everydayLadle).toBe(true);
   expect(report.pulledWires).toBe(0);
 });test('Every dial tells the truth: a step with no temperature reads Auto and the first press writes one, the model tile names its provider properly, only real variable links are shown and a changed default changes the brew, the 960 Grimoire names every socket at fit or on hover, cards keep recipe numbers after a parallel brew, lane pours turn on wide curves, the first log chip keeps its name, the header counts bottles, big whole numbers keep their meaning, and a missing AI gateway says where to set one', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-dials-'));
