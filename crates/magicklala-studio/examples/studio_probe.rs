@@ -2001,7 +2001,13 @@ fn one_step_undo() -> Result<serde_json::Value, String> {
     Ok(json!({ "toss": toss, "duplicate": duplicate, "pour": pour }))
 }
 fn wire_return() -> Result<serde_json::Value, String> {
-    let records = |app: &StudioApp| app.spell.wires.iter().map(|wire| format!("{}:{}.{}>{}.{}", wire.id.0, wire.from_node.0, wire.from_socket, wire.to_node.0, wire.to_socket)).collect::<Vec<_>>();
+    let records = |app: &StudioApp| {
+        app.spell
+            .wires
+            .iter()
+            .map(|wire| format!("{}:{}.{}>{}.{}", wire.id.0, wire.from_node.0, wire.from_socket, wire.to_node.0, wire.to_socket))
+            .collect::<Vec<_>>()
+    };
     let spell = StudioApp::from_registry().spell.clone();
     let middles: Vec<NodeId> = spell
         .nodes

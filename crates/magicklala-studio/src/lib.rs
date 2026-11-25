@@ -909,6 +909,7 @@ pub struct StudioApp {
     pub aside_refused: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
     pub wire_error: Option<String>,
     wire_homes: Vec<((SocketRef, SocketRef), (WireId, usize))>,
+    wire_ledger: Vec<WireId>,
     var_problems: Vec<String>,
     pub saved_potions: Vec<(String, String)>,
     pub saved_live: Vec<(String, u32)>,
@@ -1038,6 +1039,7 @@ impl StudioApp {
             aside_refused: HashMap::new(),
             wire_error: None,
             wire_homes: Vec::new(),
+            wire_ledger: Vec::new(),
             var_problems: Vec::new(),
             saved_potions: Vec::new(),
             saved_live: Vec::new(),
@@ -1084,6 +1086,7 @@ impl StudioApp {
         app.canvas.fit(viewport);
         app.canvas.select(app.canvas.nodes.iter().find(|card| card.kind == "ai/generate_text").map(|card| card.id.clone()));
         app.last_synced = Some(Box::new(app.edit_snapshot(None)));
+        app.seed_wire_ledger();
         app
     }
 
@@ -1504,6 +1507,7 @@ impl StudioApp {
         self.canvas.fit(viewport);
         self.canvas.select(self.canvas.nodes.iter().find(|card| card.kind == "ai/generate_text").map(|card| card.id.clone()));
         self.last_synced = Some(Box::new(self.edit_snapshot(None)));
+        self.seed_wire_ledger();
     }
 
     fn has_unsaved_work(&self) -> bool {
@@ -1781,7 +1785,8 @@ impl StudioApp {
             return None;
         }
         let spec = self.specs.iter().find(|spec| spec.kind == kind)?.clone();
-        self.undo_stack.push(UndoEntry::Recipe { nodes: self.canvas.nodes.clone(), wires: self.canvas.wires.clone(), shelved: self.canvas.shelved.clone() });
+        let mark = self.undo_stack.len();
+        self.undo_stack.push(UndoEntry::Edit(Box::new(self.edit_snapshot(None))));
         self.undo_banner = Some(format!("Added {}", spec.title));
         let center = self.canvas.camera.screen_to_world(screen);
         let id = self.canvas.add_node_from_spec(&spec, center);
@@ -1812,7 +1817,13 @@ impl StudioApp {
         self.canvas.move_node(&id, spot);
         self.validation = ValidationState::Unchecked;
         self.sync_spell();
+        self.fold_undo_since(mark);
         Some(id)
+    }
+
+    fn fold_undo_since(&mut self, mark: usize) {
+        self.undo_stack.truncate(mark + 1);
+        self.undo_seen = self.undo_stack.len();
     }
 
     pub fn canvas_origin(&self) -> [f32; 2] {
@@ -2415,6 +2426,7 @@ impl StudioApp {
             return false;
         }
         self.sync_listed_outputs();
+        self.order_wires();
         let refusal = self.canvas.last_connect_error.take().map(|error| Self::wire_refusal(&error));
         if refusal.is_some() {
             self.wire_error = refusal.clone();
@@ -2609,21 +2621,41 @@ impl StudioApp {
     }
 
     fn rehome_wire(&mut self, pair: &(SocketRef, SocketRef)) {
-        let Some((id, at)) = self.wire_home(pair) else { return };
+        let Some((id, _)) = self.wire_home(pair) else { return };
         self.wire_homes.retain(|(known, _)| known != pair);
         let (from, to) = pair;
-        let Some(index) = self
+        if let Some(wire) = self
             .canvas
             .wires
-            .iter()
-            .position(|wire| wire.from_node == from.node && wire.from_socket == from.socket && wire.to_node == to.node && wire.to_socket == to.socket)
-        else {
-            return;
-        };
-        let mut wire = self.canvas.wires.remove(index);
-        wire.id = id;
-        let at = at.min(self.canvas.wires.len());
-        self.canvas.wires.insert(at, wire);
+            .iter_mut()
+            .find(|wire| wire.from_node == from.node && wire.from_socket == from.socket && wire.to_node == to.node && wire.to_socket == to.socket)
+        {
+            wire.id = id;
+        }
+        self.order_wires();
+    }
+
+    fn seed_wire_ledger(&mut self) {
+        let mut ledger: Vec<WireId> = self.canvas.wires.iter().map(|wire| wire.id.clone()).collect();
+        let mut homes: Vec<(WireId, usize)> = self.wire_homes.iter().map(|(_, home)| home.clone()).collect();
+        homes.sort_by_key(|(_, at)| *at);
+        for (id, at) in homes {
+            if !ledger.contains(&id) {
+                let at = at.min(ledger.len());
+                ledger.insert(at, id);
+            }
+        }
+        self.wire_ledger = ledger;
+    }
+
+    fn order_wires(&mut self) {
+        for wire in &self.canvas.wires {
+            if !self.wire_ledger.contains(&wire.id) {
+                self.wire_ledger.push(wire.id.clone());
+            }
+        }
+        let ledger = &self.wire_ledger;
+        self.canvas.wires.sort_by_key(|wire| ledger.iter().position(|known| known == &wire.id));
     }
 
     fn shelf_entries(&self) -> Vec<magicklala_graph::ShelfEntry> {
@@ -3389,6 +3421,7 @@ impl StudioApp {
         self.validation = ValidationState::Unchecked;
         self.sync_var_edits_from_spell();
         self.last_synced = Some(Box::new(self.edit_snapshot(None)));
+        self.seed_wire_ledger();
     }
 
     pub fn quick_add_from_menu(&mut self) {
@@ -3403,6 +3436,7 @@ impl StudioApp {
         }
         let anchor = self.canvas.context_menu.unwrap_or([self.canvas_size().0 * 0.5, self.canvas_size().1 * 0.5]);
         let Some(card) = self.canvas.selected_card().cloned() else { return self.close_context_menu() };
+        let mark = self.undo_stack.len();
         let selected_clone = Some((
             self.configs.get(&card.id).cloned(),
             self.prompts.get(&card.id).map(|e| e.text.clone()),
@@ -3434,6 +3468,7 @@ impl StudioApp {
                 self.versions.insert(new_id.clone(), TextEdit::new(version));
             }
             self.sync_spell();
+            self.fold_undo_since(mark);
         }
     }
 
@@ -3497,6 +3532,9 @@ impl StudioApp {
                 self.canvas.unshelve(&id);
                 for (from, to) in &wires {
                     let _ = self.canvas.connect_sockets(from, to);
+                }
+                for pair in &wires {
+                    self.rehome_wire(pair);
                 }
                 self.aside_wires.remove(&id);
                 self.rebuild_bridges();
