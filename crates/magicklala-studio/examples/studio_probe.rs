@@ -1543,6 +1543,7 @@ fn capture_surfaces(out_dir: &Path) -> Result<serde_json::Value, String> {
     save("20-eight-bottles-dark-960x640.png", shelf(many_bottle_spell(8), (960.0, 640.0), true, false, false)?)?;
     save("21-crowded-kitchen-960x640.png", shelf(crowded_kitchen(), (960.0, 640.0), false, true, false)?)?;
     save("22-crowded-kitchen-dark-1280x800.png", shelf(crowded_kitchen(), (1280.0, 800.0), true, false, true)?)?;
+    save("23-crowded-kitchen-brewed-960x640.png", shelf(crowded_kitchen(), (960.0, 640.0), false, false, true)?)?;
 
     Ok(json!({ "surfaces": files }))
 }

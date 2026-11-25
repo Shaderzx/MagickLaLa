@@ -268,7 +268,7 @@ fn context_menu(app: &StudioApp, t: &HearthPalette) -> Option<(El, Option<El>, O
         .gap(6.0)
         .items_center()
         .justify_between()
-        .child(label(title_label, 10.5, 700.0, t.mute).truncate().shrink().min_w(0.0))
+        .child(if docked { el().grow(1.0) } else { label(title_label, 10.5, 700.0, t.mute).truncate().shrink().min_w(0.0) })
         .child(
             row()
                 .key("context-dismiss")
@@ -1606,7 +1606,7 @@ fn run_summary_inspector(app: &StudioApp, t: &HearthPalette) -> El {
                     row()
                         .gap(6.0)
                         .items_center()
-                        .child(heading(if checked_only { "Check".to_owned() } else { format!("Brew #{}", app.runs) }, 15.5, 800.0, t.ink))
+                        .child(heading(if checked_only { "Check".to_owned() } else { format!("Brew #{}", app.runs.max(1)) }, 15.5, 800.0, t.ink))
                         .child(label("·", 14.0, 600.0, t.mute))
                         .child(heading(status_label, 15.5, 800.0, if succeeded { if t.light { t.broth_deep } else { t.broth_foam } } else { t.hex })),
                 )
@@ -2491,17 +2491,17 @@ fn trace_strip(app: &StudioApp, t: &HearthPalette) -> El {
     let step_word = if finished_steps == 1 { "step" } else { "steps" };
     let issue_word = if count == 1 { "issue" } else { "issues" };
     let summary = if app.is_running() {
-        format!("Brew #{} · simmering · {} {} · Quench stops it", app.runs, count, event_word)
+        format!("Brew #{} · simmering · {} {} · Quench stops it", app.runs.max(1), count, event_word)
     } else if blocked_pre_run {
         format!("Check · {count} {issue_word}")
     } else if app.trace_stale {
-        format!("Last brew #{}", app.runs)
+        format!("Last brew #{}", app.runs.max(1))
     } else if show_expand_chip {
-        format!("Brew #{}", app.runs)
+        format!("Brew #{}", app.runs.max(1))
     } else if finished_steps > 0 {
-        format!("Brew #{} · {finished_steps} {step_word}", app.runs)
+        format!("Brew #{} · {finished_steps} {step_word}", app.runs.max(1))
     } else {
-        format!("Brew #{} · {count} {event_word}", app.runs)
+        format!("Brew #{} · {count} {event_word}", app.runs.max(1))
     };
     let milestones: Vec<&TraceLine> = if count > 6 && !app.trace_expanded {
         let filtered: Vec<&TraceLine> = app
