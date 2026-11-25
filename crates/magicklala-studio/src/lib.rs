@@ -1344,7 +1344,7 @@ impl StudioApp {
                 cfg.as_object().is_some_and(|map| {
                     (renders && map.values().any(|v| v.as_str().is_some_and(|s| s.contains(&template_token))))
                         || map.iter().any(|(key, value)| {
-                            !magicklala_graph::UNBOUND_SETTINGS.contains(&key.as_str()) && magicklala_graph::bound_variable(value) == Some(name)
+                            self.specs.iter().any(|spec| spec.kind == card.kind && spec.binds_setting(key)) && magicklala_graph::bound_variable(value) == Some(name)
                         })
                         || (card.kind.starts_with("var/") && map.get("name").and_then(serde_json::Value::as_str) == Some(name))
                 })
@@ -3189,11 +3189,12 @@ impl StudioApp {
     fn undeclared_variable_findings(&self) -> Vec<HexFinding> {
         let graph = self.brew_graph();
         let bound = graph.nodes.iter().flat_map(|node| {
+            let spec = self.specs.iter().find(|spec| spec.kind == node.kind);
             node.config
                 .as_object()
                 .into_iter()
                 .flatten()
-                .filter(|(key, _)| !magicklala_graph::UNBOUND_SETTINGS.contains(&key.as_str()))
+                .filter(move |(key, _)| spec.is_some_and(|spec| spec.binds_setting(key)))
                 .filter_map(|(_, value)| magicklala_graph::bound_variable(value))
                 .filter(|name| !self.spell.variables.iter().any(|variable| variable.name == *name))
                 .map(move |name| {

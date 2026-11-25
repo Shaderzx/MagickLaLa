@@ -945,8 +945,9 @@ pub fn bound_variable(value: &serde_json::Value) -> Option<&str> {
 
 fn unset_bound_setting(state: &RunState, node: &NodeInstance) -> Option<NodeError> {
     let settings = node.config.as_object()?;
+    let spec = state.executors.get(&node.id)?.spec();
     let variables = locked(&state.variables);
-    settings.iter().filter(|(key, _)| !UNBOUND_SETTINGS.contains(&key.as_str())).find_map(|(key, value)| {
+    settings.iter().filter(|(key, _)| spec.binds_setting(key)).find_map(|(key, value)| {
         let name = bound_variable(value)?;
         let empty = variables.get(name).is_none_or(|held| held.to_json().is_null());
         empty.then(|| NodeError::Other(format!("{key} reads {{{{{name}}}}}, but the variable {name} has no value")))
@@ -954,9 +955,10 @@ fn unset_bound_setting(state: &RunState, node: &NodeInstance) -> Option<NodeErro
 }
 
 fn bound_settings(state: &RunState, mut node: NodeInstance) -> NodeInstance {
+    let Some(executor) = state.executors.get(&node.id).cloned() else { return node };
     if let Some(settings) = node.config.as_object_mut() {
         let variables = locked(&state.variables);
-        for (_, value) in settings.iter_mut().filter(|(key, _)| !UNBOUND_SETTINGS.contains(&key.as_str())) {
+        for (_, value) in settings.iter_mut().filter(|(key, _)| executor.spec().binds_setting(key)) {
             if let Some(found) = bound_variable(value).and_then(|name| variables.get(name)) {
                 *value = found.to_json();
             }
