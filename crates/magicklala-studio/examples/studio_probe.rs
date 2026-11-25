@@ -1401,7 +1401,7 @@ fn capture_surfaces(out_dir: &Path) -> Result<serde_json::Value, String> {
     let tasted = |dark: bool, messages: &[&str]| -> Result<StudioApp, String> {
         let mut showcase = tasting_spell();
         if let Some(node) = showcase.nodes.iter_mut().find(|node| node.id.0 == "echo") {
-            node.config = json!({ "template": "On it. I'll pull together \"{{content}}\" from this week's notes and send it back within the hour." });
+            node.config = json!({ "template": "Noted: {{content}}" });
         }
         let mut rt = runtime_for(showcase);
         if dark {
@@ -2203,6 +2203,9 @@ fn recipe_honesty() -> Result<serde_json::Value, String> {
     let mistyped_report = json!({ "card": texts_under(&mut mistyped, "node-llm"), "plaque": texts_under(&mut mistyped, "cauldron-plaque") });
 
     let mut empty = headless(StudioApp::with_spell(SpellGraph::new("New Potion"), registry_specs()));
+    empty.update(|app, _| app.left_tab = LeftTab::Agents);
+    empty.frame(1.0);
+    empty.frame(2.0);
     click(&mut empty, "starter-event-on_message")?;
     let first = node_of_kind(&empty.state, "event/on_message").ok_or("no trigger added")?;
     let lone = role_of(&empty.state, &first);
@@ -3860,8 +3863,12 @@ fn quiet_corners(db_path: &Path) -> Result<serde_json::Value, String> {
     let panel = layout_rect(&taste, "inspector").map(|rect| rect[2]);
 
     let mut empty = headless(StudioApp::from_registry());
-    empty.update(|app, _| app.new_empty_spell());
+    empty.update(|app, _| {
+        app.new_empty_spell();
+        app.left_tab = LeftTab::Agents;
+    });
     empty.frame(1.0);
+    empty.frame(2.0);
     let starter = click(&mut empty, "starter-event-on_message").is_ok();
     let starter_nodes = empty.state.canvas.nodes.iter().map(|card| card.kind.clone()).collect::<Vec<_>>();
 

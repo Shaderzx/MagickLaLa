@@ -357,7 +357,7 @@ impl Arrangement {
             Arrangement::TightFlank => with_whole_titles(state, size, TIGHT, plan_flanked),
             Arrangement::Stacked => with_whole_titles(state, size, Metrics { pot: small_pot, col_gap: 24.0, ..CROWDED }, plan_stacked),
             Arrangement::TightRing => with_whole_titles(state, size, TIGHT, plan_with),
-            Arrangement::TightStacked => with_whole_titles(state, size, Metrics { pot: small_pot, ..TIGHT }, plan_stacked),
+            Arrangement::TightStacked => with_whole_titles(state, size, Metrics { pot: small_pot, col_gap: 24.0, ..TIGHT }, plan_stacked),
         }
     }
 }
