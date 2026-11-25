@@ -1966,6 +1966,7 @@ test('One brew has one set of step numbers: the canvas badges and the Trace list
     expect(report[status].badges).toEqual({ trigger: 1, call: 2, script: 3, reply: null });
     expect(report[status].steps).toEqual(steps);
     expect(report[status].log).toBe('1 On Message · 1ms 2 Subgraph · 2ms 3 Rhai Script: boom');
+    expect(report[status].inspectedChild).toBe('call');
     expect(report[status].header).toBe(`Brew #0 · ${word} 3 steps · 7 events · <1ms total`);
   }
 });
