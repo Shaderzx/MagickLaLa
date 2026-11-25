@@ -5007,7 +5007,7 @@ fn honest_dials(db_path: &Path) -> Result<serde_json::Value, String> {
     let shown_provider = lines(&research, "model-picker").join(" ");
     click(&mut research, "temp-inc")?;
     let written = research.state.configs.get(&model).and_then(|config| config.get("temperature")).and_then(serde_json::Value::as_f64);
-    let temperature = json!({ "shown": shown_temperature, "written": written, "providerShown": shown_provider.contains("openai") });
+    let temperature = json!({ "shown": shown_temperature, "written": written, "providerShown": shown_provider.contains("Model · OpenAI") });
 
     let support = StudioApp::from_registry();
     let invented: Vec<String> = support
