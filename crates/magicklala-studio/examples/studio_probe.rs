@@ -3861,7 +3861,36 @@ fn recipe_plug() -> Result<serde_json::Value, String> {
     let unplug_shown = rt.find("unplug-content").is_some();
     click(&mut rt, "unplug-content")?;
     rt.frame(4.0);
+    let mut forked = SpellGraph::new("Forked");
+    forked.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("switch", "flow/switch", 280.0, json!({ "cases": ["refund"] })),
+        studio_node("other", "text/template", 560.0, json!({ "template": "Front desk" })),
+        studio_node("other_reply", "io/send_message", 840.0, serde_json::Value::Null),
+        studio_node("refund_reply", "io/send_message", 840.0, serde_json::Value::Null),
+        studio_node("spare", "text/template", 560.0, json!({ "template": "Spare" })),
+    ];
+    forked.wires = vec![
+        studio_wire("f1", ("trigger", "out"), ("switch", "in")),
+        studio_wire("f2", ("trigger", "content"), ("switch", "value")),
+        studio_wire("f3", ("switch", "default"), ("other_reply", "in")),
+        studio_wire("f4", ("other", "text"), ("other_reply", "content")),
+        studio_wire("f5", ("switch", "refund"), ("refund_reply", "in")),
+    ];
+    let mut fork = runtime_for(forked);
+    fork.update(|app, _| {
+        app.canvas.set_aside(&NodeId::from("spare"));
+        app.canvas.select(Some(NodeId::from("refund_reply")));
+    });
+    fork.frame(1.0);
+    click(&mut fork, "plug-content")?;
+    fork.frame(2.0);
+    let mut fork_offered: Vec<String> =
+        fork.elements().iter().filter_map(|element| element.key.as_deref()).filter_map(|key| key.strip_prefix("plug-content-")).map(str::to_owned).collect();
+    fork_offered.sort();
+    fork_offered.dedup();
     Ok(json!({
+        "forkOffered": fork_offered,
         "flowButton": flow_button,
         "offered": offered,
         "plugged": plugged,

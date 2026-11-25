@@ -2328,7 +2328,7 @@ test('A lone bottle shows its names whole: the potion name and the bottle name o
   }
 });
 
-test('Recipe plugs a missing input without leaving the Cauldron: a Send Message with nothing in its content offers Plug in, lists only the earlier text outputs that fit, wires the chosen one so Check passes, and Unplug takes it back out, while flow inputs get no plug button', { timeout: 900_000 }, async () => {
+test('Recipe plugs a missing input without leaving the Cauldron: a Send Message with nothing in its content offers Plug in, lists only text outputs of steps that run before it (never a sibling branch or a set-aside step), wires the chosen one so Check passes, and Unplug takes it back out, while flow inputs get no plug button', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['recipe-plug']);
 
   expect(report.flowButton).toBe(false);
@@ -2338,4 +2338,6 @@ test('Recipe plugs a missing input without leaving the Cauldron: a Send Message 
   expect(report.checkAfterPlug).toBe('valid');
   expect(report.unplugShown).toBe(true);
   expect(report.afterUnplug).toEqual([]);
+  expect(report.forkOffered).toContain('trigger-content');
+  expect(report.forkOffered.filter((source: string) => source.startsWith('other-') || source.startsWith('spare-'))).toEqual([]);
 });
