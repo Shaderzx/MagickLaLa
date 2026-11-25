@@ -292,17 +292,6 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
             None => (if card.status == ExecutionStatus::Failed { "Failed" } else { "Hexed" }).to_owned(),
         }
     };
-    let hex_chip = |label: String| {
-        row()
-            .px(6.0)
-            .py(1.5)
-            .radius(7.0)
-            .fill(p.card)
-            .border(1.2, p.hex)
-            .shadow(2.0, 6.0, p.shadow_card)
-            .min_w(0.0)
-            .child(text(label).font(TextStyle::new(legible(11.0), 750.0)).color(p.hex).truncate())
-    };
     let status_pill = if hexed {
         let pill_clear = if step_num.is_some() { legible(11.0) * 1.8 + 2.0 } else { 10.0 };
         let pill_icon = if dense || crammed { 10.0 + badge + 6.0 } else { 10.0 };
