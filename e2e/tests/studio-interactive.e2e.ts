@@ -2104,3 +2104,10 @@ test('Untaken means skipped by a finished brew: while the first Delay is still r
 
   expect(report).toEqual({ whileBrewing: [], afterQuench: [] });
 });
+
+test('Selecting a vial in a crowded kitchen lights its whole pour: its strand is drawn lit and on top of the bundle all the way to the rim, and no other strand is lit', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['lit-strand']);
+
+  expect(report.drawnLast).toBe(report.picked);
+  expect(report.lit).toEqual([report.picked]);
+});

@@ -3246,7 +3246,11 @@ fn waiting_not_untaken() -> Result<serde_json::Value, String> {
     let quenched = vec![event(json!({ "event": "run_finished", "run_id": run, "at": at, "summary": summary }))?];
     let mut rt = runtime_for(spell);
     let untaken_cards = |rt: &mut Runtime<StudioApp>| -> Vec<String> {
-        ["first", "second", "reply"].iter().filter(|id| texts_under(rt, &format!("node-{id}")).contains("Untaken") || texts_under(rt, &format!("node-{id}-header")).contains("Untaken")).map(|id| id.to_string()).collect()
+        ["first", "second", "reply"]
+            .iter()
+            .filter(|id| texts_under(rt, &format!("node-{id}")).contains("Untaken") || texts_under(rt, &format!("node-{id}-header")).contains("Untaken"))
+            .map(|id| id.to_string())
+            .collect()
     };
     rt.update(move |app, _| {
         app.pending_trace.extend(midway.clone());
@@ -3261,6 +3265,20 @@ fn waiting_not_untaken() -> Result<serde_json::Value, String> {
     rt.frame(2.0);
     let after_quench = untaken_cards(&mut rt);
     Ok(json!({ "whileBrewing": while_brewing, "afterQuench": after_quench }))
+}
+fn lit_strand() -> Result<serde_json::Value, String> {
+    let mut app = StudioApp::with_spell(crowded_kitchen(), registry_specs());
+    app.size = (1280.0, 800.0);
+    let mut rt = Runtime::new(app, studio_view, (1280.0, 800.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+    let picked = plan.with_role(magicklala_canvas::BrewRole::Ingredient).nth(3).map(|card| card.id.clone()).ok_or("no vial")?;
+    let chosen = picked.clone();
+    rt.update(move |app, _| app.canvas.select(Some(chosen.clone())));
+    rt.frame(1.0);
+    let order = magicklala_canvas::cauldron::pour_order(&rt.state.canvas, &plan);
+    let lit: Vec<String> = order.iter().filter(|id| magicklala_canvas::cauldron::pour_lit(&rt.state.canvas, id)).map(|id| id.0.clone()).collect();
+    Ok(json!({ "picked": picked.0, "drawnLast": order.last().map(|id| id.0.clone()), "lit": lit }))
 }
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
@@ -9542,6 +9560,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("check-matches-brew") => check_matches_brew(),
         Some("rack-errors") => rack_errors(),
         Some("waiting-not-untaken") => waiting_not_untaken(),
+        Some("lit-strand") => lit_strand(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),

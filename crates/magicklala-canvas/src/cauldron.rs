@@ -233,6 +233,14 @@ fn ribbon_course(plan: &BrewPlan, from: [f32; 2], to: [f32; 2], own: Option<&Nod
     ranked.sort_by_key(|(order, points)| (hits(points), sharp(points), overshoot(points), *order));
     ranked.into_iter().map(|(_, points)| points).collect()
 }
+pub fn pour_order(_state: &CanvasState, plan: &BrewPlan) -> Vec<NodeId> {
+    plan.with_role(BrewRole::Ingredient).map(|card| card.id.clone()).collect()
+}
+
+pub fn pour_lit(_state: &CanvasState, _id: &NodeId) -> bool {
+    false
+}
+
 fn landing(plan: &BrewPlan, placed: &BrewCard, index: usize, spread: f32) -> ([f32; 2], f32) {
     if !plan.flank {
         return (rim_point(plan, index as f32 / spread.max(1.0)), (36.0 - index as f32 * 10.0).max(0.0) * plan.scale);
@@ -463,7 +471,7 @@ fn stream_for(state: &CanvasState, card: &NodeCardModel, mood: CauldronMood, p: 
     let tone = category_tone(&card.category, state.light);
     let hexed = card.status == ExecutionStatus::Failed || card.inputs.iter().any(|socket| socket.flagged);
     let blocked = blocked_in(card, mood);
-    let untaken = state.has_run() && card.status == ExecutionStatus::Idle && !hexed && !blocked;
+    let untaken = state.brew_completed() && card.status == ExecutionStatus::Idle && !hexed && !blocked;
     let active = matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Running);
     let idle = !active && !untaken && !blocked && !hexed;
     let color = if hexed {
@@ -763,7 +771,7 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
     for (placed, ribbon) in bottles.iter().zip(&ribbons) {
         let Some(card) = state.card(&placed.id) else { continue };
         let taken = is_taken(&card.id);
-        let untaken = state.has_run() && !taken;
+        let untaken = state.brew_completed() && !taken;
         let ribbon_mood = if multi && taken { CauldronMood::Brewed } else { mood };
         let drawn = if untaken { untaken_tail(ribbon, &taken_ribbons, plan.scale.max(0.4)) } else { ribbon.as_slice() };
         shape = distillation_ribbon_shape(
