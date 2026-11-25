@@ -2151,3 +2151,10 @@ test('A step that was only cut short is Stopped, not Failed: when one branch fai
   expect(report.slowWords).toContain('Stopped');
   expect(report.slowWords).not.toContain('!');
 });
+
+test('Every red tag names what is missing: after Check on the dozen-ingredient potion each flagged card at both sizes shows the name of the input it lacks, never a bare Missing', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['named-missing']);
+
+  expect(report['1280'].vague).toEqual([]);
+  expect(report['960'].vague).toEqual([]);
+});

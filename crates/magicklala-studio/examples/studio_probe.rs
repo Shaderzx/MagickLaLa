@@ -3459,6 +3459,36 @@ fn stopped_not_failed() -> Result<serde_json::Value, String> {
         "brokenWords": texts_under(&mut rt, "node-broken"),
     }))
 }
+fn named_missing() -> Result<serde_json::Value, String> {
+    let mut report = serde_json::Map::new();
+    for size in [(1280.0_f32, 800.0_f32), (960.0, 640.0)] {
+        let mut app = StudioApp::with_spell(dozen_ingredient_spell(), registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        let _ = validation_of(&mut rt)?;
+        rt.frame(1.0);
+        let mut vague = Vec::new();
+        let flagged: Vec<(String, Vec<String>)> = rt
+            .state
+            .canvas
+            .nodes
+            .iter()
+            .filter_map(|card| {
+                let names: Vec<String> = card.inputs.iter().filter(|socket| socket.flagged).map(|socket| socket.name.clone()).collect();
+                (!names.is_empty()).then(|| (card.id.0.clone(), names))
+            })
+            .collect();
+        for (id, names) in flagged {
+            let words = texts_under(&mut rt, &format!("node-{id}"));
+            if !names.iter().any(|name| words.contains(name.as_str())) {
+                vague.push(format!("{id}: {words}"));
+            }
+        }
+        report.insert(format!("{}", size.0), json!({ "vague": vague }));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -9745,6 +9775,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("bound-unset") => bound_unset(),
         Some("finish-then-fail-log") => finish_then_fail_log(),
         Some("stopped-not-failed") => stopped_not_failed(),
+        Some("named-missing") => named_missing(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
