@@ -2409,6 +2409,36 @@ fn bound_looks(db_path: &Path) -> Result<serde_json::Value, String> {
     let row: Vec<String> = text_lines_under(&rt, "spell-tasting-agent").into_iter().map(|(line, _)| line).collect();
     Ok(json!({ "tile": tile, "recall": recall_line, "activeRow": row }))
 }
+fn redo_order() -> Result<serde_json::Value, String> {
+    let press = |rt: &mut Runtime<StudioApp>, shift: bool| {
+        rt.key(rune::KeyEvent { key: rune::Key::Command('z'), mods: rune::Mods { cmd: true, shift, ..Default::default() } });
+        rt.frame(0.0);
+    };
+    let has_echo = |rt: &Runtime<StudioApp>| rt.state.canvas.card(&NodeId::from("echo")).is_some();
+    let mut rt = runtime_for(tasting_spell());
+    rt.on_key = Some(magicklala_studio::studio_key);
+    rt.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("echo")));
+        app.delete_selected_node();
+        app.sync_edits();
+    });
+    rt.frame(0.0);
+    let removed = !has_echo(&rt);
+    press(&mut rt, false);
+    let undone = has_echo(&rt);
+    press(&mut rt, true);
+    let redone = !has_echo(&rt);
+    press(&mut rt, false);
+    let undone_again = has_echo(&rt);
+    rt.update(|app, _| {
+        app.prompts.insert(NodeId::from("echo"), rune::TextEdit::new("Fresh: {{content}}"));
+        app.sync_edits();
+    });
+    rt.frame(0.0);
+    press(&mut rt, true);
+    let fresh_kept = rt.state.prompts.get(&NodeId::from("echo")).map(|edit| edit.text.clone());
+    Ok(json!({ "removed": removed, "undone": undone, "redone": redone, "undoneAgain": undone_again, "freshKept": fresh_kept, "echoAfterStaleRedo": has_echo(&rt) }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8659,6 +8689,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("small-truths") => small_truths(),
         Some("card-notes") => card_notes(),
         Some("var-undo") => var_undo(),
+        Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("pot-rect") => pot_rect(),

@@ -1922,3 +1922,9 @@ test('Bound settings say where they come from: the temperature tile names its va
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('Redo brings back what undo took: Cmd or Ctrl Shift Z re-applies an undone removal, undo takes it back again, and a new edit after undo clears redo so it never overwrites fresh work', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['redo-order']);
+
+  expect(report).toEqual({ removed: true, undone: true, redone: true, undoneAgain: true, freshKept: 'Fresh: {{content}}', echoAfterStaleRedo: true });
+});
