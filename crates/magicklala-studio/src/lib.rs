@@ -843,6 +843,7 @@ pub struct StudioApp {
     pub aside_bridges: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
     pub aside_refused: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
     pub wire_error: Option<String>,
+    wire_homes: Vec<((SocketRef, SocketRef), (WireId, usize))>,
     var_problems: Vec<String>,
     pub saved_potions: Vec<(String, String)>,
     pub pantry_drag: Option<PantryDrag>,
@@ -969,6 +970,7 @@ impl StudioApp {
             aside_bridges: HashMap::new(),
             aside_refused: HashMap::new(),
             wire_error: None,
+            wire_homes: Vec::new(),
             var_problems: Vec::new(),
             saved_potions: Vec::new(),
             pantry_drag: None,
@@ -1373,6 +1375,7 @@ impl StudioApp {
 
     pub fn load_graph(&mut self, graph: SpellGraph) {
         self.wire_error = None;
+        self.wire_homes.clear();
         let mode = self.canvas.mode;
         let light = self.theme == Theme::Light;
         self.stop_active_run();
@@ -1409,6 +1412,11 @@ impl StudioApp {
             let parked = socket_pairs(&entry.parked);
             for (from, to) in &parked {
                 self.canvas.adopt_sockets(from, to, &self.specs);
+            }
+            for ((pair, wire), at) in parked.iter().zip(&entry.parked).zip(entry.parked_at.iter().map(|at| Some(*at as usize)).chain(std::iter::repeat(None))) {
+                if !wire.id.0.starts_with("parked-") {
+                    self.wire_homes.push((pair.clone(), (wire.id.clone(), at.unwrap_or(usize::MAX))));
+                }
             }
             if !parked.is_empty() {
                 self.aside_wires.insert(entry.node.clone(), parked);
@@ -1788,6 +1796,14 @@ impl StudioApp {
                     })
                     .filter(|pair| !shortcuts.contains(pair))
                     .collect();
+                for (index, wire) in self.canvas.wires.iter().enumerate() {
+                    let pair = (SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()), SocketRef::new(wire.to_node.clone(), wire.to_socket.clone()));
+                    if removed.contains(&pair) {
+                        let home = (pair, (wire.id.clone(), index));
+                        self.wire_homes.retain(|(known, _)| known != &home.0);
+                        self.wire_homes.push(home);
+                    }
+                }
                 if removed.is_empty() {
                     let title = self.canvas.display_title(&id);
                     self.canvas.set_aside(&id);
@@ -1833,6 +1849,12 @@ impl StudioApp {
                     if open && self.canvas.connect_sockets(from, to).is_ok() {
                         restored += 1;
                     }
+                }
+                let mut homed: Vec<((SocketRef, SocketRef), usize)> =
+                    stash.iter().filter_map(|pair| self.wire_home(pair).map(|(_, at)| (pair.clone(), at))).collect();
+                homed.sort_by_key(|(_, at)| *at);
+                for (pair, _) in homed {
+                    self.rehome_wire(&pair);
                 }
                 if restored == 0
                     && let Some(kind) = self.canvas.card(&id).map(|card| card.kind.clone())
@@ -2397,6 +2419,38 @@ impl StudioApp {
         recipe_from(&self.spell, &self.canvas, &self.specs)
     }
 
+    fn wire_home(&self, pair: &(SocketRef, SocketRef)) -> Option<(WireId, usize)> {
+        self.wire_homes.iter().find(|(known, _)| known == pair).map(|(_, home)| home.clone())
+    }
+
+    fn homed_wires(&self, pairs: &[(SocketRef, SocketRef)]) -> Vec<Wire> {
+        let mut wires = stored_wires("parked", pairs);
+        for (wire, pair) in wires.iter_mut().zip(pairs) {
+            if let Some((id, _)) = self.wire_home(pair) {
+                wire.id = id;
+            }
+        }
+        wires
+    }
+
+    fn rehome_wire(&mut self, pair: &(SocketRef, SocketRef)) {
+        let Some((id, at)) = self.wire_home(pair) else { return };
+        self.wire_homes.retain(|(known, _)| known != pair);
+        let (from, to) = pair;
+        let Some(index) = self
+            .canvas
+            .wires
+            .iter()
+            .position(|wire| wire.from_node == from.node && wire.from_socket == from.socket && wire.to_node == to.node && wire.to_socket == to.socket)
+        else {
+            return;
+        };
+        let mut wire = self.canvas.wires.remove(index);
+        wire.id = id;
+        let at = at.min(self.canvas.wires.len());
+        self.canvas.wires.insert(at, wire);
+    }
+
     fn shelf_entries(&self) -> Vec<magicklala_graph::ShelfEntry> {
         self.canvas
             .nodes
@@ -2404,7 +2458,12 @@ impl StudioApp {
             .filter(|card| self.canvas.is_shelved(&card.id))
             .map(|card| magicklala_graph::ShelfEntry {
                 node: card.id.clone(),
-                parked: self.aside_wires.get(&card.id).map(|wires| stored_wires("parked", wires)).unwrap_or_default(),
+                parked: self.aside_wires.get(&card.id).map(|wires| self.homed_wires(wires)).unwrap_or_default(),
+                parked_at: self
+                    .aside_wires
+                    .get(&card.id)
+                    .map(|wires| wires.iter().map(|pair| self.wire_home(pair).map_or(u32::MAX, |(_, at)| at as u32)).collect())
+                    .unwrap_or_default(),
                 bridges: self.aside_bridges.get(&card.id).map(|wires| stored_wires("bridge", wires)).unwrap_or_default(),
                 refused: self.aside_refused.get(&card.id).map(|wires| stored_wires("refused", wires)).unwrap_or_default(),
             })

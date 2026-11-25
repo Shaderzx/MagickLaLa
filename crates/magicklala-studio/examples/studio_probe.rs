@@ -4537,7 +4537,8 @@ fn true_runs(db_path: &Path) -> Result<serde_json::Value, String> {
         place("spare", "io/send_message", 2.0, serde_json::Value::Null),
     ];
     child.wires = vec![wire("cw", ("start", "out"), ("send", "in"))];
-    child.shelf = vec![magicklala_graph::ShelfEntry { node: NodeId::from("spare"), parked: Vec::new(), bridges: Vec::new(), refused: Vec::new() }];
+    child.shelf =
+        vec![magicklala_graph::ShelfEntry { node: NodeId::from("spare"), parked: Vec::new(), bridges: Vec::new(), refused: Vec::new(), parked_at: Vec::new() }];
     StudioStore::open(Some(&child_db)).and_then(|mut store| store.save_draft(&child)).map_err(|error| error.to_string())?;
     let mut parent = SpellGraph::new("Calling Parent");
     parent.nodes = vec![
@@ -6853,7 +6854,8 @@ fn wire_records(db_path: &Path) -> Result<serde_json::Value, String> {
         "afterReopen": after == original,
         "missing": original.iter().filter(|id| !after.contains(id)).cloned().collect::<Vec<_>>(),
     }))
-}fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
+}
+fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),
