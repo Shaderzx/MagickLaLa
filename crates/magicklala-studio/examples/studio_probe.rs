@@ -2858,11 +2858,14 @@ fn rack_pipes() -> Result<serde_json::Value, String> {
 }
 fn long_route_spell(cases: &[&str]) -> SpellGraph {
     let mut spell = SpellGraph::new("Long Routes");
-    let place = |id: &str, kind: &str, x: f32, y: f32, config: serde_json::Value| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position: [x, y], config };
-    spell.nodes = vec![
-        place("trigger", "event/on_message", 0.0, 0.0, serde_json::Value::Null),
-        place("route", "flow/switch", 260.0, 0.0, json!({ "cases": cases })),
-    ];
+    let place = |id: &str, kind: &str, x: f32, y: f32, config: serde_json::Value| NodeInstance {
+        id: NodeId::from(id),
+        kind: kind.to_owned(),
+        position: [x, y],
+        config,
+    };
+    spell.nodes =
+        vec![place("trigger", "event/on_message", 0.0, 0.0, serde_json::Value::Null), place("route", "flow/switch", 260.0, 0.0, json!({ "cases": cases }))];
     let wire = |id: String, from: (&str, &str), to: (&str, &str)| Wire {
         id: WireId::from(id.as_str()),
         from_node: NodeId::from(from.0),

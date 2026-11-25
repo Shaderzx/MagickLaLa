@@ -501,7 +501,10 @@ pub(crate) fn branch_bottle_view<S: 'static>(
     let bottle_mood = branch_bottle_mood(state, card);
     let bottle_h = 66.0;
     let route = crate::cauldron::route_label(state, &card.id);
-    let title = state.display_title(&card.id);
+    let tag_lines = if crate::brew::potion_ends(state).len() <= 3 { 4 } else { 2 };
+    let tag_room = width - if width >= crate::brew::RACK_BOTTLE_SIZE[0] + 1.0 { 18.0 } else { 10.0 };
+    let per_line = (tag_room / (0.62 * legible(12.5))).floor().max(4.0) as usize;
+    let title = crate::cauldron::rack_title(state, &card.id, per_line * tag_lines);
     let route_key = route.as_ref().map(|_| format!("route-{}", card.id.0));
     let hex_pill = bottle_hex_pill(card, scale, p);
     let hexed = hex_pill.is_some();

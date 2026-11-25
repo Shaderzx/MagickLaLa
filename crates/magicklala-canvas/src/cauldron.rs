@@ -282,27 +282,21 @@ pub fn rack_glass(plan: &BrewPlan) -> Vec<Vec<[f32; 2]>> {
     if bottles.len() < RACK_FROM {
         return Vec::new();
     }
-    let Some(trunk_x) = rack_trunk(plan, &bottles) else { return Vec::new() };
-    let tap = spout_point(plan);
-    let mut rows: Vec<(f32, f32)> = Vec::new();
-    for card in &bottles {
-        let pipe = pipe_height(plan, card);
-        let pipe = if (pipe - tap[1]).abs() < 6.0 * plan.scale.max(0.2) { tap[1] } else { pipe };
-        let neck = bottle_neck(card, bottles.len());
-        match rows.iter_mut().find(|(y, _)| (*y - pipe).abs() < 1.0) {
-            Some(row) => row.1 = row.1.max(neck[0]),
-            None => rows.push((pipe, neck[0])),
-        }
-    }
-    let top = rows.iter().map(|row| row.0).fold(tap[1], f32::min);
-    let bottom = rows.iter().map(|row| row.0).fold(tap[1], f32::max);
-    let mut glass = vec![vec![tap, [trunk_x, tap[1]]], vec![[trunk_x, top], [trunk_x, bottom]]];
-    glass.extend(rows.iter().map(|(y, end)| vec![[trunk_x, *y], [*end + 7.0 * plan.scale, *y]]));
-    glass
+    rack_ribbons(plan, &bottles).unwrap_or_default()
 }
 
-pub fn untaken_tail<'a>(ribbon: &'a [[f32; 2]], _taken: &[Vec<[f32; 2]>], _scale: f32) -> &'a [[f32; 2]] {
-    ribbon
+pub fn untaken_tail<'a>(ribbon: &'a [[f32; 2]], taken: &[Vec<[f32; 2]>], scale: f32) -> &'a [[f32; 2]] {
+    let near_taken = |point: &[f32; 2]| {
+        taken.iter().flat_map(|line| line.windows(2)).any(|pair| {
+            let (a, b) = (pair[0], pair[1]);
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            let length = dx * dx + dy * dy;
+            let t = if length > 0.0 { (((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / length).clamp(0.0, 1.0) } else { 0.0 };
+            (point[0] - a[0] - t * dx).hypot(point[1] - a[1] - t * dy) < 2.0 * scale
+        })
+    };
+    let fork = ribbon.iter().position(|point| !near_taken(point)).unwrap_or(ribbon.len());
+    &ribbon[fork.min(ribbon.len())..]
 }
 
 pub fn rack_planks(plan: &BrewPlan) -> Option<([f32; 4], Vec<[f32; 3]>)> {
@@ -752,20 +746,29 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
         };
     }
     let glass_w = 9.0 * plan.scale.max(0.4);
-    for glass in rack_glass(plan) {
-        let path = glass.iter().skip(1).fold(rune::Path::new().move_to(glass[0]), |path, point| path.line_to(*point));
-        shape = shape.stroke_path(&path, glass_w + 2.4, rune::LineCap::Round, with_alpha(p.rule_2, 0.7));
-        shape = shape.stroke_path(&path, glass_w, rune::LineCap::Round, with_alpha(p.card, 0.92));
+    let glass_paths: Vec<rune::Path> = rack_glass(plan)
+        .iter()
+        .filter(|glass| !glass.is_empty())
+        .map(|glass| glass.iter().skip(1).fold(rune::Path::new().move_to(glass[0]), |path, point| path.line_to(*point)))
+        .collect();
+    for path in &glass_paths {
+        shape = shape.stroke_path(path, glass_w + 2.4, rune::LineCap::Round, with_alpha(p.rule_2, 0.7));
+    }
+    for path in &glass_paths {
+        shape = shape.stroke_path(path, glass_w, rune::LineCap::Round, with_alpha(p.card, 0.92));
     }
     let ribbons = ribbon_paths(plan);
+    let is_taken = |id: &NodeId| state.card(id).is_some_and(|card| matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Running));
+    let taken_ribbons: Vec<Vec<[f32; 2]>> = bottles.iter().zip(&ribbons).filter(|(placed, _)| is_taken(&placed.id)).map(|(_, ribbon)| ribbon.clone()).collect();
     for (placed, ribbon) in bottles.iter().zip(&ribbons) {
         let Some(card) = state.card(&placed.id) else { continue };
-        let taken = matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Running);
+        let taken = is_taken(&card.id);
         let untaken = state.has_run() && !taken;
         let ribbon_mood = if multi && taken { CauldronMood::Brewed } else { mood };
+        let drawn = if untaken { untaken_tail(ribbon, &taken_ribbons, plan.scale.max(0.4)) } else { ribbon.as_slice() };
         shape = distillation_ribbon_shape(
             shape,
-            ribbon,
+            drawn,
             ribbon_mood,
             state.light,
             taken,
@@ -894,10 +897,37 @@ fn plaque(state: &CanvasState, mood: CauldronMood, plan: &BrewPlan, p: &HearthPa
     )
 }
 
+pub(crate) fn rack_title(state: &CanvasState, id: &NodeId, budget: usize) -> String {
+    let full = state.display_title(id);
+    if full.chars().count() <= budget {
+        return full;
+    }
+    let Some((head, route)) = full.split_once(" · ") else { return full };
+    let others: Vec<String> = crate::brew::potion_ends(state)
+        .iter()
+        .filter(|other| *other != id)
+        .filter_map(|other| state.display_title(other).split_once(" · ").filter(|(their, _)| *their == head).map(|(_, theirs)| theirs.to_owned()))
+        .collect();
+    let shared = others.iter().map(|other| route.chars().zip(other.chars()).take_while(|(a, b)| a == b).count()).min().unwrap_or(0);
+    let cut =
+        route.char_indices().take(shared).filter(|(_, ch)| matches!(ch, '_' | '-' | ' ' | '.' | '/')).map(|(at, ch)| at + ch.len_utf8()).last().unwrap_or(0);
+    let tail = &route[cut..];
+    let room = budget.saturating_sub(head.chars().count() + 4).max(4);
+    let count = tail.chars().count();
+    let tail: String = tail.chars().skip(count.saturating_sub(room)).collect();
+    format!("{head} · …{tail}")
+}
+
 fn title_lines(state: &CanvasState, plan: &BrewPlan, bottles: usize, id: &NodeId) -> f32 {
     let size = crate::view::legible_size(12.5, plan.scale);
     let inner = crate::brew::RACK_BOTTLE_SIZE[0] - 10.0;
-    if bottles <= 3 { (state.display_title(id).chars().count() as f32 * 0.56 * size / inner).ceil().clamp(1.0, 4.0) } else { 1.0 }
+    if bottles <= 3 {
+        return (state.display_title(id).chars().count() as f32 * 0.56 * size / inner).ceil().clamp(1.0, 4.0);
+    }
+    let budget = ((crate::brew::RACK_BOTTLE_SIZE[0] - 18.0) / (0.62 * size)).floor().max(4.0) as usize * 2;
+    let title = rack_title(state, id, budget);
+    let across = title.chars().count() as f32 * 0.5 * size / (crate::brew::RACK_BOTTLE_SIZE[0] - 18.0);
+    if title.contains('…') || across > 1.3 { 2.0 } else { 1.0 }
 }
 
 fn extra_title_lines(state: &CanvasState, plan: &BrewPlan, bottles: &[&BrewCard], id: &NodeId) -> f32 {
