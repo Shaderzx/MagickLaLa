@@ -1929,3 +1929,13 @@ test('Redo brings back what undo took: Cmd or Ctrl Shift Z re-applies an undone 
 
   expect(report).toEqual({ removed: true, undone: true, redone: true, undoneAgain: true, freshKept: 'Fresh: {{content}}', echoAfterStaleRedo: true });
 });
+
+test('Parked wires survive undo and reload: undoing a pour-back puts the step back on the shelf with all four parked wires so pouring again rebuilds the original recipe, and a potion saved with two steps aside reopens and pours back in the original wire order', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['aside-undo-pour']);
+
+  expect(report.parkedAside).toBe(4);
+  expect(report.pouredMatches).toBe(true);
+  expect(report.undone).toEqual({ shelved: true, parked: 4 });
+  expect(report.repoured).toEqual(report.original);
+  expect(report.reloaded).toEqual(report.twoOriginal);
+});

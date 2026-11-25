@@ -2453,6 +2453,72 @@ fn redo_order() -> Result<serde_json::Value, String> {
         json!({ "removed": removed, "undone": undone, "redone": redone, "undoneAgain": undone_again, "freshKept": fresh_kept, "echoAfterStaleRedo": has_echo(&rt) }),
     )
 }
+fn aside_undo_pour() -> Result<serde_json::Value, String> {
+    let records = |app: &StudioApp| -> Vec<String> {
+        app.spell
+            .wires
+            .iter()
+            .map(|wire| format!("{}:{}.{}>{}.{}", wire.id.0, wire.from_node.0, wire.from_socket, wire.to_node.0, wire.to_socket))
+            .collect()
+    };
+    let parked_of = |app: &StudioApp, id: &str| -> usize { app.spell.shelf.iter().find(|entry| entry.node.0 == id).map_or(0, |entry| entry.parked.len()) };
+    let toss = |rt: &mut Runtime<StudioApp>, toss: magicklala_canvas::Toss| {
+        rt.update(move |app, _| {
+            app.toss(toss.clone());
+            app.sync_edits();
+        });
+        rt.frame(0.0);
+    };
+    let mut rt = runtime_for(StudioApp::from_registry().spell.clone());
+    rt.on_key = Some(magicklala_studio::studio_key);
+    rt.update(|app, _| app.sync_spell());
+    let original = records(&rt.state);
+    toss(&mut rt, magicklala_canvas::Toss::Aside(NodeId::from("recall")));
+    let parked_aside = parked_of(&rt.state, "recall");
+    toss(&mut rt, magicklala_canvas::Toss::IntoPot(NodeId::from("recall")));
+    let poured_matches = records(&rt.state) == original;
+    rt.key(rune::KeyEvent { key: rune::Key::Command('z'), mods: rune::Mods { cmd: true, ..Default::default() } });
+    rt.frame(0.0);
+    rt.update(|app, _| app.sync_spell());
+    let parked_undone = parked_of(&rt.state, "recall");
+    let shelved_undone = rt.state.canvas.is_shelved(&NodeId::from("recall"));
+    toss(&mut rt, magicklala_canvas::Toss::IntoPot(NodeId::from("recall")));
+    let repoured = records(&rt.state);
+
+    let spell = StudioApp::from_registry().spell.clone();
+    let middles: Vec<NodeId> = spell
+        .nodes
+        .iter()
+        .filter(|node| spell.wires.iter().any(|wire| wire.to_node == node.id) && spell.wires.iter().any(|wire| wire.from_node == node.id))
+        .map(|node| node.id.clone())
+        .take(2)
+        .collect();
+    let mut two = runtime_for(spell);
+    two.update(|app, _| app.sync_spell());
+    let two_original = records(&two.state);
+    for id in &middles {
+        toss(&mut two, magicklala_canvas::Toss::Aside(id.clone()));
+    }
+    let saved: SpellGraph = serde_json::from_str(&serde_json::to_string(&two.state.spell).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+    let mut reloaded = runtime_for(StudioApp::from_registry().spell.clone());
+    reloaded.update(move |app, _| app.load_graph(saved.clone()));
+    reloaded.frame(0.0);
+    for id in &middles {
+        toss(&mut reloaded, magicklala_canvas::Toss::IntoPot(id.clone()));
+    }
+    let reloaded_records = records(&reloaded.state);
+    Ok(json!({
+        "parkedAside": parked_aside,
+        "pouredMatches": poured_matches,
+        "undone": { "shelved": shelved_undone, "parked": parked_undone },
+        "repouredMatches": repoured == original,
+        "repoured": repoured,
+        "original": original,
+        "reloadMatches": reloaded_records == two_original,
+        "reloaded": reloaded_records,
+        "twoOriginal": two_original,
+    }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8713,6 +8779,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("small-truths") => small_truths(),
         Some("card-notes") => card_notes(),
         Some("var-undo") => var_undo(),
+        Some("aside-undo-pour") => aside_undo_pour(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
