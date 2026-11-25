@@ -768,3 +768,14 @@ test('The red box and the Plug in list agree: the fix button on a step missing i
   expect(report.fed).toBe(true);
   expect(report.fedAfterUndo).toBe(false);
 });
+
+test('Recipe chips read in full and keep their state: at 960 the prompt and system source names show whole, unplugging a wire on a hexed potion keeps Check red and the missing input flagged, and Plug in and each source in its list carry a spoken name', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['recipe-chip-details']);
+
+  expect(report.cutSources).toEqual([]);
+  expect(report.afterUnplug).toBe('invalid');
+  expect(report.stillFlagged).toBe(true);
+  expect(report.plugLabel).toBe('Plug in query');
+  expect(report.optionLabels.length).toBeGreaterThan(0);
+  for (const spoken of report.optionLabels) expect(spoken).toMatch(/^Plug .+ · .+ into query$/);
+});

@@ -4384,6 +4384,53 @@ fn mend_matches_list() -> Result<serde_json::Value, String> {
     let words: Vec<String> = all_texts(&rt).into_iter().filter(|line| line.starts_with("Pour ") && line.contains(" · ")).collect();
     Ok(json!({ "fixCaption": fix_caption, "firstListed": first_listed, "afterFix": after_fix, "fed": fed, "fedAfterUndo": fed_after_undo, "pourWords": words }))
 }
+fn recipe_chip_details() -> Result<serde_json::Value, String> {
+    let label_of =
+        |rt: &Runtime<StudioApp>, key: &str| rt.elements().into_iter().find(|element| element.key.as_deref() == Some(key)).and_then(|element| element.label);
+    let mut app = StudioApp::with_spell(StudioApp::from_registry().spell.clone(), registry_specs());
+    app.size = (960.0, 640.0);
+    let mut compact = Runtime::new(app, studio_view, (960.0, 640.0), Env::new(true, 1.0));
+    compact.frame(0.0);
+    compact.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("llm")));
+        app.right_tab = RightTab::Inspector;
+    });
+    compact.frame(1.0);
+    let mut measure = studio_text_system();
+    let mut cut_sources = Vec::new();
+    for socket in ["prompt", "system"] {
+        let key = format!("plug-source-{socket}");
+        let Some((line, rect)) = text_lines_under(&compact, &key).into_iter().next() else { continue };
+        let (natural, _) = measure.measure(&line, rune::TextStyle::new(10.5, 600.0), 1.0);
+        if natural > rect[2] + 1.0 {
+            cut_sources.push(line);
+        }
+    }
+
+    let mut demo = StudioApp::from_registry().spell.clone();
+    demo.wires.retain(|wire| !(wire.to_node.0 == "recall" && wire.to_socket == "query"));
+    let mut hexed = runtime_for(demo);
+    let _ = validation_of(&mut hexed)?;
+    hexed.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("llm")));
+        app.right_tab = RightTab::Inspector;
+    });
+    hexed.frame(1.0);
+    click(&mut hexed, "unplug-system")?;
+    let after_unplug = hexed.state.validation.label();
+    let still_flagged = hexed.state.canvas.card(&NodeId::from("recall")).is_some_and(|card| card.inputs.iter().any(|input| input.flagged));
+    hexed.update(|app, _| app.canvas.select(Some(NodeId::from("recall"))));
+    hexed.frame(2.0);
+    let plug_label = label_of(&hexed, "plug-query");
+    click(&mut hexed, "plug-query")?;
+    let option_labels: Vec<Option<String>> = hexed
+        .elements()
+        .iter()
+        .filter(|element| element.key.as_deref().is_some_and(|key| key.starts_with("plug-query-")))
+        .map(|element| element.label.clone())
+        .collect();
+    Ok(json!({ "cutSources": cut_sources, "afterUnplug": after_unplug, "stillFlagged": still_flagged, "plugLabel": plug_label, "optionLabels": option_labels }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11148,6 +11195,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("error-actions") => error_actions(),
         Some("stand-in") => stand_in(),
         Some("mend-matches-list") => mend_matches_list(),
+        Some("recipe-chip-details") => recipe_chip_details(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),
