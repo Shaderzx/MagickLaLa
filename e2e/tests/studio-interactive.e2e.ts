@@ -1956,3 +1956,14 @@ test('A Split whose Outputs are cleared stays cleared: the saved list is empty i
   expect(report.errors).toContain('Split: needs outputs');
   expect(report.errors).toContain('Split: left is no longer listed but still has a wire');
 });
+
+test('One brew has one set of step numbers: the canvas badges and the Trace list agree for a subgraph call and a failed step, child steps nest under their call as 2.1 and 2.2, the header counts top-level steps, and it names a cancelled or timed-out brew as such', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['step-numbers']);
+  const steps = ['1 On Message 1ms Inspect ›', '2 Subgraph 2ms Inspect ›', '2.1 call › inner 1ms Inspect ›', '2.2 call › inner_two 1ms Inspect ›', '3 Rhai Script boom Inspect ›'];
+
+  for (const [status, word] of [['failed', 'Failed'], ['cancelled', 'Cancelled'], ['timed_out', 'Timed out']]) {
+    expect(report[status].badges).toEqual({ trigger: 1, call: 2, script: 3, reply: null });
+    expect(report[status].steps).toEqual(steps);
+    expect(report[status].header).toBe(`Brew #0 · ${word} 3 steps · 7 events · <1ms total`);
+  }
+});
