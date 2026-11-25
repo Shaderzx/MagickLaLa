@@ -7332,6 +7332,8 @@ fn potion_rack() -> Result<serde_json::Value, String> {
         ("kitchen-brewed@1280", crowded_kitchen(), (1280.0, 800.0), false, true),
         ("eight-brewed@1280", many_bottle_spell(8), (1280.0, 800.0), false, true),
         ("eight@960", many_bottle_spell(8), (960.0, 640.0), false, false),
+        ("router-brewed@1280", example("webhook_router.json")?, (1280.0, 800.0), false, true),
+        ("three@960", many_bottle_spell(3), (960.0, 640.0), false, false),
     ];
     let mut report = serde_json::Map::new();
     for (name, spell, size, pantry, brew) in cases {
@@ -7398,6 +7400,11 @@ fn potion_rack() -> Result<serde_json::Value, String> {
         let overlaps = |a: [f32; 4], b: [f32; 4]| a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
         let kind = rt.presented("rack-kind").map(|(rect, _)| rect);
         let rack = rt.presented("bottle-rack").map(|(rect, _)| rect);
+        let lowest_tag = bottles
+            .iter()
+            .flat_map(|(id, _, _)| text_lines_under(&rt, &format!("node-{id}-header")).into_iter().map(|(_, rect)| rect[1] + rect[3]))
+            .fold(f32::MIN, f32::max);
+        let kind_gap = kind.map(|kind| ((kind[1] - lowest_tag) / plan.scale).round());
         let kind_clash: Vec<String> =
             kind.map_or_else(Vec::new, |kind| bottles.iter().filter(|(_, rect, _)| overlaps(kind, *rect)).map(|(_, _, title)| title.clone()).collect());
         let kind_centered = match (kind, rack) {
@@ -7450,6 +7457,7 @@ fn potion_rack() -> Result<serde_json::Value, String> {
                 "kindCentered": kind_centered,
                 "grazes": grazes,
                 "overhangingPlanks": planks,
+                "kindGap": kind_gap,
             }),
         );
     }

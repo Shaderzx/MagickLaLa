@@ -1691,6 +1691,7 @@ test('Potion rack: four or more bottles stand in rows on shelf planks fed by one
     expect({ scene, kindClash: rack.kindClash, kindCentered: rack.kindCentered }).toEqual({ scene, kindClash: [], kindCentered: true });
     expect({ scene, grazes: rack.grazes }).toEqual({ scene, grazes: [] });
     expect({ scene, planks: rack.overhangingPlanks }).toEqual({ scene, planks: [] });
+    expect({ scene, kindGap: rack.kindGap <= 20 }).toEqual({ scene, kindGap: true });
   }
 });
 test('True records: Check keeps a good brew lit, an AI prompt may say {{customer}} literally with a note instead of a hex, a Send that hands off is still a bottle, only steps that ran wear step numbers after a brew, a pantry toss undoes as one step, an empty draft with variables saves and asks before you leave it, and a wire message does not follow you to the next potion', { timeout: 900_000 }, async () => {
