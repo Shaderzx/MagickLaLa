@@ -6878,7 +6878,7 @@ fn grimoire_room() -> Result<serde_json::Value, String> {
             .iter()
             .filter_map(|wire| {
                 let ((from, from_size), (to, _)) = (card_at(&wire.from_node)?, card_at(&wire.to_node)?);
-                (to[0] - (from[0] + from_size[0]) < 60.0).then(|| format!("{}>{}", wire.from_node.0, wire.to_node.0))
+                (to[0] - (from[0] + from_size[0]) < 30.0).then(|| format!("{}>{}", wire.from_node.0, wire.to_node.0))
             })
             .collect();
         let zoom = rt.state.canvas.camera.zoom;
@@ -6892,8 +6892,7 @@ fn grimoire_room() -> Result<serde_json::Value, String> {
             let shown = lines.iter().any(|(line, rect)| {
                 let clean = line.replace('\u{a0}', " ");
                 let (natural, _) = measure.measure(&clean, rune::TextStyle::new((13.6 * zoom).clamp(11.8, 15.5), 750.0), 1.0);
-                clean.trim_start().starts_with('·') && natural <= rect[2] + 2.0
-                    || clean == title && natural <= rect[2] + 2.0
+                clean.trim_start().starts_with('·') && natural <= rect[2] + 2.0 || clean == title && natural <= rect[2] + 2.0
             });
             if !shown {
                 twins_cut.push(title);
@@ -6902,7 +6901,8 @@ fn grimoire_room() -> Result<serde_json::Value, String> {
         report.insert(name.to_owned(), json!({ "tight": tight, "twinsCut": twins_cut }));
     }
     Ok(json!(report))
-}fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
+}
+fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),

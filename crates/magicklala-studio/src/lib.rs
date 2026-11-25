@@ -1564,9 +1564,9 @@ impl StudioApp {
             };
             spell.nodes = vec![
                 place("trigger", "event/on_message", [0.0, 90.0], serde_json::Value::Null),
-                place("search", "knowledge/search", [260.0, 40.0], json!({ "limit": 5 })),
-                place("llm", "ai/generate_text", [530.0, 90.0], json!({ "prompt": "Summarize the research findings and answer the question." })),
-                place("reply", "io/send_message", [800.0, 90.0], serde_json::Value::Null),
+                place("search", "knowledge/search", [250.0, 40.0], json!({ "limit": 5 })),
+                place("llm", "ai/generate_text", [500.0, 90.0], json!({ "prompt": "Summarize the research findings and answer the question." })),
+                place("reply", "io/send_message", [750.0, 90.0], serde_json::Value::Null),
             ];
             let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
                 id: WireId::from(id),
@@ -3748,15 +3748,15 @@ fn demo_spell() -> SpellGraph {
         |id: &str, kind: &str, position: [f32; 2], config: serde_json::Value| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position, config };
     spell.nodes = vec![
         place("trigger", "event/on_message", [0.0, 108.0], serde_json::Value::Null),
-        place("recall", "memory/search", [228.0, 12.0], serde_json::Value::Null),
-        place("search", "knowledge/search", [228.0, 208.0], serde_json::Value::Null),
+        place("recall", "memory/search", [250.0, 12.0], serde_json::Value::Null),
+        place("search", "knowledge/search", [500.0, 208.0], serde_json::Value::Null),
         place(
             "llm",
             "ai/generate_text",
-            [468.0, 86.0],
+            [750.0, 86.0],
             json!({ "provider": "openai", "model": "gpt-4o-mini", "temperature": 0.4, "prompt": default_prompt("ai/generate_text") }),
         ),
-        place("reply", "io/send_message", [692.0, 128.0], serde_json::Value::Null),
+        place("reply", "io/send_message", [1000.0, 128.0], serde_json::Value::Null),
     ];
     let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
         id: WireId::from(id),

@@ -156,6 +156,19 @@ pub(crate) fn mode_switcher<S: 'static>(state: &CanvasState, p: &HearthPalette, 
 #[allow(clippy::too_many_arguments)]
 pub(crate) const LEGIBLE_PX: f32 = 10.5;
 
+fn twin_title(title: &str, style: TextStyle, ink: Color, room: f32) -> El {
+    let fits = title.chars().count() as f32 * 0.6 * style.size <= room;
+    match title.rsplit_once(" · ").filter(|_| !fits) {
+        Some((name, number)) => row()
+            .w_full()
+            .min_w(0.0)
+            .items_center()
+            .child(text(name).font(style).color(ink).truncate())
+            .child(text(format!("\u{a0}·\u{a0}{number}")).font(style).color(ink)),
+        None => row().w_full().min_w(0.0).child(text(title).font(style).color(ink).truncate()),
+    }
+}
+
 pub(crate) fn legible_size(size: f32, scale: f32) -> f32 {
     size.max(LEGIBLE_PX / scale.max(0.05))
 }
@@ -343,13 +356,11 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     let kind_fits = !dense && (title_lines * title_size + kind_size) * 1.25 + 8.0 <= dims[1];
     let title_room = dims[0] - 24.0 - 6.0 - 30.0;
     let wraps = narrow && state.display_title(&card.id).chars().count() as f32 * 7.4 * title_size / 13.0 > title_room;
-    let top_row = col().w_full().min_w(0.0).child({
-        let title = text(state.display_title(&card.id).replace(" · ", "\u{a0}·\u{a0}")).font(TextStyle::new(title_size, 750.0)).color(if dimmed {
-            untaken_title
-        } else {
-            p.ink
-        });
-        if crammed { title.truncate() } else { title.wrap() }
+    let title_ink = if dimmed { untaken_title } else { p.ink };
+    let top_row = col().w_full().min_w(0.0).child(if crammed {
+        twin_title(&state.display_title(&card.id), TextStyle::new(title_size, 750.0), title_ink, title_room_est)
+    } else {
+        text(state.display_title(&card.id).replace(" · ", "\u{a0}·\u{a0}")).font(TextStyle::new(title_size, 750.0)).color(title_ink).wrap()
     });
 
     let sub_color = if hexed {
@@ -1010,7 +1021,7 @@ fn grimoire_card_view<S: 'static>(
                 .min_w(0.0)
                 .justify_center()
                 .gap((1.0 * zoom).max(0.5))
-                .child(text(display_title).font(TextStyle::new(title_size, 750.0)).color(title_color).truncate())
+                .child(twin_title(&display_title, TextStyle::new(title_size, 750.0), title_color, crate::CARD_WIDTH * zoom - vial_size - 36.0 * zoom.max(0.6)))
                 .children(
                     ((title_size + kind_size) * 1.25 + 4.0 <= header_h)
                         .then(|| text(&card.kind).font(TextStyle::new(kind_size, 500.0).mono()).color(kind_color).truncate()),
