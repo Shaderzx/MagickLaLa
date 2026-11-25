@@ -603,6 +603,8 @@ impl RunState {
         self.emit(TraceEvent::NodeStarted { run_id: self.run_id(), node_id: node.clone(), at: Utc::now(), subgraph_path: Vec::new() });
         self.shared.executed.fetch_add(1, Ordering::SeqCst);
         if let Some(error) = unset_bound_setting(self, &instance) {
+            stack.pending.remove(&node);
+            self.emit(TraceEvent::NodeFailed { run_id: self.run_id(), node_id: node, at: Utc::now(), error: error.to_string(), subgraph_path: Vec::new() });
             return Err(stack.fail(Fault::Node(error)));
         }
         let waiting_on = WaitCell::default();
