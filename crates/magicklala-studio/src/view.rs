@@ -434,15 +434,6 @@ fn pantry_ghost(app: &StudioApp, t: &HearthPalette) -> Option<El> {
     )
 }
 
-fn empty_canvas_overlay(app: &StudioApp, t: &HearthPalette) -> El {
-    let size = app.canvas_size();
-    let pot = magicklala_canvas::brew_plan(&app.canvas, size).pot;
-    let card_w = 400.0_f32.min(size.0 - 32.0).max(240.0);
-    let x = (pot[0] + pot[2] * 0.5 - card_w * 0.5).min(size.0 - card_w - 16.0).max(16.0);
-    let y = (pot[1] + pot[3] + 24.0).min(size.1 - 106.0);
-    col().key("empty-canvas").w(card_w).px(16.0).py(12.0).items_center().gap(8.0).absolute(x, y).child(heading("Start a new potion", 24.0, 800.0, t.ink))
-}
-
 fn starter_shelf(app: &StudioApp, t: &HearthPalette) -> El {
     let size = app.canvas_size();
     let pot = magicklala_canvas::brew_plan(&app.canvas, size).pot;
@@ -483,7 +474,6 @@ fn starter_shelf(app: &StudioApp, t: &HearthPalette) -> El {
 fn canvas_with_menu(app: &StudioApp, t: &HearthPalette) -> El {
     let mut board = interactive_canvas_view::<StudioApp>(&app.canvas, app.canvas_size(), |app| &mut app.canvas, StudioApp::toss);
     if app.canvas.nodes.is_empty() {
-        board = board.child(empty_canvas_overlay(app, t));
         let pantry_open = app.left_tab == LeftTab::Palette && !app.left_rail_collapsed();
         if app.canvas.mode == WorkbenchMode::Cauldron && !pantry_open {
             board = board.child(starter_shelf(app, t));
@@ -853,12 +843,14 @@ fn left_rail(app: &StudioApp, t: &HearthPalette) -> El {
                             }
                             pieces
                         } else {
-                            label(&spec.title, 12.0, 550.0, t.ink).truncate()
+                            label(&spec.title, 12.0, 550.0, t.ink).wrap().max_lines(2)
                         };
+                        let starter = spec.is_trigger && app.canvas.nodes.is_empty();
                         let item = row()
                             .key(palette_key(&spec.kind))
                             .w_full()
-                            .h(29.0)
+                            .min_h(29.0)
+                            .py(3.0)
                             .px(7.0)
                             .gap(7.0)
                             .radius(9.0)
@@ -866,14 +858,36 @@ fn left_rail(app: &StudioApp, t: &HearthPalette) -> El {
                             .items_center()
                             .justify_between()
                             .fill(t.card)
-                            .border(1.0, if in_pot { with_alpha(t.broth_mid, 0.55) } else { t.rule })
+                            .border(
+                                if starter { 1.4 } else { 1.0 },
+                                if starter {
+                                    tone.border
+                                } else if in_pot {
+                                    with_alpha(t.broth_mid, 0.55)
+                                } else {
+                                    t.rule
+                                },
+                            )
+                            .shadow(
+                                0.0,
+                                if starter { 12.0 } else { 0.0 },
+                                if starter { with_alpha(tone.liquid, if light { 0.35 } else { 0.5 }) } else { Color::TRANSPARENT },
+                            )
                             .child(
                                 row()
                                     .grow(1.0)
                                     .min_w(0.0)
                                     .gap(7.0)
                                     .items_center()
-                                    .child(canvas(mini_vial_icon(&spec.category, light, 18.0)).size(18.0, 18.0))
+                                    .child(if starter {
+                                        el().key(format!("pantry-glow-{}", spec.kind.replace('/', "-")))
+                                            .size(18.0, 18.0)
+                                            .radius(9.0)
+                                            .shadow(0.0, 10.0, with_alpha(tone.liquid, if light { 0.55 } else { 0.7 }))
+                                            .child(canvas(mini_vial_icon(&spec.category, light, 18.0)).size(18.0, 18.0))
+                                    } else {
+                                        canvas(mini_vial_icon(&spec.category, light, 18.0)).size(18.0, 18.0)
+                                    })
                                     .child(title_el),
                             )
                             .child(right_actions)

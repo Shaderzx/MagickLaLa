@@ -2090,7 +2090,8 @@ fn pantry_whole() -> Result<serde_json::Value, String> {
 }
 fn empty_start() -> Result<serde_json::Value, String> {
     let mut report = serde_json::Map::new();
-    for (name, size, potions) in [("wide-pantry", (1280.0_f32, 800.0_f32), false), ("wide-potions", (1280.0, 800.0), true), ("compact", (960.0, 640.0), false)] {
+    for (name, size, potions) in [("wide-pantry", (1280.0_f32, 800.0_f32), false), ("wide-potions", (1280.0, 800.0), true), ("compact", (960.0, 640.0), false)]
+    {
         let mut app = StudioApp::with_spell(SpellGraph::new("New Potion"), registry_specs());
         app.size = size;
         if potions {
@@ -3007,7 +3008,6 @@ fn compact_fit() -> Result<serde_json::Value, String> {
         .filter(|key| layout_rect(&hexed, key).is_none_or(|rect| !inside(error_box, rect)))
         .map(|key| (*key).to_owned())
         .collect();
-
 
     let mut rail = compact(demo.clone());
     click(&mut rail, "expand-nodes")?;
