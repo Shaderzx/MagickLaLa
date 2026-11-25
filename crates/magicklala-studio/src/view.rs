@@ -1839,7 +1839,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         } else {
             el().size(7.0, 7.0).radius(2.0).fill(t.card).border(1.5, stream_ink(&card.category, light))
         };
-        let mut right_meta = row().gap(8.0).items_center();
+        let mut right_meta = row().gap(8.0).items_center().shrink();
         if flagged {
             right_meta = right_meta
                 .child(label(if socket.mistyped { "Wrong type" } else { "Missing" }, 10.5, 700.0, t.hex).key(format!("socket-missing-{}", socket.name)));
@@ -1849,8 +1849,10 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             .wires
             .iter()
             .find(|w| is_input && !socket.ty.is_flow() && w.to_node == card.id && w.to_socket == socket.name)
-            .map(|w| format!("from {} · {}", app.canvas.display_title(&w.from_node), w.from_socket));
+            .map(|w| format!("{} · {}", app.canvas.display_title(&w.from_node), w.from_socket));
         let has_plug_button = is_input && !socket.ty.is_flow() && !app.is_running();
+        let name_weight = if socket.ty.is_flow() || flagged { 650.0 } else { 500.0 };
+        let name_room = 16.5 + studio_text_width(&socket.name, if compact { 11.5 } else { 12.0 }, name_weight).min(if compact { 96.0 } else { 120.0 });
         if has_plug_button {
             let name = socket.name.clone();
             let node = card.id.clone();
@@ -1858,17 +1860,22 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             let action = match wire_id {
                 Some(wire) => row()
                     .key(format!("unplug-{name}"))
+                    .label(format!("Unplug {name}"))
                     .min_h(24.0)
                     .min_w(24.0)
-                    .px(10.0)
+                    .max_w(if compact { 118.0 } else { 150.0 })
+                    .pl(9.0)
+                    .pr(7.0)
+                    .gap(5.0)
                     .radius(8.0)
                     .continuous_corners()
                     .items_center()
-                    .justify_center()
                     .fill(t.card)
                     .border(1.0, t.rule_2)
                     .shadow(1.0, 3.0, with_alpha(t.ink, 0.08))
-                    .child(label("Unplug", 11.0, 650.0, t.ink))
+                    .shrink()
+                    .children(fed_from.clone().map(|source| label(source, 10.5, 600.0, t.ink).key(format!("plug-source-{name}")).truncate().shrink()))
+                    .child(label("✕", 10.5, 700.0, t.ink_2))
                     .on_press(move |app: &mut StudioApp| app.unplug_wire(&wire)),
                 None => row()
                     .key(format!("plug-{name}"))
@@ -1897,20 +1904,16 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             .justify_between()
             .border_sides([0.0, 0.0, 1.0, 0.0], if flagged { with_alpha(t.hex, 0.42) } else { t.rule })
             .child(
-                row().grow(1.0).min_w(0.0).gap(8.0).items_center().child(marker).child(
-                    col()
-                        .grow(1.0)
-                        .min_w(0.0)
-                        .child(
-                            label(
-                                &socket.name,
-                                if compact { 11.5 } else { 12.0 },
-                                if socket.ty.is_flow() || flagged { 650.0 } else { 500.0 },
-                                if flagged { t.hex } else { t.ink },
-                            )
-                            .wrap_anywhere(),
+                row().grow(1.0).min_w(name_room).gap(8.0).items_center().child(marker).child(
+                    col().grow(1.0).min_w(0.0).child(
+                        label(
+                            &socket.name,
+                            if compact { 11.5 } else { 12.0 },
+                            if socket.ty.is_flow() || flagged { 650.0 } else { 500.0 },
+                            if flagged { t.hex } else { t.ink },
                         )
-                        .children(fed_from.map(|source| label(source, 10.0, 500.0, t.mute).key(format!("plug-source-{}", socket.name)).wrap_anywhere())),
+                        .wrap_anywhere(),
+                    ),
                 ),
             )
             .child(right_meta)
