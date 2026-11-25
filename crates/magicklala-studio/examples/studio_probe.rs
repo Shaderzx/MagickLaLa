@@ -3783,23 +3783,6 @@ fn icon_size() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
-fn socket_words() -> Result<serde_json::Value, String> {
-    let mut rt = runtime_for(StudioApp::from_registry().spell.clone());
-    rt.update(|app, _| {
-        app.canvas.select(Some(NodeId::from("llm")));
-        app.right_tab = RightTab::Inspector;
-    });
-    rt.frame(1.0);
-    let headings = |rt: &mut Runtime<StudioApp>| -> Vec<String> {
-        let words = texts_under(rt, "inspector");
-        ["Sockets", "Inputs", "Outputs", "Pours", "Pours in", "Pours out"].iter().filter(|word| words.split(' ').any(|token| token == **word) || words.contains(&format!("{word} "))).map(|word| word.to_string()).collect()
-    };
-    let cauldron = headings(&mut rt);
-    click(&mut rt, "mode-grimoire")?;
-    rt.frame(2.0);
-    let grimoire = headings(&mut rt);
-    Ok(json!({ "cauldron": cauldron, "grimoire": grimoire }))
-}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -10095,7 +10078,6 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("seal-clear") => seal_clear(),
         Some("perched-clear") => perched_clear(),
         Some("icon-size") => icon_size(),
-        Some("socket-words") => socket_words(),
         Some("redo-order") => redo_order(),
         Some("bound-looks") => bound_looks(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
