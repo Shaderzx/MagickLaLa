@@ -651,6 +651,11 @@ pub fn branch_bottle_mood(state: &CanvasState, card: &NodeCardModel) -> Cauldron
     }
 }
 
+/// Whether a lone potion bottle wears the release seal's fill: only before any brew, so a test brew's result never hides under it.
+pub fn solo_bottle_sealed(state: &CanvasState) -> bool {
+    state.release_badge.is_some() && !state.has_run()
+}
+
 pub fn bottle_art_mood(state: &CanvasState, output: &NodeCardModel) -> CauldronMood {
     match cauldron_mood(state) {
         CauldronMood::Brewed | CauldronMood::Simmering if !crate::cauldron::bottle_filled(state, output) => CauldronMood::Ready,
@@ -739,7 +744,8 @@ pub(crate) fn potion_stand_view<S: 'static>(
     let sealed_vintage = bottled && !matches!(mood, CauldronMood::Simmering | CauldronMood::Hexed | CauldronMood::Empty);
     let bottle_h = 104.0;
     let art_mood = bottle_art_mood(state, output);
-    let bottle_art = canvas(potion_bottle_shape(art_mood, state.light, width, bottle_h, bottled, tint)).key("hero-potion-bottle").size(width, bottle_h);
+    let bottle_art =
+        canvas(potion_bottle_shape(art_mood, state.light, width, bottle_h, solo_bottle_sealed(state), tint)).key("hero-potion-bottle").size(width, bottle_h);
     let spell_label = if state.spell_name.is_empty() { "Potion" } else { state.spell_name.as_str() };
     let out_title = primary_output.map_or_else(|| "Bottled Potion".to_owned(), |c| state.display_title(&c.id));
     let out_kind = primary_output.map_or("io/send_message", |c| c.kind.as_str());
@@ -749,6 +755,11 @@ pub(crate) fn potion_stand_view<S: 'static>(
     let hexed = hex_pill.is_some();
 
     let out_brewed = primary_output.is_some_and(|c| c.status == ExecutionStatus::Succeeded);
+    let skipped = state.has_run()
+        && state.brew_completed()
+        && !hexed
+        && !matches!(output.status, ExecutionStatus::Succeeded | ExecutionStatus::Running | ExecutionStatus::Failed);
+    let stopped = !hexed && state.stopped.contains(&output.id);
     let mut header_row =
         row().w_full().gap(4.0).items_center().justify_between().child(text(spell_label).font(TextStyle::new(legible(13.0), 750.0)).color(p.ink).truncate());
     if sealed_vintage && let Some(vintage) = &state.release_badge {
@@ -820,6 +831,17 @@ pub(crate) fn potion_stand_view<S: 'static>(
         tag_card = col()
             .w_full()
             .child(el().w_full().child(tag_card).child(row().w_full().pl(clear).pr(8.0).justify_end().absolute(0.0, -12.0).child(pill)).children(step_badge));
+    } else if skipped || stopped {
+        let mark = row()
+            .px(5.5)
+            .py(1.5)
+            .radius(7.0)
+            .fill(p.untaken_pill_fill())
+            .border(1.0, p.untaken_border())
+            .child(text(if stopped { "Stopped" } else { "Untaken" }).font(TextStyle::new(legible(11.0), 700.0)).color(p.untaken_title()));
+        tag_card = col()
+            .w_full()
+            .child(el().w_full().child(tag_card).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(mark)).children(step_badge));
     } else if let Some(badge) = step_badge {
         tag_card = col().w_full().child(el().w_full().child(tag_card).child(badge));
     }
