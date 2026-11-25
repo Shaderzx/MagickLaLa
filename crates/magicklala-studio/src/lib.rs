@@ -825,6 +825,19 @@ pub enum UndoEntry {
         wires: Vec<WireModel>,
         shelved: Vec<NodeId>,
     },
+    Edit(Box<EditSnapshot>),
+}
+
+#[derive(Debug, Clone)]
+pub struct EditSnapshot {
+    nodes: Vec<NodeCardModel>,
+    wires: Vec<WireModel>,
+    shelved: Vec<NodeId>,
+    configs: BTreeMap<NodeId, serde_json::Value>,
+    prompts: BTreeMap<NodeId, TextEdit>,
+    versions: BTreeMap<NodeId, TextEdit>,
+    subgraphs: Vec<SubgraphRef>,
+    typing: Option<NodeId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -856,6 +869,7 @@ pub struct StudioApp {
     pub var_default_edits: Vec<TextEdit>,
     pub undo_stack: Vec<UndoEntry>,
     undo_seen: usize,
+    last_synced: Option<Box<EditSnapshot>>,
     pub aside_wires: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
     pub aside_bridges: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
     pub aside_refused: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
@@ -984,6 +998,7 @@ impl StudioApp {
             var_default_edits: Vec::new(),
             undo_stack: Vec::new(),
             undo_seen: 0,
+            last_synced: None,
             aside_wires: HashMap::new(),
             aside_bridges: HashMap::new(),
             aside_refused: HashMap::new(),
@@ -1034,6 +1049,7 @@ impl StudioApp {
         let viewport = app.canvas_size();
         app.canvas.fit(viewport);
         app.canvas.select(app.canvas.nodes.iter().find(|card| card.kind == "ai/generate_text").map(|card| card.id.clone()));
+        app.last_synced = Some(Box::new(app.edit_snapshot(None)));
         app
     }
 
@@ -1453,6 +1469,7 @@ impl StudioApp {
         let viewport = self.canvas_size();
         self.canvas.fit(viewport);
         self.canvas.select(self.canvas.nodes.iter().find(|card| card.kind == "ai/generate_text").map(|card| card.id.clone()));
+        self.last_synced = Some(Box::new(self.edit_snapshot(None)));
     }
 
     fn has_unsaved_work(&self) -> bool {
@@ -2305,6 +2322,32 @@ impl StudioApp {
         }
     }
 
+    fn edit_snapshot(&self, typing: Option<NodeId>) -> EditSnapshot {
+        EditSnapshot {
+            nodes: self.canvas.nodes.clone(),
+            wires: self.canvas.wires.clone(),
+            shelved: self.canvas.shelved.clone(),
+            configs: self.configs.clone(),
+            prompts: self.prompts.clone(),
+            versions: self.versions.clone(),
+            subgraphs: self.spell.subgraphs.clone(),
+            typing,
+        }
+    }
+
+    fn typed_node(&self, nodes: &[NodeInstance], wires: &[Wire], subgraphs: &[SubgraphRef], shelf: &[magicklala_graph::ShelfEntry]) -> Option<NodeId> {
+        if wires != self.spell.wires.as_slice()
+            || subgraphs != self.spell.subgraphs.as_slice()
+            || shelf != self.spell.shelf.as_slice()
+            || nodes.len() != self.spell.nodes.len()
+        {
+            return None;
+        }
+        let mut changed = nodes.iter().zip(&self.spell.nodes).filter(|(now, before)| now != before);
+        let (now, before) = changed.next()?;
+        (changed.next().is_none() && now.id == before.id && now.kind == before.kind && now.position == before.position).then(|| now.id.clone())
+    }
+
     pub fn sync_spell(&mut self) {
         self.sync_edits();
     }
@@ -2393,6 +2436,9 @@ impl StudioApp {
             && shelf == self.spell.shelf
         {
             self.undo_seen = self.undo_stack.len();
+            if self.last_synced.is_none() {
+                self.last_synced = Some(Box::new(self.edit_snapshot(None)));
+            }
             return false;
         }
         let shelf_changed = shelf != self.spell.shelf;
@@ -2404,10 +2450,20 @@ impl StudioApp {
             || shelf_changed
             || unplaced(&nodes) != unplaced(&self.spell.nodes);
         if recipe_changed && self.undo_stack.len() == self.undo_seen {
-            self.undo_stack.clear();
+            let typing = self.typed_node(&nodes, &wires, &subgraphs, &shelf);
+            let same_typing = typing.is_some() && matches!(self.undo_stack.last(), Some(UndoEntry::Edit(kept)) if kept.typing == typing);
+            match self.last_synced.take() {
+                Some(_) if same_typing => {}
+                Some(mut before) => {
+                    before.typing = typing;
+                    self.undo_stack.push(UndoEntry::Edit(before));
+                }
+                None => self.undo_stack.clear(),
+            }
             self.undo_banner = None;
         }
         self.undo_seen = self.undo_stack.len();
+        self.last_synced = Some(Box::new(self.edit_snapshot(None)));
         self.spell.shelf = shelf;
         if recipe_changed {
             self.canvas.clear_run_marks();
@@ -3255,6 +3311,7 @@ impl StudioApp {
         self.undo_banner = None;
         self.validation = ValidationState::Unchecked;
         self.sync_var_edits_from_spell();
+        self.last_synced = Some(Box::new(self.edit_snapshot(None)));
     }
 
     pub fn quick_add_from_menu(&mut self) {
@@ -3417,6 +3474,21 @@ impl StudioApp {
                     self.dirty = true;
                     self.sync_spell();
                 }
+            }
+            UndoEntry::Edit(before) => {
+                let EditSnapshot { nodes, wires, shelved, configs, prompts, versions, subgraphs, .. } = *before;
+                self.canvas.nodes = nodes;
+                self.canvas.wires = wires;
+                self.canvas.shelved = shelved;
+                self.configs = configs;
+                self.prompts = prompts;
+                self.versions = versions;
+                self.spell.subgraphs = subgraphs;
+                self.canvas.select(None);
+                self.validation = ValidationState::Unchecked;
+                self.canvas.validated = false;
+                self.dirty = true;
+                self.sync_spell();
             }
             UndoEntry::Recipe { nodes, wires, shelved } => {
                 self.canvas.nodes = nodes;
