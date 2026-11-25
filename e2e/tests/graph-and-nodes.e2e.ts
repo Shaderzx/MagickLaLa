@@ -339,6 +339,28 @@ test('a while_loop stops at its own max_iterations and fails the run with the co
   });
 });
 
+test('a while_loop limit bound to a variable stops at the variable value, and a bound limit that is not a whole number of at least 1 fails the loop instead of running to the default', async () => {
+  const nodes = [
+    spellNode('start', 'event/on_start'),
+    spellNode('always', 'logic/regex_match', { text: 'go', pattern: 'go' }),
+    spellNode('loop', 'flow/while_loop', { max_iterations: '{{limit}}' }),
+    spellNode('tick', 'var/set', { name: 'ticks', value: 1 }),
+  ];
+  const wires = [spellWire('w_start', 'start', 'out', 'loop', 'in'), spellWire('w_condition', 'always', 'matched', 'loop', 'condition'), spellWire('w_body', 'loop', 'body', 'tick', 'in')];
+  const ticks = (run: SpellRun) => run.events.filter((event) => event.event === 'node_finished' && event.node_id === 'tick').length;
+  await withSpellFile(nodes, wires, async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(1);
+    expect(ticks(run)).toBe(1);
+    expect(failureOf(run, 'loop')).toContain('while loop exceeded max_iterations 1');
+  }, { variables: [{ name: 'limit', ty: 'int', default: { type: 'int', value: 1 } }] });
+  await withSpellFile(nodes, wires, async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(1);
+    expect(ticks(run)).toBe(0);
+    expect(failureOf(run, 'loop')).toContain('max_iterations must be a whole number of at least 1');
+  }, { variables: [{ name: 'limit', ty: 'string', default: { type: 'string', value: 'lots' } }] });
+});
 test('a stream that closes before the [DONE] marker fails the run instead of returning a truncated answer', async () => {
   const truncated = await startRecordingServer((response) => {
     response.writeHead(200, { 'content-type': 'text/event-stream' });
