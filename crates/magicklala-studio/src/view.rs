@@ -1720,7 +1720,25 @@ fn recipe_overview(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             .on_press(move |app: &mut StudioApp| app.canvas.select(Some(id.clone())))
     };
     let section = |title: &str, cards: &[&magicklala_canvas::NodeCardModel]| {
-        (!cards.is_empty()).then(|| cards.iter().fold(col().w_full().gap(5.0).child(inspector_section_heading(title, t)), |list, card| list.child(entry(card))))
+        let empty_pot = app.canvas.nodes.is_empty() && title != "Set aside";
+        (!cards.is_empty() || empty_pot).then(|| {
+            let list = col().w_full().gap(5.0).child(inspector_section_heading(title, t));
+            if cards.is_empty() {
+                list.child(
+                    row()
+                        .w_full()
+                        .min_h(32.0)
+                        .px(9.0)
+                        .radius(10.0)
+                        .continuous_corners()
+                        .items_center()
+                        .border(1.0, with_alpha(t.rule_2, 0.8))
+                        .child(label("None yet", 11.0, 500.0, t.mute)),
+                )
+            } else {
+                cards.iter().fold(list, |list, card| list.child(entry(card)))
+            }
+        })
     };
     col()
         .key("recipe-overview")
@@ -1735,18 +1753,7 @@ fn recipe_overview(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
 
 fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
     let Some(card) = app.canvas.selected_card() else {
-        if !app.canvas.nodes.is_empty() {
-            return recipe_overview(app, light, t);
-        }
-        return col()
-            .key("inspector-empty")
-            .w_full()
-            .pt(108.0)
-            .px(12.0)
-            .items_center()
-            .gap(10.0)
-            .child(canvas(empty_bottle_mark(light, 42.0)).key("inspector-empty-bobbin").size(42.0, 42.0))
-            .child(heading(if app.canvas.nodes.is_empty() { "Empty pot" } else { "No ingredient picked" }, 15.5, 800.0, t.ink));
+        return recipe_overview(app, light, t);
     };
     let compact = app.size.1 < COMPACT_INSPECTOR_BELOW;
     let socket_h = if compact { 21.0 } else { 24.0 };
