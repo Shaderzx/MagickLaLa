@@ -1550,11 +1550,28 @@ test('Hands on the workbench: Escape clears a pick and closes a menu, Delete rem
   expect(report.bottle).toEqual({ caption: ['Duplicate'], offered: true, aside: true });
   expect(report.menuCoversPot).toEqual([]);
 });
-test('Crowded shelves stay untangled: with four or eight bottles at 1280 and 960 no two bottle ribbons cross and no ribbon runs through another card', { timeout: 900_000 }, async () => {
+test('Crowded shelves stay untangled and readable: valid potions with four, eight, or twelve steps and fourteen bottles, at 1280 and at 960 with the Pantry open, pour through one shared outlet that splits in clear gaps, no ribbon crosses another or runs through a card, and every card label stays at least 12px tall', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['crowded-bottles']);
 
+  expect(report.map((shelf: { case: string }) => shelf.case)).toEqual(['4@1280', '4@960', '8@1280', '8@960', 'kitchen@1280', 'kitchen@960']);
   for (const shelf of report) {
-    expect({ case: shelf.case, crossings: shelf.crossings, through: shelf.through }).toEqual({ case: shelf.case, crossings: [], through: [] });
+    expect({ case: shelf.case, check: shelf.check, crossings: shelf.crossings, through: shelf.through, outlets: shelf.outlets }).toEqual({ case: shelf.case, check: 'valid', crossings: [], through: [], outlets: 1 });
+    expect(shelf.smallestLabel).toBeGreaterThanOrEqual(12);
   }
-  expect(report.map((shelf: { case: string }) => shelf.case)).toEqual(['4@1280', '4@960', '8@1280', '8@960']);
+});
+test('Every edit agrees with Check: pulling a Grimoire wire off or onto a refused socket ends the pull and keeps or drops the wire honestly, Publish refuses a recipe Check would reject, undoing a deleted sub-spell call keeps its link and brews, adding a variable drops the old seal and brew marks, and the Grimoire names every socket at 45% without stacking', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-agreed-'));
+  try {
+    const report = await studioProbe(['agreed-edits', join(dir, 'studio.sqlite')]);
+
+    expect(report.pulledOff).toEqual({ before: 'trigger.content', after: null, dragIdle: true });
+    expect(report.refusedDrop).toEqual({ after: 'trigger.content', dragIdle: true });
+    expect(report.blankPublish).toEqual({ published: false, releases: [] });
+    expect(report.undoLink).toEqual({ before: 'Succeeded', link: { child: true, version: 1 }, after: 'Succeeded' });
+    expect(report.variableMarks).toEqual({ liveBefore: 1, liveAfter: null, badge: null, lastBrew: null });
+    expect(report.grimoire45.shown).toBe(report.grimoire45.expected);
+    expect(report.grimoire45.stacked).toEqual([]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
