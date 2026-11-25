@@ -341,7 +341,8 @@ fn with_whole_titles(state: &CanvasState, size: (f32, f32), m: Metrics, plan: Pl
     let mut made = with_visible_pot(state, size, metrics, plan);
     for _ in 0..4 {
         let shown = metrics.vial[0] * made.0;
-        if shown >= need - 0.5 || metrics.vial[0] >= m.vial[0] * 2.2 {
+        let wraps_instead = made.0 * state.brew_camera.zoom >= crate::view::LEGIBLE_PX / 13.0;
+        if wraps_instead || shown >= need - 0.5 || metrics.vial[0] >= m.vial[0] * 2.2 {
             break;
         }
         metrics.vial[0] = (metrics.vial[0] * (need / shown.max(1.0)) * 1.03).min(m.vial[0] * 2.2);

@@ -244,7 +244,7 @@ fn rack_ribbons(plan: &BrewPlan, bottles: &[&BrewCard]) -> Option<Vec<Vec<[f32; 
     let left = bottles.iter().map(|card| card.rect[0]).fold(f32::MAX, f32::min);
     let radius = 18.0 * s;
     let trunk_room = (trunk_x - tap[0]).min(left - trunk_x - 4.0 * s).max(2.0 * s);
-    let drip = 6.0 * s;
+    let drip = 14.0 * s;
     let routes = bottles
         .iter()
         .map(|card| {
