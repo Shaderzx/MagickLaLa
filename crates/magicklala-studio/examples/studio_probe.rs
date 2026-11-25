@@ -2117,6 +2117,42 @@ fn empty_start() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn downhill() -> Result<serde_json::Value, String> {
+    let scenes: Vec<(&str, SpellGraph, (f32, f32))> = vec![
+        ("support@1280", StudioApp::from_registry().spell.clone(), (1280.0, 800.0)),
+        ("support@960", StudioApp::from_registry().spell.clone(), (960.0, 640.0)),
+        ("webhook@1280", example("webhook_router.json")?, (1280.0, 800.0)),
+        ("webhook@960", example("webhook_router.json")?, (960.0, 640.0)),
+        ("parallel@960", example("parallel_research.json")?, (960.0, 640.0)),
+        ("two@1280", many_bottle_spell(2), (1280.0, 800.0)),
+        ("three@960", many_bottle_spell(3), (960.0, 640.0)),
+    ];
+    let mut uphill: Vec<String> = Vec::new();
+    let mut misordered: Vec<String> = Vec::new();
+    for (name, spell, size) in scenes {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(1.0);
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let tap = magicklala_canvas::cauldron::spout_point(&plan);
+        let bottles: Vec<&magicklala_canvas::BrewCard> = plan.with_role(magicklala_canvas::BrewRole::Bottle).collect();
+        for card in &bottles {
+            let neck = magicklala_canvas::cauldron::bottle_neck(card, bottles.len());
+            if neck[1] < tap[1] - 2.0 {
+                uphill.push(format!("{name} {} {:.0}", rt.state.canvas.display_title(&card.id), tap[1] - neck[1]));
+            }
+        }
+        let mut reading: Vec<(i32, f32, NodeId)> = bottles.iter().map(|card| ((card.rect[1] / (card.rect[3] * 0.6)).floor() as i32, card.rect[0], card.id.clone())).collect();
+        reading.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        let read: Vec<String> = reading.iter().map(|(_, _, id)| rt.state.canvas.display_title(id)).collect();
+        let listed: Vec<String> = bottles.iter().map(|card| rt.state.canvas.display_title(&card.id)).collect();
+        if bottles.len() > 1 && read != listed {
+            misordered.push(format!("{name}: {} vs {}", read.join(","), listed.join(",")));
+        }
+    }
+    Ok(json!({ "uphill": uphill, "misordered": misordered }))
+}
 fn router_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Router Agent");
     spell.nodes = vec![
@@ -8331,6 +8367,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("wire-return") => wire_return(),
         Some("pantry-whole") => pantry_whole(),
         Some("empty-start") => empty_start(),
+        Some("downhill") => downhill(),
         Some("check-save-truth") => check_save_truth(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("pot-rect") => pot_rect(),
         Some("gateway-hint") => gateway_hint(),
