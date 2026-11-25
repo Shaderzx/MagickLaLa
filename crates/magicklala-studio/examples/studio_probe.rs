@@ -3472,6 +3472,37 @@ fn set_before_read() -> Result<serde_json::Value, String> {
     }
     Ok(serde_json::Value::Object(report))
 }
+fn long_route_row() -> Result<serde_json::Value, String> {
+    let long = "urgent_customer_reconciliation_notification";
+    let mut report = serde_json::Map::new();
+    for size in [(960.0_f32, 640.0_f32), (1280.0, 800.0)] {
+        let mut spell = router_spell();
+        if let Some(node) = spell.nodes.iter_mut().find(|node| node.id.0 == "switch") {
+            node.config = json!({ "cases": [long, "south"] });
+        }
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.update(|app, _| app.canvas.select(Some(NodeId::from("switch"))));
+        rt.frame(1.0);
+        rt.frame(2.0);
+        let card = layout_rect(&rt, "inspector-card").ok_or("no inspector card")?;
+        let right = (card[0] + card[2]).min(size.0);
+        let lines = text_lines_under(&rt, "inspector-card");
+        let spill: Vec<String> = lines.iter().filter(|(_, rect)| rect[0] + rect[2] > right + 0.5).map(|(line, _)| line.clone()).collect();
+        let mut measure = studio_text_system();
+        let named: Vec<&(String, [f32; 4])> = lines.iter().filter(|(line, _)| !line.is_empty() && long.starts_with(line.trim_end_matches('…'))).collect();
+        let shown: String = named.iter().map(|(line, _)| line.as_str()).collect();
+        let cut = named.iter().any(|(line, rect)| {
+            let (natural, line_h) = measure.measure(line, rune::TextStyle::new(if size.1 < 700.0 { 11.5 } else { 12.0 }, 650.0), 1.0);
+            let rows = (rect[3] / line_h).round().max(1.0);
+            line.ends_with('…') || natural > rect[2] * rows + 2.0
+        });
+        report.insert(format!("{}", size.0), json!({ "spill": spill, "nameWhole": shown.replace(['\u{a0}', '\n', ' '], "") == long && !cut }));
+    }
+    Ok(serde_json::Value::Object(report))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -10144,6 +10175,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("finish-then-fail-log") => finish_then_fail_log(),
         Some("live-mark-kept") => live_mark_kept(),
         Some("set-before-read") => set_before_read(),
+        Some("long-route-row") => long_route_row(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

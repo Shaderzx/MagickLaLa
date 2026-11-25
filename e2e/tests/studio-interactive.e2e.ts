@@ -2250,3 +2250,12 @@ test('A number variable set earlier on the route can be read by a later step: On
   expect(report.neverSet).toEqual(['Delay: ms needs a whole number of at least 0, but the variable ms has no value']);
   expect(report.setAfter).toEqual(report.neverSet);
 });
+
+test('A long route name fits its Recipe socket row at both window sizes: urgent_customer_reconciliation_notification shows whole, wrapping if it must, and its Flow label stays inside the panel', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['long-route-row']);
+
+  for (const size of ['960', '1280']) {
+    expect(report[size].spill).toEqual([]);
+    expect(report[size].nameWhole).toBe(true);
+  }
+});
