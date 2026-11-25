@@ -1698,3 +1698,11 @@ test('True records: Check keeps a good brew lit, an AI prompt may say {{customer
     await rm(dir, { recursive: true, force: true });
   }
 });
+test('Tidy bottles: after a brew no step number covers a bottle name, no label on a bottle overlaps another, and a bottle shows its kind only when the whole kind fits', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['tidy-bottles']);
+
+  for (const [scene, bottles] of Object.entries<any>(report)) {
+    expect({ scene, clashes: bottles.clashes }).toEqual({ scene, clashes: [] });
+    expect({ scene, cutKinds: bottles.cutKinds }).toEqual({ scene, cutKinds: [] });
+  }
+});

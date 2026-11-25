@@ -6724,7 +6724,60 @@ fn true_records(db_path: &Path) -> Result<serde_json::Value, String> {
         "wireMessageLeft": wire_message_left,
     }))
 }
-fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
+fn tidy_bottles() -> Result<serde_json::Value, String> {
+    let cases = [
+        ("kitchen@1280", crowded_kitchen(), (1280.0_f32, 800.0_f32)),
+        ("kitchen@960", crowded_kitchen(), (960.0, 640.0)),
+        ("router@960", example("webhook_router.json")?, (960.0, 640.0)),
+        ("dozen@960", dozen_ingredient_spell(), (960.0, 640.0)),
+        ("three@960", many_bottle_spell(3), (960.0, 640.0)),
+    ];
+    let mut measure = studio_text_system();
+    let mut report = serde_json::Map::new();
+    for (name, spell, size) in cases {
+        let mut app = StudioApp::with_spell(spell, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        click(&mut rt, "run-spell")?;
+        live_finish(&mut rt)?;
+        rt.frame(3.0);
+        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+        let mut clashes = Vec::new();
+        let mut cut_kinds = Vec::new();
+        for card in plan.with_role(magicklala_canvas::BrewRole::Bottle) {
+            let id = &card.id.0;
+            let lines = text_lines_under(&rt, &format!("node-{id}"));
+            let badge = layout_rect(&rt, &format!("step-badge-{id}"));
+            let words: Vec<&(String, [f32; 4])> = lines.iter().filter(|(line, _)| line.parse::<usize>().is_err() && !line.ends_with("ms")).collect();
+            if let Some(badge) = badge {
+                for (line, rect) in &words {
+                    if rects_overlap(badge, *rect) {
+                        clashes.push(format!("{id}: step number covers {line}"));
+                    }
+                }
+            }
+            for (index, (line, rect)) in words.iter().enumerate() {
+                for (other, other_rect) in words.iter().skip(index + 1) {
+                    if rects_overlap(*rect, *other_rect) {
+                        clashes.push(format!("{id}: {line} overlaps {other}"));
+                    }
+                }
+            }
+            if let Some(kind) = rt.state.canvas.card(&card.id).map(|bottle| bottle.kind.clone())
+                && let Some((_, rect)) = lines.iter().find(|(line, _)| line == &kind)
+            {
+                let (natural, _) = measure.measure(&kind, rune::TextStyle::new(11.0_f32.max(10.5 / plan.scale), 500.0).mono(), 1.0);
+                if natural * plan.scale > rect[2] + 2.0 {
+                    cut_kinds.push(format!("{id}: {kind}"));
+                }
+            }
+        }
+        clashes.dedup();
+        report.insert(name.to_owned(), json!({ "clashes": clashes.into_iter().take(6).collect::<Vec<_>>(), "cutKinds": cut_kinds.into_iter().take(4).collect::<Vec<_>>() }));
+    }
+    Ok(json!(report))
+}fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),
@@ -7642,6 +7695,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("undo-order") => undo_order(),
         Some("potion-rack") => potion_rack(),
         Some("true-records") => true_records(Path::new(args.get(1).ok_or("missing database path")?)),
+        Some("tidy-bottles") => tidy_bottles(),
         Some("honest-edits") => honest_edits(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("kept-promises") => kept_promises(Path::new(args.get(1).ok_or("missing database path")?)),
         Some("one-voice") => one_voice(Path::new(args.get(1).ok_or("missing database path")?)),
