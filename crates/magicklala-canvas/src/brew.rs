@@ -160,12 +160,8 @@ fn trigger_reach(state: &CanvasState) -> Vec<NodeId> {
 pub fn potion_ends(state: &CanvasState) -> Vec<NodeId> {
     let reach = trigger_reach(state);
     let fed = |card: &NodeCardModel| reach.contains(&card.id);
-    let outputs: Vec<NodeId> = state
-        .nodes
-        .iter()
-        .filter(|card| !state.is_shelved(&card.id) && is_bottle(card) && fed(card) && !state.wires.iter().any(|wire| wire.from_node == card.id))
-        .map(|card| card.id.clone())
-        .collect();
+    let outputs: Vec<NodeId> =
+        state.nodes.iter().filter(|card| !state.is_shelved(&card.id) && is_bottle(card) && fed(card)).map(|card| card.id.clone()).collect();
     if !outputs.is_empty() {
         return outputs;
     }

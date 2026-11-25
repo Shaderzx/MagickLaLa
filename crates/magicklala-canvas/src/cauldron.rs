@@ -1097,7 +1097,13 @@ pub fn cauldron_workbench_view<S: 'static>(state: &CanvasState, size: (f32, f32)
     }
     for placed in plan.cards.iter().filter(|card| card.role != BrewRole::Bottle) {
         let Some(card) = state.card(&placed.id) else { continue };
-        let step = if placed.role == BrewRole::Aside { None } else { placed.recipe_step };
+        let step = if placed.role == BrewRole::Aside {
+            None
+        } else if has_run {
+            card.step_order
+        } else {
+            placed.recipe_step
+        };
         let origin = card_frame(placed.rect, plan.vial, plan.scale, lifted_offset(state, &placed.id));
         let vial = ingredient_vial_card(state, card, step, origin, plan.vial, placed.role == BrewRole::Aside, placed.mirrored, &p, lens, toss, plan.clone());
         board = board.child(vial.scale(plan.scale));

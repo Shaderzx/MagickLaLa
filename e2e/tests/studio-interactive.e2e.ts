@@ -1051,14 +1051,14 @@ test('The cauldron is the biggest thing on the support canvas and every ingredie
   }
 });
 
-test('The cauldron reads cleanly at any size: no ingredient name is cut off, no pour line runs over another card, the idle broth already shows the last ingredient colour, steps number in feeding order, a Send that carries on is not the bottle, set-aside cards sit on a visible shelf, the pot grows on a roomy 1600 by 1000 window, branch bottles have distinct names, and Grimoire text stays 11px or taller', { timeout: 900_000 }, async () => {
+test('The cauldron reads cleanly at any size: no ingredient name is cut off, no pour line runs over another card, the idle broth already shows the last ingredient colour, steps number in feeding order, a Send that carries on is still a bottle, set-aside cards sit on a visible shelf, the pot grows on a roomy 1600 by 1000 window, branch bottles have distinct names, and Grimoire text stays 11px or taller', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['reads-cleanly']);
 
   expect(report.cut).toEqual([]);
   expect(report.crossings).toEqual([]);
   expect(report.readyBroth).toBe(report.lastLiquid);
   expect(report.chainSteps).toEqual([1, 2, 3, 4, 5]);
-  expect(report.relayRoles).toEqual({ trigger: 'Ingredient', send: 'Ingredient', keep: 'Bottle' });
+  expect(report.relayRoles).toEqual({ trigger: 'Ingredient', send: 'Bottle', keep: 'Bottle' });
   expect(report.asideShelf).toEqual({ shelf: true, holdsCard: true });
   expect(report.potWidth).toBeGreaterThanOrEqual(340);
   expect(new Set(report.bottleTitles).size).toBe(report.bottleTitles.length);
@@ -1589,7 +1589,7 @@ test('Steady hands: a card menu opens beside its card clear of the pot and other
   expect(report.staleHint).toBe(false);
   expect(report.orphans).toEqual([]);
 });
-test('Fair shelves: a short recipe with four or eight bottles keeps the pot centred instead of stacking, bottle ribbons turn on wide curves, the zoomed-out socket tip floats above every card inside the canvas, bottles show their kind the same way at 960, hex pills stay inside right-hand cards, and prompts never seed or keep words nothing fills', { timeout: 900_000 }, async () => {
+test('Fair shelves: a short recipe with four or eight bottles keeps the pot centred instead of stacking, bottle ribbons turn on wide curves, the zoomed-out socket tip floats above every card inside the canvas, bottles show their kind the same way at 960, hex pills stay inside right-hand cards, and prompts never seed words nothing fills while a literal word in an AI prompt gets a note instead of a hex', { timeout: 900_000 }, async () => {
   const report = await studioProbe(['fair-shelves']);
 
   expect(report.layouts).toEqual([{ case: '4', stacked: false }, { case: '8', stacked: false }]);
@@ -1597,7 +1597,7 @@ test('Fair shelves: a short recipe with four or eight bottles keeps the pot cent
   expect(report.tooltip).toEqual({ shown: true, inside: true, onTop: true });
   expect(report.bottleKinds.dozen).toBe(report.bottleKinds.support);
   expect(report.pillInside).toBe(true);
-  expect(report.prompts).toEqual({ seededTokens: 0, unfilledCheck: 'invalid', namesWord: true, filledCheck: 'valid' });
+  expect(report.prompts).toEqual({ seededTokens: 0, unfilledCheck: 'valid', namesWord: true, filledCheck: 'valid' });
 });
 test('The last mile: a refused Publish lists every problem Check lists, adding a variable can be undone, Cmd or Ctrl Z waits out a brew, and an empty pot offers its triggers on the shelf beside it instead of repeating the Pantry in the Recipe panel', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-last-mile-'));

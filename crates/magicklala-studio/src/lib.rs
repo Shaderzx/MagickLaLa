@@ -803,6 +803,11 @@ pub enum UndoEntry {
         variable: VariableDef,
         default_edit: TextEdit,
     },
+    Recipe {
+        nodes: Vec<NodeCardModel>,
+        wires: Vec<WireModel>,
+        shelved: Vec<NodeId>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1367,6 +1372,7 @@ impl StudioApp {
     }
 
     pub fn load_graph(&mut self, graph: SpellGraph) {
+        self.wire_error = None;
         let mode = self.canvas.mode;
         let light = self.theme == Theme::Light;
         self.stop_active_run();
@@ -1422,8 +1428,12 @@ impl StudioApp {
         self.canvas.select(self.canvas.nodes.iter().find(|card| card.kind == "ai/generate_text").map(|card| card.id.clone()));
     }
 
+    fn has_unsaved_work(&self) -> bool {
+        self.dirty && (!self.canvas.nodes.is_empty() || !self.spell.variables.is_empty())
+    }
+
     pub fn request_new_spell(&mut self) {
-        if self.dirty && !self.canvas.nodes.is_empty() {
+        if self.has_unsaved_work() {
             self.pending_switch = Some(PendingSwitch::NewPotion);
         } else {
             self.new_empty_spell();
@@ -1434,7 +1444,7 @@ impl StudioApp {
         if self.spell.name == name {
             return;
         }
-        if self.dirty && !self.canvas.nodes.is_empty() {
+        if self.has_unsaved_work() {
             self.pending_switch = Some(PendingSwitch::Sample(name.to_owned()));
         } else {
             self.open_sample_spell(name);
@@ -1677,6 +1687,8 @@ impl StudioApp {
             return None;
         }
         let spec = self.specs.iter().find(|spec| spec.kind == kind)?.clone();
+        self.undo_stack.push(UndoEntry::Recipe { nodes: self.canvas.nodes.clone(), wires: self.canvas.wires.clone(), shelved: self.canvas.shelved.clone() });
+        self.undo_banner = Some(format!("Added {}", spec.title));
         let center = self.canvas.camera.screen_to_world(screen);
         let id = self.canvas.add_node_from_spec(&spec, center);
         self.track_config(id.clone(), kind, serde_json::Value::Null);
@@ -2630,7 +2642,6 @@ impl StudioApp {
                             .collect(),
                         "no wire or variable has that name",
                     ),
-                    Some(field) if node.kind.starts_with("ai/") && !fed(&node.id, field) => (words(field), "AI steps send it exactly as typed"),
                     _ => (Vec::new(), ""),
                 };
                 missing.into_iter().map(move |root| {
@@ -2685,6 +2696,14 @@ impl StudioApp {
 
     fn show_findings(&mut self, findings: Vec<HexFinding>) -> &ValidationState {
         let old_run = self.canvas.last_brew.is_some() || self.trace.iter().any(|line| line.kind != "RunRejected");
+        if old_run && findings.is_empty() {
+            self.hex_findings.clear();
+            self.trace.retain(|line| line.kind != "RunRejected");
+            self.validation = ValidationState::Valid;
+            self.canvas.validated = true;
+            self.canvas.invalid_brew = false;
+            return &self.validation;
+        }
         if old_run {
             self.canvas.clear_run_marks();
             self.canvas.last_brew = None;
@@ -3262,6 +3281,16 @@ impl StudioApp {
                     self.dirty = true;
                     self.sync_spell();
                 }
+            }
+            UndoEntry::Recipe { nodes, wires, shelved } => {
+                self.canvas.nodes = nodes;
+                self.canvas.wires = wires;
+                self.canvas.shelved = shelved;
+                self.canvas.select(None);
+                self.validation = ValidationState::Unchecked;
+                self.canvas.validated = false;
+                self.dirty = true;
+                self.sync_spell();
             }
             UndoEntry::VariableType { index, variable, default_edit } => {
                 if index < self.spell.variables.len() {

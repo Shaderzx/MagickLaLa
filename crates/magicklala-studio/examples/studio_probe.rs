@@ -6055,10 +6055,9 @@ fn fair_shelves() -> Result<serde_json::Value, String> {
     let mut worded = runtime_for(words.clone());
     click(&mut worded, "validate")?;
     let unfilled = worded.state.validation.label();
-    let unfilled_says = match &worded.state.validation {
-        ValidationState::Invalid(errors) => errors.join(" "),
-        _ => String::new(),
-    };
+    worded.update(|app, _| app.canvas.select(Some(NodeId::from("ask"))));
+    worded.frame(0.0);
+    let unfilled_says = texts_under(&mut worded, "prompt-literal-note");
     let mut templated = words;
     templated.nodes[1] = studio_node("ask", "text/template", 280.0, json!({ "template": "Reply in a {{mood}} voice" }));
     templated.wires = vec![studio_wire("w1", ("trigger", "out"), ("say", "in")), studio_wire("w3", ("ask", "text"), ("say", "content"))];
@@ -6667,7 +6666,11 @@ fn true_records(db_path: &Path) -> Result<serde_json::Value, String> {
         if shown.is_empty() {
             continue;
         }
-        let ran = router.state.canvas.card(&NodeId::from(id.as_str())).is_some_and(|card| matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Failed));
+        let ran = router
+            .state
+            .canvas
+            .card(&NodeId::from(id.as_str()))
+            .is_some_and(|card| matches!(card.status, ExecutionStatus::Succeeded | ExecutionStatus::Failed));
         if !ran {
             untaken_numbered.push(id.clone());
         }
@@ -6720,7 +6723,8 @@ fn true_records(db_path: &Path) -> Result<serde_json::Value, String> {
         "emptyDraft": empty_draft,
         "wireMessageLeft": wire_message_left,
     }))
-}fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
+}
+fn kept_promises(db_path: &Path) -> Result<serde_json::Value, String> {
     let place = |id: &str, kind: &str, x: f32, config: serde_json::Value| NodeInstance {
         id: NodeId::from(id),
         kind: kind.to_owned(),

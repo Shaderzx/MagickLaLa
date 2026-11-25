@@ -1828,7 +1828,15 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         if edit.text.is_empty() {
             box_el = box_el.child(label("Prompt…", 11.5, 450.0, t.placeholder).wrap());
         }
-        box_el
+        let literal: Vec<String> = if card.kind.starts_with("ai/") {
+            crate::template_roots(&edit.text).into_iter().map(|word| format!("{{{{{word}}}}}")).collect()
+        } else {
+            Vec::new()
+        };
+        let verb = if literal.len() == 1 { "reaches" } else { "reach" };
+        let note = (!literal.is_empty())
+            .then(|| label(format!("{} {verb} the model as typed", literal.join(", ")), 11.5, 550.0, t.mute).wrap().key("prompt-literal-note"));
+        col().w_full().gap(6.0).child(box_el).children(note)
     });
     let card_header = row()
         .w_full()
