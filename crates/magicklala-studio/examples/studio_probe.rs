@@ -4613,6 +4613,28 @@ fn plug_routes() -> Result<serde_json::Value, String> {
     };
     Ok(json!({ "branched": offered(routed(false)), "joined": offered(routed(true)) }))
 }
+fn hidden_plug_undo() -> Result<serde_json::Value, String> {
+    let mut demo = StudioApp::from_registry().spell.clone();
+    demo.wires.retain(|wire| !(wire.to_node.0 == "recall" && wire.to_socket == "query"));
+    let mut rt = runtime_for(demo);
+    rt.on_key = Some(magicklala_studio::studio_key);
+    rt.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("recall")));
+        app.right_tab = RightTab::Inspector;
+        app.toggle_plug_menu(&NodeId::from("recall"), "query");
+    });
+    rt.frame(1.0);
+    let before = rt.state.spell.variables.len();
+    rt.update(|app, _| {
+        app.right_tab = RightTab::Variables;
+        app.add_variable();
+    });
+    rt.frame(2.0);
+    let added = rt.state.spell.variables.len();
+    rt.key(rune::KeyEvent { key: rune::Key::Command('z'), mods: rune::Mods { cmd: true, ..Default::default() } });
+    rt.frame(3.0);
+    Ok(json!({ "before": before, "added": added, "afterUndo": rt.state.spell.variables.len(), "menuLeftOpen": rt.state.plug_menu.is_some() }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11386,6 +11408,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("rename-reach") => rename_reach(),
         Some("check-routes") => check_routes(),
         Some("plug-routes") => plug_routes(),
+        Some("hidden-plug-undo") => hidden_plug_undo(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

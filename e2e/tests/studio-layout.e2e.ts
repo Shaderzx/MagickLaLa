@@ -835,3 +835,11 @@ test('Plug in offers only sources that have run on every route into the input: a
   expect(report.branched.filter((source: string) => source.startsWith('recall.'))).toEqual([]);
   expect(report.joined).toEqual(expect.arrayContaining(['trigger.content', 'recall.text']));
 });
+
+test('A Plug in list left open behind another tab never swallows Undo: open it, switch to Variables, add a variable, and Cmd+Z takes the variable back', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['hidden-plug-undo']);
+
+  expect(report.added).toBe(report.before + 1);
+  expect(report.afterUndo).toBe(report.before);
+  expect(report.menuLeftOpen).toBe(false);
+});
