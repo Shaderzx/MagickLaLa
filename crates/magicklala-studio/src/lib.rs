@@ -182,7 +182,20 @@ fn held_before(graph: &SpellGraph, id: &NodeId, name: &str, is_flow: &dyn Fn(&ma
     held
 }
 
-fn set_earlier_on_route(graph: &SpellGraph, node: &NodeId, name: &str, is_flow: impl Fn(&magicklala_graph::Wire) -> bool) -> bool {
+fn ran_before(graph: &SpellGraph, id: &NodeId, source: &NodeId, is_flow: &dyn Fn(&magicklala_graph::Wire) -> bool, memo: &mut HashMap<NodeId, bool>) -> bool {
+    if let Some(ran) = memo.get(id) {
+        return *ran;
+    }
+    memo.insert(id.clone(), false);
+    let feeders: Vec<NodeId> = graph.wires.iter().filter(|wire| &wire.to_node == id && is_flow(wire)).map(|wire| wire.from_node.clone()).collect();
+    let arms: Vec<bool> = feeders.iter().map(|from| from == source || ran_before(graph, from, source, is_flow, memo)).collect();
+    let join = graph.node(id).is_some_and(|step| step.kind == "flow/wait_for_all");
+    let ran = !arms.is_empty() && if join { arms.contains(&true) } else { arms.iter().all(|arm| *arm) };
+    memo.insert(id.clone(), ran);
+    ran
+}
+
+fn flow_readers(graph: &SpellGraph, node: &NodeId, is_flow: &dyn Fn(&magicklala_graph::Wire) -> bool) -> Vec<NodeId> {
     let runs_on_flow = |id: &NodeId| graph.wires.iter().any(|wire| &wire.to_node == id && is_flow(wire));
     let mut readers = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -197,6 +210,11 @@ fn set_earlier_on_route(graph: &SpellGraph, node: &NodeId, name: &str, is_flow: 
             frontier.extend(graph.wires.iter().filter(|wire| wire.from_node == current && !is_flow(wire)).map(|wire| wire.to_node.clone()));
         }
     }
+    readers
+}
+
+fn set_earlier_on_route(graph: &SpellGraph, node: &NodeId, name: &str, is_flow: impl Fn(&magicklala_graph::Wire) -> bool) -> bool {
+    let readers = flow_readers(graph, node, &is_flow);
     let mut memo = HashMap::new();
     !readers.is_empty() && readers.iter().all(|reader| held_before(graph, reader, name, &is_flow, &mut memo) == Held::Set)
 }
@@ -1900,11 +1918,16 @@ impl StudioApp {
                 }
             }
         }
+        let graph = self.brew_graph();
+        let is_flow = |wire: &magicklala_graph::Wire| self.input_type(&SocketRef::new(wire.to_node.clone(), wire.to_socket.clone())).is_some_and(|ty| ty.is_flow());
+        let readers = flow_readers(&graph, node, &is_flow);
+        let mut ready: HashMap<NodeId, bool> = HashMap::new();
         let mut fitting: Vec<(bool, bool, SocketRef)> = self
             .canvas
             .nodes
             .iter()
             .filter(|card| earlier.contains(&card.id) && !self.canvas.shelved.contains(&card.id))
+            .filter(|card| readers.is_empty() || self.source_ready(&graph, &card.id, &readers, &is_flow, &mut ready))
             .flat_map(|card| {
                 card.outputs
                     .iter()
@@ -1915,6 +1938,30 @@ impl StudioApp {
             .collect();
         fitting.sort_by_key(|(not_event, loose, _)| (*not_event, *loose));
         fitting.into_iter().map(|(_, _, source)| source).collect()
+    }
+
+    fn source_ready(
+        &self,
+        graph: &SpellGraph,
+        source: &NodeId,
+        readers: &[NodeId],
+        is_flow: &dyn Fn(&magicklala_graph::Wire) -> bool,
+        ready: &mut HashMap<NodeId, bool>,
+    ) -> bool {
+        if let Some(known) = ready.get(source) {
+            return *known;
+        }
+        ready.insert(source.clone(), false);
+        let trigger = graph.node(source).is_some_and(|step| self.specs.iter().any(|spec| spec.kind == step.kind && spec.is_trigger));
+        let on_flow = graph.wires.iter().any(|wire| &wire.to_node == source && is_flow(wire));
+        let known = if trigger || on_flow {
+            readers.iter().all(|reader| ran_before(graph, reader, source, is_flow, &mut HashMap::new()))
+        } else {
+            let feeders: Vec<NodeId> = graph.wires.iter().filter(|wire| &wire.to_node == source && !is_flow(wire)).map(|wire| wire.from_node.clone()).collect();
+            feeders.iter().all(|from| self.source_ready(graph, from, readers, is_flow, ready))
+        };
+        ready.insert(source.clone(), known);
+        known
     }
 
     pub fn toggle_plug_menu(&mut self, node: &NodeId, socket: &str) {
