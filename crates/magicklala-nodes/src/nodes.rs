@@ -161,8 +161,13 @@ fn required_config(ctx: &dyn NodeContext, key: &str) -> Result<String, NodeError
     config_text(ctx, key).ok_or_else(|| NodeError::InvalidConfig(format!("{key} is required")))
 }
 
-pub(crate) fn config_u64(ctx: &dyn NodeContext, key: &str, default: u64) -> u64 {
-    ctx.node().config.get(key).and_then(serde_json::Value::as_u64).unwrap_or(default)
+pub(crate) fn config_u64(ctx: &dyn NodeContext, key: &str, default: u64) -> Result<u64, NodeError> {
+    match ctx.node().config.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(default),
+        Some(value) => {
+            magicklala_graph::whole_number(value).ok_or_else(|| NodeError::Other(format!("{key} needs a whole number of at least 0, but got {value}")))
+        }
+    }
 }
 
 fn config_bool(ctx: &dyn NodeContext, key: &str, default: bool) -> bool {
@@ -210,8 +215,8 @@ async fn switch(ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeError> {
 
 async fn delay(ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeError> {
     let millis = match ctx.input("ms").await? {
-        Some(Value::Int(millis)) => u64::try_from(millis).unwrap_or_default(),
-        _ => config_u64(ctx, "ms", 1000),
+        Some(Value::Int(millis)) => u64::try_from(millis).map_err(|_| NodeError::Other(format!("ms needs a whole number of at least 0, but got {millis}")))?,
+        _ => config_u64(ctx, "ms", 1000)?,
     };
     let cancellation = ctx.cancellation();
     tokio::select! {
@@ -222,6 +227,36 @@ async fn delay(ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeError> {
 
 static PLACEHOLDER_PATTERN: std::sync::LazyLock<Result<Regex, String>> =
     std::sync::LazyLock::new(|| Regex::new(r"\{\{\s*([A-Za-z0-9_\-]+)((?:\.[A-Za-z0-9_\-]+)*)\s*\}\}").map_err(|error| error.to_string()));
+
+pub fn template_roots(source: &str) -> Vec<String> {
+    let Ok(pattern) = placeholder_pattern() else { return Vec::new() };
+    pattern.captures_iter(source).filter_map(|captures| captures.get(1).map(|root| root.as_str().to_owned())).fold(Vec::new(), |mut roots, root| {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+        roots
+    })
+}
+
+pub fn rename_template_root(source: &str, old: &str, new: &str) -> String {
+    let Ok(pattern) = placeholder_pattern() else { return source.to_owned() };
+    pattern
+        .replace_all(source, |captures: &regex::Captures<'_>| {
+            let whole = captures.get(0).map_or("", |whole| whole.as_str());
+            match captures.get(1).filter(|root| root.as_str() == old) {
+                Some(root) => {
+                    let start = root.start() - captures.get(0).map_or(0, |whole| whole.start());
+                    format!("{}{new}{}", &whole[..start], &whole[start + old.len()..])
+                }
+                None => whole.to_owned(),
+            }
+        })
+        .into_owned()
+}
+
+pub fn is_template_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
 
 fn placeholder_pattern() -> Result<&'static Regex, NodeError> {
     PLACEHOLDER_PATTERN.as_ref().map_err(|error| NodeError::Other(error.clone()))
@@ -479,7 +514,7 @@ async fn http_fetch(ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeError>
         .map(|headers| headers.iter().map(|(name, header)| (name.clone(), Value::from(header.clone()).to_text())).collect())
         .unwrap_or_default();
     let plan =
-        FetchPlan { method, headers, body, timeout: Duration::from_millis(config_u64(ctx, "timeout_ms", 30_000)), allow_private: ctx.allow_private_http() };
+        FetchPlan { method, headers, body, timeout: Duration::from_millis(config_u64(ctx, "timeout_ms", 30_000)?), allow_private: ctx.allow_private_http() };
     let cancellation = ctx.cancellation();
     let fetched = async {
         let response = plan.follow(target).await?;
@@ -531,7 +566,7 @@ async fn llm_request(ctx: &mut dyn NodeContext, extra_system: Option<String>) ->
         model: config_text(ctx, "model").unwrap_or_else(|| "gpt-4o-mini".to_owned()),
         messages,
         temperature: config.get("temperature").and_then(serde_json::Value::as_f64).map(|temperature| temperature as f32),
-        max_tokens: config.get("max_tokens").and_then(serde_json::Value::as_u64).and_then(|tokens| u32::try_from(tokens).ok()),
+        max_tokens: config.get("max_tokens").and_then(magicklala_graph::whole_number).and_then(|tokens| u32::try_from(tokens).ok()),
         stop: config_list(ctx, "stop").unwrap_or_default(),
         credential_id: config_text(ctx, "credential_id"),
     })
@@ -615,7 +650,7 @@ async fn memory(op: Op, ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeEr
         }
         Op::MemorySearch => {
             let query = required_text(ctx, "query").await?;
-            let items = service.recall(&agent, &query, usize_from(config_u64(ctx, "limit", 5))).await?;
+            let items = service.recall(&agent, &query, usize_from(config_u64(ctx, "limit", 5)?)).await?;
             let text = items.iter().map(|item| item.content.clone()).collect::<Vec<_>>().join("\n");
             let results = items
                 .iter()
@@ -640,7 +675,7 @@ async fn knowledge(op: Op, ctx: &mut dyn NodeContext) -> Result<NodeOutcome, Nod
         return Ok(NodeOutcome::fire("out").with_output("doc_id", doc_id));
     }
     let query = required_text(ctx, "query").await?;
-    let hits = service.search(&agent, &query, usize_from(config_u64(ctx, "limit", 5))).await?;
+    let hits = service.search(&agent, &query, usize_from(config_u64(ctx, "limit", 5)?)).await?;
     let text = hits.iter().map(|hit| hit.text.clone()).collect::<Vec<_>>().join("\n");
     let results =
         hits.iter().map(|hit| Value::Json(json!({ "doc_id": hit.doc_id, "chunk_index": hit.chunk_index, "text": hit.text, "score": hit.score }))).collect();

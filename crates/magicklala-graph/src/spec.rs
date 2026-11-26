@@ -111,6 +111,12 @@ pub struct NodeSpec {
 pub const DYNAMIC_SOCKET: &str = "*";
 
 impl NodeSpec {
+    pub fn binds_setting(&self, key: &str) -> bool {
+        !crate::engine::UNBOUND_SETTINGS.contains(&key) && self.config.iter().any(|field| field.key == key)
+    }
+}
+
+impl NodeSpec {
     pub fn resolve_input(&self, name: &str) -> Option<&SocketSpec> {
         resolve_socket(&self.inputs, name)
     }

@@ -45,6 +45,18 @@ impl Camera {
         self.zoom_at(pivot, factor);
     }
 
+    pub fn zoom_about_origin(&mut self, factor: f32) {
+        self.zoom_about_origin_above(factor, Self::MIN_ZOOM);
+    }
+
+    pub fn zoom_about_origin_above(&mut self, factor: f32, floor: f32) {
+        let next = (self.zoom * factor).clamp(floor.clamp(Self::MIN_ZOOM, Self::MAX_ZOOM), Self::MAX_ZOOM);
+        let applied = next / self.zoom;
+        self.zoom = next;
+        self.pan_x *= applied;
+        self.pan_y *= applied;
+    }
+
     pub fn reset(&mut self) {
         *self = Self::default();
     }

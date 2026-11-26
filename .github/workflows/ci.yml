@@ -20,6 +20,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           submodules: recursive
+          fetch-depth: 0
       - run: rustup toolchain install 1.99.1 --profile minimal --component clippy --component rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1 libxkbcommon-dev libwayland-dev
@@ -28,6 +29,10 @@ jobs:
   e2e:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1/2, 2/2]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -41,7 +46,7 @@ jobs:
       - run: npm ci
         working-directory: e2e
       - run: cargo build --workspace --bins --examples
-      - run: npx e2e run
+      - run: npx e2e run --shard ${{ matrix.shard }}
         working-directory: e2e
   landmines:
     if: github.event_name == 'pull_request'
@@ -55,3 +60,15 @@ jobs:
         with:
           node-version: 22.23.5
       - run: node ci/landmines/landmines.mjs --base origin/${{ github.base_ref }}
+  comments:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.23.5
+      - run: node --experimental-strip-types --no-warnings ci/comments/check.ts --base origin/${{ github.base_ref }}

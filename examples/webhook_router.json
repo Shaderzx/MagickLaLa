@@ -10,7 +10,7 @@
       "kind": "event/on_webhook",
       "position": [
         0,
-        0
+        60
       ],
       "config": {}
     },
@@ -18,14 +18,14 @@
       "id": "classify",
       "kind": "code/rhai_script",
       "position": [
-        260,
-        0
+        272,
+        60
       ],
       "config": {
         "inputs": [
           "body"
         ],
-        "script": "let kind = body[\"type\"];\nif kind == \"order\" {\n    #{ route: \"orders\", message: \"Order \" + body[\"id\"] + \" received\" }\n} else if kind == \"support\" {\n    #{ route: \"support\", message: \"Support ticket \" + body[\"id\"] + \" opened\" }\n} else {\n    #{ route: \"ignored\", message: \"No route for \" + kind }\n}",
+        "script": "let kind = if type_of(body) == \"map\" && \"type\" in body { body[\"type\"] } else { \"unknown\" };\nlet id = if type_of(body) == \"map\" && \"id\" in body { body[\"id\"] } else { \"?\" };\nif kind == \"order\" {\n    #{ route: \"orders\", message: \"Order \" + id + \" received\" }\n} else if kind == \"support\" {\n    #{ route: \"support\", message: \"Support ticket \" + id + \" opened\" }\n} else {\n    #{ route: \"ignored\", message: \"No route for \" + kind }\n}",
         "max_operations": 100000
       }
     },
@@ -33,8 +33,8 @@
       "id": "route",
       "kind": "flow/switch",
       "position": [
-        520,
-        0
+        564,
+        -38
       ],
       "config": {
         "cases": [
@@ -47,8 +47,8 @@
       "id": "order_reply",
       "kind": "io/send_message",
       "position": [
-        800,
-        -160
+        908,
+        8
       ],
       "config": {}
     },
@@ -56,8 +56,8 @@
       "id": "support_reply",
       "kind": "io/send_message",
       "position": [
-        800,
-        0
+        908,
+        146
       ],
       "config": {}
     },
@@ -65,8 +65,8 @@
       "id": "ignored_text",
       "kind": "text/template",
       "position": [
-        800,
-        260
+        564,
+        278
       ],
       "config": {
         "template": "Ignored webhook: {{reason}}"
@@ -76,8 +76,8 @@
       "id": "ignored_reply",
       "kind": "io/send_message",
       "position": [
-        1080,
-        160
+        908,
+        296
       ],
       "config": {}
     }

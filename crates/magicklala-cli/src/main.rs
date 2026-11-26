@@ -140,7 +140,7 @@ fn dispatch(cli: Cli) -> CliResult {
         Command::Studio { snap, width, height, db } => {
             let config = magicklala_studio::StudioConfig { size: (width, height), db_path: db, ..Default::default() };
             match snap {
-                Some(path) => Ok(magicklala_studio::render_headless_snapshot_with_config(&path, config, magicklala_studio::Theme::Dark)?),
+                Some(path) => Ok(magicklala_studio::render_headless_snapshot_with_config(&path, config, magicklala_studio::Theme::Light)?),
                 None => Ok(magicklala_studio::run_studio(config)?),
             }
         }

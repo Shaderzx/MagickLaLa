@@ -960,6 +960,7 @@ test('magicklala spell run --db runs a parent spell whose flow/subgraph child is
 });
 
 const CHANNEL_LANE_CAPACITY = 256;
+const ACCEPT_QUEUE_WAVE = 64;
 
 function holdWebhookSpell(name: string) {
   return {
@@ -1017,13 +1018,17 @@ test('A signed webhook that finds its channel lane full is answered 503 agent_bu
   expect(holding.status).toBe(202);
   const fill = JSON.stringify({ hold: false });
   const burst = CHANNEL_LANE_CAPACITY + 44;
-  const answers = await Promise.all(
-    Array.from({ length: burst }, async () => {
-      const headers = sign(secret, fill);
-      const response = await deliver(fill, headers);
-      return { status: response.status, body: await response.json(), headers };
-    }),
-  );
+  const answers: { status: number; body: unknown; headers: Record<string, string> }[] = [];
+  for (let sent = 0; sent < burst; sent += ACCEPT_QUEUE_WAVE) {
+    const wave = await Promise.all(
+      Array.from({ length: Math.min(ACCEPT_QUEUE_WAVE, burst - sent) }, async () => {
+        const headers = sign(secret, fill);
+        const response = await deliver(fill, headers);
+        return { status: response.status, body: await response.json(), headers };
+      }),
+    );
+    answers.push(...wave);
+  }
   const accepted = answers.filter((answer) => answer.status === 202);
   const refused = answers.filter((answer) => answer.status === 503);
   expect(accepted.length + refused.length).toBe(burst);

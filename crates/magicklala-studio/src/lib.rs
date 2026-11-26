@@ -5,29 +5,33 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use magicklala_canvas::{CanvasState, ExecutionStatus, category_accent, interactive_canvas_view, status_color};
+use magicklala_canvas::{CanvasState, ExecutionStatus, NodeCardModel, SocketRef, WireModel, WorkbenchMode};
 use magicklala_graph::{
-    EngineServices, EventEmitter, NodeCatalog, NodeId, NodeInstance, NodeSpec, RunStatus, RunSummary, RunTrigger, SUBGRAPH_KIND, SpellEngine, SpellGraph,
-    SpellId, SpellValidator, SubgraphKey, SubgraphRef, SubgraphResolver, TraceEvent, Value, VariableDef, Wire, WireId, resolve_subgraphs_from,
+    EngineServices, EventEmitter, NodeCatalog, NodeId, NodeInstance, NodeSpec, RunStatus, RunSummary, RunTrigger, SUBGRAPH_KIND, SocketType, SpellEngine,
+    SpellGraph, SpellId, SpellValidator, SubgraphKey, SubgraphRef, SubgraphResolver, TraceEvent, ValidationError, Value, VariableDef, Wire, WireId,
+    resolve_subgraphs_from,
 };
 use magicklala_nodes::{HttpLlmGateway, InMemoryKnowledge, InMemoryMemory, LlmGatewayConfig, default_registry};
 use magicklala_store::{NewProject, NewSpell, NewSpellRelease, ProjectId, Repository, SpellRecord, SpellRecordId, SpellRelease, SqliteStore, StoreError};
-use rune::{App, AppSpec, Color, Cx, El, ScrollSpec, TextEdit, TextStyle, Waker, col, el, row, text, text_input};
+use rune::text::TextSystem;
+use rune::{App, AppSpec, TextEdit, Waker};
 use serde_json::json;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 const TITLE: &str = "MagickLaLa Studio";
-pub const TOOLBAR_HEIGHT: f32 = 48.0;
-pub const LEFT_RAIL_WIDTH: f32 = 240.0;
-pub const INSPECTOR_WIDTH: f32 = 300.0;
-pub const TRACE_HEIGHT: f32 = 110.0;
+pub const TOOLBAR_HEIGHT: f32 = 52.0;
+pub const LEFT_RAIL_WIDTH: f32 = 228.0;
+pub const INSPECTOR_WIDTH: f32 = 296.0;
+pub const TRACE_HEIGHT: f32 = 102.0;
+pub const IDLE_TRACE_HEIGHT: f32 = 46.0;
+pub const OPEN_TRACE_HEIGHT: f32 = 196.0;
 pub const PALETTE_CATEGORY_ORDER: [&str; 13] =
     ["events", "flow", "ai", "memory", "knowledge", "io", "code", "variables", "text", "logic", "json", "network", "time"];
 pub const LEGACY_KIND_PREFIX: &str = "core/";
-pub const CONTEXT_MENU_SIZE: (f32, f32) = (210.0, 150.0);
+pub const CONTEXT_MENU_SIZE: (f32, f32) = (200.0, 197.0);
 pub const QUICK_ADD_KIND: &str = "ai/generate_text";
-pub const COMPACT_TOOLBAR_BELOW: f32 = 1100.0;
+pub const COMPACT_TOOLBAR_BELOW: f32 = 1120.0;
 pub const STUDIO_PROJECT: &str = "Studio";
 pub const STUDIO_CHANNEL: &str = "studio";
 pub const STUDIO_SENDER: &str = "studio-user";
@@ -35,16 +39,26 @@ pub const CHAT_TRIGGER_KIND: &str = "event/on_message";
 pub const DEFAULT_RUN_TIMEOUT: Duration = Duration::from_secs(60);
 pub const PROMPT_EDITOR_PADDING: f32 = 10.0;
 pub const PROMPT_EDITOR_HEIGHT: f32 = 172.0;
-pub const COMPACT_PROMPT_EDITOR_HEIGHT: f32 = 148.0;
+pub const COMPACT_PROMPT_EDITOR_HEIGHT: f32 = 152.0;
 pub const COMPACT_INSPECTOR_BELOW: f32 = 720.0;
-pub const RUN_SLOT_WIDTH: f32 = 88.0;
+pub const RUN_SLOT_WIDTH: f32 = 90.0;
 pub const COMPACT_RUN_SLOT_WIDTH: f32 = 64.0;
 const PUBLISH_NOTES: &str = "Published from Studio";
+
+static BRICOLAGE_GROTESK: &[u8] = include_bytes!("../assets/fonts/BricolageGrotesque-Variable.ttf");
+static JETBRAINS_MONO: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Variable.ttf");
+pub const STUDIO_FONTS: &[&[u8]] = &[BRICOLAGE_GROTESK, JETBRAINS_MONO];
+pub const STUDIO_FAMILIES: (&str, &str) = ("Bricolage Grotesque, system-ui, sans-serif", "JetBrains Mono, ui-monospace, monospace");
+
+pub fn studio_text_system() -> TextSystem {
+    TextSystem::for_window(STUDIO_FONTS, STUDIO_FAMILIES)
+}
 
 static LAUNCH_SIZE: Mutex<Option<(f32, f32)>> = Mutex::new(None);
 static LAUNCH_THEME: Mutex<Option<Theme>> = Mutex::new(None);
 static LAUNCH_DB: Mutex<Option<PathBuf>> = Mutex::new(None);
 static LAUNCH_RUN_TIMEOUT: Mutex<Option<Duration>> = Mutex::new(None);
+static LAUNCH_PREPARED: Mutex<Option<StudioApp>> = Mutex::new(None);
 static RUNTIME: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
 
 #[derive(Debug, Error)]
@@ -106,9 +120,163 @@ pub struct StudioWorkspace {
     pub active_release: Option<u32>,
 }
 
+fn stored_wires(prefix: &str, wires: &[(SocketRef, SocketRef)]) -> Vec<Wire> {
+    wires
+        .iter()
+        .map(|(from, to)| Wire {
+            id: WireId::from(format!("{prefix}-{}-{}-{}-{}", from.node.0, from.socket, to.node.0, to.socket).as_str()),
+            from_node: from.node.clone(),
+            from_socket: from.socket.clone(),
+            to_node: to.node.clone(),
+            to_socket: to.socket.clone(),
+        })
+        .collect()
+}
+
+fn socket_pairs(wires: &[Wire]) -> Vec<(SocketRef, SocketRef)> {
+    wires
+        .iter()
+        .map(|wire| (SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()), SocketRef::new(wire.to_node.clone(), wire.to_socket.clone())))
+        .collect()
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Held {
+    Set,
+    Unset,
+    Reset,
+}
+
+fn held_before(graph: &SpellGraph, id: &NodeId, name: &str, is_flow: &dyn Fn(&magicklala_graph::Wire) -> bool, memo: &mut HashMap<NodeId, Held>) -> Held {
+    if let Some(held) = memo.get(id) {
+        return *held;
+    }
+    memo.insert(id.clone(), Held::Unset);
+    let touches = |id: &NodeId, kind: &str| {
+        graph.node(id).is_some_and(|step| step.kind == kind && step.config.get("name").and_then(|value| value.as_str()).map(str::trim) == Some(name))
+    };
+    let feeders: Vec<NodeId> = graph.wires.iter().filter(|wire| &wire.to_node == id && is_flow(wire)).map(|wire| wire.from_node.clone()).collect();
+    let arms: Vec<Held> = feeders
+        .iter()
+        .map(|from| {
+            if touches(from, "var/reset") {
+                Held::Reset
+            } else if touches(from, "var/set") {
+                Held::Set
+            } else {
+                held_before(graph, from, name, is_flow, memo)
+            }
+        })
+        .collect();
+    let join = graph.node(id).is_some_and(|step| step.kind == "flow/wait_for_all");
+    let held = if arms.is_empty() {
+        Held::Unset
+    } else if arms.contains(&Held::Reset) {
+        Held::Reset
+    } else if (join && arms.contains(&Held::Set)) || arms.iter().all(|arm| *arm == Held::Set) {
+        Held::Set
+    } else {
+        Held::Unset
+    };
+    memo.insert(id.clone(), held);
+    held
+}
+
+fn ran_before(graph: &SpellGraph, id: &NodeId, source: &NodeId, is_flow: &dyn Fn(&magicklala_graph::Wire) -> bool, memo: &mut HashMap<NodeId, bool>) -> bool {
+    if let Some(ran) = memo.get(id) {
+        return *ran;
+    }
+    memo.insert(id.clone(), false);
+    let feeders: Vec<NodeId> = graph.wires.iter().filter(|wire| &wire.to_node == id && is_flow(wire)).map(|wire| wire.from_node.clone()).collect();
+    let arms: Vec<bool> = feeders.iter().map(|from| from == source || ran_before(graph, from, source, is_flow, memo)).collect();
+    let join = graph.node(id).is_some_and(|step| step.kind == "flow/wait_for_all");
+    let ran = !arms.is_empty() && if join { arms.contains(&true) } else { arms.iter().all(|arm| *arm) };
+    memo.insert(id.clone(), ran);
+    ran
+}
+
+fn flow_readers(graph: &SpellGraph, node: &NodeId, is_flow: &dyn Fn(&magicklala_graph::Wire) -> bool) -> Vec<NodeId> {
+    let runs_on_flow = |id: &NodeId| graph.wires.iter().any(|wire| &wire.to_node == id && is_flow(wire));
+    let mut readers = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut frontier = vec![node.clone()];
+    while let Some(current) = frontier.pop() {
+        if !seen.insert(current.clone()) {
+            continue;
+        }
+        if runs_on_flow(&current) {
+            readers.push(current);
+        } else {
+            frontier.extend(graph.wires.iter().filter(|wire| wire.from_node == current && !is_flow(wire)).map(|wire| wire.to_node.clone()));
+        }
+    }
+    readers
+}
+
+fn set_earlier_on_route(graph: &SpellGraph, node: &NodeId, name: &str, is_flow: impl Fn(&magicklala_graph::Wire) -> bool) -> bool {
+    let readers = flow_readers(graph, node, &is_flow);
+    let mut memo = HashMap::new();
+    !readers.is_empty() && readers.iter().all(|reader| held_before(graph, reader, name, &is_flow, &mut memo) == Held::Set)
+}
+
+fn same_recipe(a: &SpellGraph, b: &SpellGraph) -> bool {
+    let steps = |graph: &SpellGraph| {
+        let mut steps: Vec<(String, String, String)> = graph.nodes.iter().map(|node| (node.id.0.clone(), node.kind.clone(), node.config.to_string())).collect();
+        steps.sort();
+        steps
+    };
+    let doors = |graph: &SpellGraph| -> Vec<String> {
+        graph.nodes.iter().filter(|node| node.kind.starts_with("event/") || node.kind.starts_with("core/on_")).map(|node| node.id.0.clone()).collect()
+    };
+    let links = |graph: &SpellGraph| {
+        let mut links: Vec<(String, String, String, String)> =
+            graph.wires.iter().map(|wire| (wire.from_node.0.clone(), wire.from_socket.clone(), wire.to_node.0.clone(), wire.to_socket.clone())).collect();
+        links.sort();
+        links
+    };
+    a.name == b.name
+        && a.description == b.description
+        && a.variables == b.variables
+        && a.subgraphs == b.subgraphs
+        && steps(a) == steps(b)
+        && doors(a) == doors(b)
+        && links(a) == links(b)
+}
+
+fn calls_only_pinned_spells(graph: &SpellGraph) -> bool {
+    graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == SUBGRAPH_KIND)
+        .all(|node| graph.subgraphs.iter().any(|reference| reference.node_id == node.id && reference.release_version.is_some()))
+}
+
+fn recipe_from(spell: &SpellGraph, canvas: &CanvasState, specs: &[NodeSpec]) -> SpellGraph {
+    let mut graph = spell.clone();
+    graph.shelf.clear();
+    let recipe = magicklala_canvas::recipe_nodes(canvas);
+    let known = |kind: &str| specs.iter().any(|spec| spec.kind == kind);
+    let open_trigger = |node: &NodeInstance| !canvas.is_shelved(&node.id) && specs.iter().any(|spec| spec.kind == node.kind && spec.is_trigger);
+    graph.nodes.retain(|node| recipe.contains(&node.id) || open_trigger(node) || !known(&node.kind));
+    let kept: Vec<NodeId> = graph.nodes.iter().map(|node| node.id.clone()).collect();
+    graph.wires.retain(|wire| kept.contains(&wire.from_node) && kept.contains(&wire.to_node));
+    graph.subgraphs.retain(|reference| kept.contains(&reference.node_id));
+    graph
+}
+
+fn recipe_of(spell: &SpellGraph, specs: &[NodeSpec]) -> SpellGraph {
+    let mut canvas = CanvasState::from_graph(spell, specs);
+    for entry in &spell.shelf {
+        canvas.shelve(&entry.node);
+    }
+    recipe_from(spell, &canvas, specs)
+}
+
 impl StudioWorkspace {
     fn of(record: SpellRecord, releases: Vec<SpellRelease>) -> Self {
+        let recipe = recipe_of(&record.graph, &registry_specs());
         let (graph, active_release) = match releases.last() {
+            Some(release) if same_recipe(&release.graph, &recipe) => (record.graph, Some(release.version)),
             Some(release) if release.created_at > record.updated_at => (release.graph.clone(), Some(release.version)),
             _ => (record.graph, None),
         };
@@ -211,6 +379,25 @@ impl StudioStore {
         self.spell_record_id
     }
 
+    pub fn detach_record(&mut self) {
+        self.spell_record_id = None;
+    }
+
+    pub fn attach_record(&mut self, id: SpellRecordId) {
+        self.spell_record_id = Some(id);
+    }
+
+    pub fn saved_spells(&self) -> Vec<SpellRecord> {
+        let repository = self.repository.clone();
+        block(move || async move {
+            let Some(project) = repository.list_projects().await?.into_iter().find(|project| project.name == STUDIO_PROJECT) else { return Ok(Vec::new()) };
+            repository.list_spells(project.id).await
+        })
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default()
+    }
+
     fn resolve_spell_record(&mut self, spell: &SpellGraph) -> Result<SpellRecordId, StudioError> {
         let repository = self.repository.clone();
         let spell = spell.clone();
@@ -289,6 +476,11 @@ impl StudioStore {
         .map_err(|error| StudioError::Store(error.to_string()))
     }
 
+    pub fn releases_of_record(&self, record: SpellRecordId) -> Vec<SpellRelease> {
+        let repository = self.repository.clone();
+        block(move || async move { sorted_releases(&repository, record).await }).ok().and_then(Result::ok).unwrap_or_default()
+    }
+
     fn adopt_latest_workspace(&mut self) -> Result<Option<StudioWorkspace>, StudioError> {
         let workspace = self.latest_workspace()?;
         if let Some(workspace) = &workspace {
@@ -315,7 +507,7 @@ fn subgraph_keys(graph: &SpellGraph) -> impl Iterator<Item = SubgraphKey> + '_ {
 
 async fn released_graph(repository: &SqliteStore, record: &SpellRecord, version: Option<u32>) -> Result<Option<SpellGraph>, magicklala_store::StoreError> {
     Ok(match version {
-        None => Some(record.graph.clone()),
+        None => Some(recipe_of(&record.graph, &registry_specs())),
         Some(version) => repository.list_releases(record.id).await?.into_iter().find(|release| release.version == version).map(|release| release.graph),
     })
 }
@@ -519,12 +711,97 @@ pub fn editable_field(kind: &str) -> Option<&'static str> {
     match kind {
         "text/template" => Some("template"),
         SUBGRAPH_KIND => Some(SUBGRAPH_SPELL_FIELD),
+        "var/get" | "var/set" | "var/reset" => Some("name"),
+        "flow/switch" => Some("cases"),
+        "flow/split" => Some("outputs"),
+        "json/destructure" => Some("keys"),
+        "ai/embedding" => Some("text"),
         kind if kind.starts_with("code/") => Some("script"),
         kind if kind.starts_with("ai/") => Some("prompt"),
         _ => None,
     }
 }
 
+fn card_note(kind: &str, config: &serde_json::Value, spec: Option<&NodeSpec>, variables: &[VariableDef]) -> Option<String> {
+    let read = |key: &str| config.get(key).or_else(|| spec?.config.iter().find(|field| field.key == key)?.default.as_ref());
+    let bound = |name: &str| {
+        let value = variables.iter().find(|variable| variable.name == name).and_then(|variable| variable.default.as_ref()).map(|value| value.to_json());
+        match value {
+            Some(serde_json::Value::String(text)) => format!("{text} · {name}"),
+            Some(value) if !value.is_null() => format!("{value} · {name}"),
+            _ => name.to_owned(),
+        }
+    };
+    let setting = |key: &str| {
+        read(key).and_then(|value| match value {
+            serde_json::Value::String(text) => Some(magicklala_graph::bound_variable(value).map_or_else(|| text.clone(), bound)),
+            serde_json::Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        })
+    };
+    let count = |key: &str, one: &str, many: &str| {
+        read(key).and_then(serde_json::Value::as_array).filter(|items| !items.is_empty()).map(|items| crate::view::plural(items.len(), one, many))
+    };
+    match kind {
+        "ai/generate_text" | "ai/stream_text" | "ai/structured_json" => setting("model").filter(|model| !model.is_empty()),
+        "memory/search" | "knowledge/search" => Some(format!("top {}", setting("limit").unwrap_or_else(|| "5".to_owned()))),
+        "flow/switch" => count("cases", "case", "cases"),
+        "flow/split" => count("outputs", "output", "outputs"),
+        "json/destructure" => count("keys", "key", "keys"),
+        "time/delay" => setting("ms").map(|ms| if ms.chars().all(|c| c.is_ascii_digit()) { format!("{ms} ms") } else { format!("wait {ms}") }),
+        "var/get" | "var/set" | "var/reset" => setting("name").filter(|name| !name.is_empty()),
+        _ => None,
+    }
+}
+
+pub fn listed_field(kind: &str) -> bool {
+    matches!(kind, "flow/switch" | "flow/split" | "json/destructure")
+}
+
+pub fn listed_names(text: &str) -> Vec<String> {
+    let names: Vec<String> = serde_json::from_str::<Vec<String>>(text).unwrap_or_else(|_| split_listed(text));
+    names.into_iter().map(|name| name.trim().to_owned()).filter(|name| !name.is_empty()).fold(Vec::new(), |mut kept, name| {
+        if !kept.contains(&name) {
+            kept.push(name);
+        }
+        kept
+    })
+}
+
+fn split_listed(text: &str) -> Vec<String> {
+    let mut names = vec![String::new()];
+    let mut quoted = false;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' if quoted && chars.peek().is_some() => names.last_mut().into_iter().for_each(|name| name.extend(chars.next())),
+            '"' => quoted = !quoted,
+            ',' | '\n' if !quoted => names.push(String::new()),
+            _ => names.last_mut().into_iter().for_each(|name| name.push(ch)),
+        }
+    }
+    names
+}
+
+pub fn fixed_outputs(spec: &NodeSpec) -> Vec<String> {
+    let listed_by_default: Vec<&str> =
+        spec.config.iter().filter_map(|field| field.default.as_ref()?.as_array()).flatten().filter_map(serde_json::Value::as_str).collect();
+    spec.outputs
+        .iter()
+        .filter(|socket| socket.name != magicklala_graph::DYNAMIC_SOCKET && !listed_by_default.contains(&socket.name.as_str()))
+        .map(|socket| socket.name.clone())
+        .collect()
+}
+
+pub fn listed_text(names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|name| {
+            if name.contains([',', '"', '\n']) || name.trim() != *name { serde_json::Value::String((*name).to_owned()).to_string() } else { (*name).to_owned() }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 fn studio_services() -> EngineServices {
     let config = LlmGatewayConfig::from_env();
     let llm: Option<Arc<dyn magicklala_graph::LlmGateway>> =
@@ -556,8 +833,60 @@ pub enum LeftTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RightTab {
     Inspector,
+    Trace,
     Variables,
     Playground,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HexFinding {
+    pub node: Option<NodeId>,
+    pub socket: Option<String>,
+    pub message: String,
+    pub readable: String,
+    pub mistyped: bool,
+}
+
+impl HexFinding {
+    fn loose(message: String) -> Self {
+        Self { node: None, socket: None, readable: message.clone(), message, mistyped: false }
+    }
+
+    fn from_validation(error: &ValidationError, spell: &SpellGraph, title_of: &dyn Fn(&NodeId) -> String) -> Self {
+        let message = error.to_string();
+        let readable = match error {
+            ValidationError::MissingRequiredInput { node, socket } => format!("{}: missing required input \"{socket}\"", title_of(node)),
+            ValidationError::MultipleValueInputs { node, socket } => format!("{}: input \"{socket}\" has more than one wire", title_of(node)),
+            ValidationError::MissingSocket { node, socket, .. } => format!("{}: has no socket \"{socket}\"", title_of(node)),
+            ValidationError::UnknownNodeKind { node, kind } => format!("{}: unknown kind {kind}", title_of(node)),
+            ValidationError::TypeMismatch { wire, from, to } => match spell.wires.iter().find(|candidate| &candidate.id == wire) {
+                Some(found) => format!("{}: input \"{}\" needs {to:?} but gets {from:?}", title_of(&found.to_node), found.to_socket),
+                None => message.clone(),
+            },
+            _ => spell.nodes.iter().fold(message.clone(), |text, node| text.replace(&format!("{:?}", node.id), &title_of(&node.id))),
+        };
+        let (node, socket) = match error {
+            ValidationError::MissingRequiredInput { node, socket }
+            | ValidationError::MultipleValueInputs { node, socket }
+            | ValidationError::MissingSocket { node, socket, .. } => (Some(node.clone()), Some(socket.clone())),
+            ValidationError::TypeMismatch { wire, .. } => match spell.wires.iter().find(|candidate| &candidate.id == wire) {
+                Some(found) => (Some(found.to_node.clone()), Some(found.to_socket.clone())),
+                None => (None, None),
+            },
+            ValidationError::UnknownNodeKind { node, .. }
+            | ValidationError::ExclusiveJoin { node, .. }
+            | ValidationError::SubgraphCycle { node, .. }
+            | ValidationError::SubgraphResolverUnavailable { node, .. }
+            | ValidationError::OrphanSubgraph { node, .. }
+            | ValidationError::SubgraphTargetMissing { node }
+            | ValidationError::SubgraphTargetConflict { node, .. }
+            | ValidationError::DuplicateSubgraphTarget(node)
+            | ValidationError::DuplicateNode(node) => (Some(node.clone()), None),
+            ValidationError::ValueCycle(nodes) => (nodes.first().cloned(), None),
+            _ => (None, None),
+        };
+        Self { node, socket, message, readable, mistyped: matches!(error, ValidationError::TypeMismatch { .. }) }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -583,6 +912,14 @@ pub struct TraceLine {
     pub kind: &'static str,
     pub detail: String,
     pub status: ExecutionStatus,
+    pub node: Option<NodeId>,
+    pub path: Vec<NodeId>,
+}
+
+impl TraceLine {
+    pub fn canvas_node(&self) -> Option<NodeId> {
+        self.path.first().cloned().or_else(|| self.node.clone())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -597,14 +934,120 @@ pub struct Release {
     pub nodes: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct ParkedShelf {
+    pub parked: Vec<(SocketRef, SocketRef)>,
+    pub bridges: Vec<(SocketRef, SocketRef)>,
+    pub refused: Vec<(SocketRef, SocketRef)>,
+}
+
+#[derive(Debug, Clone)]
+pub enum UndoEntry {
+    Aside {
+        id: NodeId,
+        wires: Vec<(SocketRef, SocketRef)>,
+        bridges: Vec<(SocketRef, SocketRef)>,
+    },
+    Node {
+        at: usize,
+        card: Box<NodeCardModel>,
+        prompt: Option<TextEdit>,
+        version: Option<TextEdit>,
+        config: Option<serde_json::Value>,
+        wires: Vec<WireModel>,
+        bridges: Vec<(SocketRef, SocketRef)>,
+        shelf: Option<ParkedShelf>,
+        call: Option<SubgraphRef>,
+    },
+    Variable {
+        index: usize,
+        variable: VariableDef,
+        name_edit: TextEdit,
+        default_edit: TextEdit,
+    },
+    VariableAdded {
+        index: usize,
+    },
+    VariableType {
+        index: usize,
+        variable: VariableDef,
+        default_edit: TextEdit,
+    },
+    Recipe {
+        nodes: Vec<NodeCardModel>,
+        wires: Vec<WireModel>,
+        shelved: Vec<NodeId>,
+    },
+    Edit(Box<EditSnapshot>),
+}
+
+#[derive(Debug, Clone)]
+pub struct EditSnapshot {
+    nodes: Vec<NodeCardModel>,
+    wires: Vec<WireModel>,
+    shelved: Vec<NodeId>,
+    configs: BTreeMap<NodeId, serde_json::Value>,
+    prompts: BTreeMap<NodeId, TextEdit>,
+    versions: BTreeMap<NodeId, TextEdit>,
+    subgraphs: Vec<SubgraphRef>,
+    variables: Vec<VariableDef>,
+    var_name_edits: Vec<TextEdit>,
+    var_default_edits: Vec<TextEdit>,
+    aside_wires: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
+    aside_bridges: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
+    aside_refused: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
+    wire_homes: Vec<((SocketRef, SocketRef), (WireId, usize))>,
+    wire_ledger: Vec<WireId>,
+    typing: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingSwitch {
+    NewPotion,
+    Sample(String),
+}
+
 pub struct StudioApp {
     pub spell: SpellGraph,
+    pub hex_findings: Vec<HexFinding>,
     pub canvas: CanvasState,
     pub size: (f32, f32),
     pub specs: Vec<NodeSpec>,
     pub theme: Theme,
     pub left_tab: LeftTab,
     pub right_tab: RightTab,
+    pub left_rail_pinned: bool,
+    pub frozen_edit: TextEdit,
+    pub trace_expanded: bool,
+    pub trace_stale: bool,
+    pub variables_touched: bool,
+    pub model_menu_open: bool,
+    pub docked_menu_seen: Option<[f32; 2]>,
+    pub open_var_type: Option<usize>,
+    pub pending_type_reset: Option<(usize, SocketType)>,
+    pub pending_restore_version: Option<u32>,
+    pub pending_switch: Option<PendingSwitch>,
+    pub var_name_edits: Vec<TextEdit>,
+    pub var_default_edits: Vec<TextEdit>,
+    pub undo_stack: Vec<UndoEntry>,
+    undo_seen: usize,
+    last_synced: Option<Box<EditSnapshot>>,
+    redo_stack: Vec<EditSnapshot>,
+    restoring: bool,
+    pub aside_wires: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
+    pub aside_bridges: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
+    pub aside_refused: HashMap<NodeId, Vec<(SocketRef, SocketRef)>>,
+    pub wire_error: Option<String>,
+    wire_homes: Vec<((SocketRef, SocketRef), (WireId, usize))>,
+    wire_ledger: Vec<WireId>,
+    discrete_edit: bool,
+    var_problems: Vec<String>,
+    pub saved_potions: Vec<(String, String)>,
+    pub saved_live: Vec<(String, u32)>,
+    pub pantry_drag: Option<PantryDrag>,
+    pub undo_banner: Option<String>,
+    pub dirty: bool,
+    pub palette_query: TextEdit,
     pub validation: ValidationState,
     pub trace: Vec<TraceLine>,
     pub trace_events: Vec<TraceEvent>,
@@ -615,6 +1058,8 @@ pub struct StudioApp {
     pub chat: Vec<ChatMessage>,
     pub chat_input: TextEdit,
     pub releases: Vec<Release>,
+    pub release_graphs: BTreeMap<u32, SpellGraph>,
+    pub release_notes: BTreeMap<u32, String>,
     pub configs: BTreeMap<NodeId, serde_json::Value>,
     pub run_payload: serde_json::Value,
     pub last_run: Option<RunReport>,
@@ -625,6 +1070,7 @@ pub struct StudioApp {
     pub draft_status: Option<String>,
     pub publish_status: Option<String>,
     pub active_release_version: Option<u32>,
+    pub plug_menu: Option<(NodeId, String)>,
     pub run_timeout: Duration,
     run_started: Option<Instant>,
     active: Option<ActiveRun>,
@@ -632,12 +1078,23 @@ pub struct StudioApp {
     waker: Option<Waker>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PantryDrag {
+    pub kind: String,
+    pub at: [f32; 2],
+}
+
 impl StudioApp {
     pub fn demo() -> Self {
+        if let Ok(mut prepared) = LAUNCH_PREPARED.lock()
+            && let Some(app) = prepared.take()
+        {
+            return app;
+        }
         let db_path = LAUNCH_DB.lock().ok().and_then(|path| path.clone());
         let run_timeout = LAUNCH_RUN_TIMEOUT.lock().ok().and_then(|timeout| *timeout).unwrap_or(DEFAULT_RUN_TIMEOUT);
         let mut app = Self::launch(&StudioConfig { db_path, run_timeout, ..StudioConfig::default() });
-        if LAUNCH_THEME.lock().ok().and_then(|theme| *theme) == Some(Theme::Light) {
+        if LAUNCH_THEME.lock().ok().and_then(|theme| *theme) == Some(Theme::Dark) {
             app.toggle_theme();
         }
         app
@@ -658,8 +1115,12 @@ impl StudioApp {
         let workspace = store.adopt_latest_workspace()?;
         let mut app = match &workspace {
             Some(workspace) => {
-                let mut app = Self::with_spell(workspace.graph.clone(), registry_specs());
+                let mut app = Self::from_registry();
+                app.load_graph(workspace.graph.clone());
                 app.releases = workspace.releases.iter().map(|release| Release { version: release.version, nodes: release.graph.nodes.len() }).collect();
+                app.release_graphs = workspace.releases.iter().map(|release| (release.version, release.graph.clone())).collect();
+                app.release_notes =
+                    workspace.releases.iter().map(|release| (release.version, release.created_at.format("%b %d · %H:%M").to_string())).collect();
                 app.last_published = workspace.releases.last().cloned();
                 app
             }
@@ -669,6 +1130,9 @@ impl StudioApp {
         app.run_timeout = config.run_timeout;
         app.sync_spell();
         app.active_release_version = workspace.and_then(|workspace| workspace.active_release);
+        app.canvas.release_badge = app.active_release_version.map(|v| format!("v{v}"));
+        app.dirty = false;
+        app.refresh_saved_potions();
         Ok(app)
     }
 
@@ -684,19 +1148,54 @@ impl StudioApp {
             canvas,
             size,
             specs,
-            theme: Theme::Dark,
+            theme: Theme::Light,
             left_tab: LeftTab::Palette,
             right_tab: RightTab::Inspector,
+            left_rail_pinned: false,
+            frozen_edit: TextEdit::new(""),
+            trace_expanded: false,
+            trace_stale: false,
+            variables_touched: false,
+            model_menu_open: false,
+            docked_menu_seen: None,
+            open_var_type: None,
+            pending_type_reset: None,
+            pending_restore_version: None,
+            pending_switch: None,
+            var_name_edits: Vec::new(),
+            var_default_edits: Vec::new(),
+            undo_stack: Vec::new(),
+            undo_seen: 0,
+            last_synced: None,
+            redo_stack: Vec::new(),
+            restoring: false,
+            aside_wires: HashMap::new(),
+            aside_bridges: HashMap::new(),
+            aside_refused: HashMap::new(),
+            wire_error: None,
+            wire_homes: Vec::new(),
+            wire_ledger: Vec::new(),
+            discrete_edit: false,
+            var_problems: Vec::new(),
+            saved_potions: Vec::new(),
+            saved_live: Vec::new(),
+            pantry_drag: None,
+            undo_banner: None,
+            dirty: false,
+            palette_query: TextEdit::new(""),
             validation: ValidationState::Unchecked,
+            hex_findings: Vec::new(),
             trace: Vec::new(),
             trace_events: Vec::new(),
             pending_trace: VecDeque::new(),
             runs: 0,
             prompts: BTreeMap::new(),
             versions: BTreeMap::new(),
-            chat: vec![ChatMessage { from_user: false, text: "Hi! Send a message to run this spell.".to_owned() }],
+            chat: vec![ChatMessage { from_user: false, text: "Send a message to run this spell.".to_owned() }],
             chat_input: TextEdit::new(""),
             releases: Vec::new(),
+            release_graphs: BTreeMap::new(),
+            release_notes: BTreeMap::new(),
             configs: BTreeMap::new(),
             run_payload: serde_json::json!({ "channel": STUDIO_CHANNEL, "sender": STUDIO_SENDER, "content": "Hello from Studio" }),
             last_run: None,
@@ -707,6 +1206,7 @@ impl StudioApp {
             draft_status: None,
             publish_status: None,
             active_release_version: None,
+            plug_menu: None,
             run_timeout: DEFAULT_RUN_TIMEOUT,
             run_started: None,
             active: None,
@@ -718,14 +1218,677 @@ impl StudioApp {
         for (id, kind, config) in nodes {
             app.track_config(id, &kind, config);
         }
+        app.sync_var_edits_from_spell();
         let viewport = app.canvas_size();
         app.canvas.fit(viewport);
         app.canvas.select(app.canvas.nodes.iter().find(|card| card.kind == "ai/generate_text").map(|card| card.id.clone()));
+        app.last_synced = Some(Box::new(app.edit_snapshot(None)));
+        app.seed_wire_ledger();
+        app.canvas.notes = app.card_notes();
         app
     }
 
+    pub fn left_rail_collapsed(&self) -> bool {
+        self.compact_toolbar() && !self.left_rail_pinned
+    }
+
+    pub fn left_rail_width(&self) -> f32 {
+        if self.left_rail_collapsed() {
+            68.0
+        } else if self.compact_toolbar() {
+            196.0
+        } else {
+            LEFT_RAIL_WIDTH
+        }
+    }
+
+    pub fn inspector_width(&self) -> f32 {
+        if self.compact_toolbar() { 228.0 } else { INSPECTOR_WIDTH }
+    }
+
+    pub fn toggle_left_rail(&mut self) {
+        self.left_rail_pinned = !self.left_rail_pinned;
+        let viewport = self.canvas_size();
+        self.canvas.fit(viewport);
+    }
+
+    pub fn hex_mend_source(&self, card_id: &NodeId) -> Option<(SocketRef, String)> {
+        let socket_name = self.missing_socket_of(card_id)?;
+        let source = self.earlier_fitting_outputs(card_id, &socket_name).into_iter().next()?;
+        let caption = format!("Plug in {} · {}", self.canvas.display_title(&source.node), source.socket);
+        Some((source, caption))
+    }
+
+    fn missing_socket_of(&self, card_id: &NodeId) -> Option<String> {
+        self.hex_findings.iter().filter(|finding| finding.node.as_ref() == Some(card_id)).find_map(|finding| finding.socket.clone())
+    }
+
+    pub fn mend_selected_hex(&mut self) {
+        if self.is_running() {
+            return;
+        }
+        let Some(card) = self.canvas.selected_card().cloned() else { return };
+        let Some(socket) = self.missing_socket_of(&card.id) else { return };
+        let Some((source, _)) = self.hex_mend_source(&card.id) else { return };
+        self.plug_input(&source, &SocketRef::new(card.id.clone(), socket));
+    }
+
+    pub fn fill_default_prompt_for_selected(&mut self) {
+        if self.is_running() {
+            return;
+        }
+        let Some(card) = self.canvas.selected_card().cloned() else { return };
+        let prompt = default_prompt(&card.kind);
+        if !prompt.is_empty() {
+            self.prompts.insert(card.id.clone(), TextEdit::new(prompt));
+        }
+        if let Some(card_mut) = self.canvas.card_mut(&card.id) {
+            card_mut.status = ExecutionStatus::Idle;
+            card_mut.inputs.iter_mut().for_each(|socket| {
+                socket.flagged = false;
+                socket.mistyped = false;
+            });
+        }
+        self.validate();
+    }
+
+    pub fn trace_height(&self) -> f32 {
+        if self.trace.is_empty() && !self.is_running() {
+            IDLE_TRACE_HEIGHT
+        } else if self.trace_expanded {
+            OPEN_TRACE_HEIGHT
+        } else {
+            TRACE_HEIGHT
+        }
+    }
+
+    pub fn follow_window(&mut self, size: (f32, f32)) {
+        if size.0 < 1.0 || size.1 < 1.0 || ((size.0 - self.size.0).abs() < 0.5 && (size.1 - self.size.1).abs() < 0.5) {
+            return;
+        }
+        self.size = size;
+        let viewport = self.canvas_size();
+        self.canvas.fit(viewport);
+    }
+
     pub fn canvas_size(&self) -> (f32, f32) {
-        ((self.size.0 - LEFT_RAIL_WIDTH - INSPECTOR_WIDTH).max(200.0), (self.size.1 - TOOLBAR_HEIGHT - TRACE_HEIGHT).max(200.0))
+        ((self.size.0 - self.left_rail_width() - self.inspector_width()).max(200.0), (self.size.1 - TOOLBAR_HEIGHT - self.trace_height()).max(200.0))
+    }
+
+    fn format_value(value: Option<&Value>) -> String {
+        match value {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Int(n)) => n.to_string(),
+            Some(Value::Float(n)) => n.to_string(),
+            Some(Value::Bool(b)) => b.to_string(),
+            Some(Value::Json(json)) => json.to_string(),
+            Some(other) => serde_json::to_string(other).unwrap_or_default(),
+            None => String::new(),
+        }
+    }
+
+    fn try_parse_value(raw: &str, ty: SocketType) -> Option<Value> {
+        let trimmed = raw.trim();
+        match ty {
+            SocketType::String | SocketType::Any => Some(Value::String(raw.to_owned())),
+            SocketType::Json => serde_json::from_str::<serde_json::Value>(trimmed).ok().map(Value::Json),
+            SocketType::Int => trimmed.parse::<i64>().ok().map(Value::Int),
+            SocketType::Float => trimmed.parse::<f64>().ok().filter(|n| n.is_finite()).map(Value::Float),
+            SocketType::Bool => match trimmed.to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" => Some(Value::Bool(true)),
+                "false" | "0" | "no" => Some(Value::Bool(false)),
+                _ => None,
+            },
+            _ => Some(Value::String(raw.to_owned())),
+        }
+    }
+
+    fn zero_value(ty: SocketType) -> Value {
+        match ty {
+            SocketType::Int => Value::Int(0),
+            SocketType::Float => Value::Float(0.0),
+            SocketType::Bool => Value::Bool(false),
+            _ => Value::String(String::new()),
+        }
+    }
+
+    fn sync_var_edits_from_spell(&mut self) {
+        self.var_name_edits = self.spell.variables.iter().map(|v| TextEdit::new(&v.name)).collect();
+        self.var_default_edits = self.spell.variables.iter().map(|v| TextEdit::new(Self::format_value(v.default.as_ref()))).collect();
+        self.var_problems = self.variable_errors();
+    }
+
+    pub fn var_name_error(&self, idx: usize) -> Option<&'static str> {
+        let name = self.var_name_edits.get(idx)?.text.trim();
+        if name.is_empty() {
+            Some("Needs a name")
+        } else if self.var_name_edits[..idx].iter().any(|edit| edit.text.trim() == name) {
+            Some("Duplicate name")
+        } else {
+            None
+        }
+    }
+
+    pub fn var_default_error(&self, idx: usize) -> Option<&'static str> {
+        let variable = self.spell.variables.get(idx)?;
+        let edit = self.var_default_edits.get(idx)?;
+        if edit.text.trim().is_empty() || Self::try_parse_value(&edit.text, variable.ty).is_some() {
+            return None;
+        }
+        Some(match variable.ty {
+            SocketType::Int => "Needs a whole number",
+            SocketType::Float => "Needs a number",
+            SocketType::Bool => "Needs true or false",
+            _ => "Needs valid JSON",
+        })
+    }
+
+    pub fn variable_binding_hint(&self, name: &str) -> (String, bool) {
+        if name.trim().is_empty() {
+            return ("Unused".to_owned(), false);
+        }
+        let template_token = format!("{{{{{name}}}}}");
+        for card in self.canvas.nodes.iter().filter(|card| !self.canvas.is_shelved(&card.id)) {
+            let renders = card.kind == "text/template";
+            let in_prompt = renders && self.prompts.get(&card.id).is_some_and(|e| e.text.contains(&template_token));
+            let in_config = self.configs.get(&card.id).is_some_and(|cfg| {
+                cfg.as_object().is_some_and(|map| {
+                    (renders && map.values().any(|v| v.as_str().is_some_and(|s| s.contains(&template_token))))
+                        || map.iter().any(|(key, value)| {
+                            self.specs.iter().any(|spec| spec.kind == card.kind && spec.binds_setting(key))
+                                && magicklala_graph::bound_variable(value) == Some(name)
+                        })
+                        || (card.kind.starts_with("var/") && map.get("name").and_then(serde_json::Value::as_str) == Some(name))
+                })
+            });
+            if in_prompt || in_config {
+                return (format!("→ {}", self.canvas.display_title(&card.id)), true);
+            }
+        }
+        ("Unused".to_owned(), false)
+    }
+
+    pub fn add_variable(&mut self) {
+        if self.is_running() {
+            return;
+        }
+        let mut index = self.spell.variables.len() + 1;
+        let name = loop {
+            let candidate = format!("var_{index}");
+            if self.spell.variables.iter().all(|v| v.name != candidate) {
+                break candidate;
+            }
+            index += 1;
+        };
+        self.spell.variables.push(VariableDef { name: name.clone(), ty: SocketType::String, default: Some(Value::String(String::new())), exposed: true });
+        self.var_name_edits.push(TextEdit::new(&name));
+        self.var_default_edits.push(TextEdit::new(""));
+        self.undo_stack.push(UndoEntry::VariableAdded { index: self.spell.variables.len() - 1 });
+        self.undo_banner = Some(format!("Added variable {name}"));
+        self.validation = ValidationState::Unchecked;
+        self.canvas.validated = false;
+        self.dirty = true;
+        self.variables_touched = true;
+        self.sync_spell();
+    }
+
+    pub fn remove_variable_at(&mut self, index: usize) {
+        if self.is_running() || index >= self.spell.variables.len() {
+            return;
+        }
+        let variable = self.spell.variables.remove(index);
+        let name = variable.name.clone();
+        let name_edit = if index < self.var_name_edits.len() { self.var_name_edits.remove(index) } else { TextEdit::new(&variable.name) };
+        let default_edit = if index < self.var_default_edits.len() {
+            self.var_default_edits.remove(index)
+        } else {
+            TextEdit::new(Self::format_value(variable.default.as_ref()))
+        };
+        self.undo_stack.push(UndoEntry::Variable { index, variable, name_edit, default_edit });
+        self.undo_banner = Some(format!("Removed variable {name}"));
+        self.variables_touched = true;
+        self.open_var_type = self.open_var_type.filter(|open| *open != index).map(|open| if open > index { open - 1 } else { open });
+        self.pending_type_reset = self.pending_type_reset.filter(|(open, _)| *open != index).map(|(open, ty)| (if open > index { open - 1 } else { open }, ty));
+        self.validation = ValidationState::Unchecked;
+        self.canvas.validated = false;
+        self.dirty = true;
+        self.sync_spell();
+    }
+
+    pub fn toggle_var_type_menu_at(&mut self, index: usize) {
+        if self.is_running() {
+            return;
+        }
+        self.pending_type_reset = None;
+        self.open_var_type = if self.open_var_type == Some(index) { None } else { Some(index) };
+    }
+
+    fn reset_value(ty: SocketType) -> Option<Value> {
+        (ty != SocketType::Json).then(|| Self::zero_value(ty))
+    }
+
+    pub fn set_variable_type_at(&mut self, index: usize, ty: SocketType) {
+        if self.is_running() || index >= self.spell.variables.len() {
+            return;
+        }
+        self.open_var_type = None;
+        if self.spell.variables[index].ty == ty {
+            self.pending_type_reset = None;
+            return;
+        }
+        let raw = self.var_default_edits.get(index).map(|e| e.text.clone()).unwrap_or_else(|| Self::format_value(self.spell.variables[index].default.as_ref()));
+        if raw.trim().is_empty() {
+            self.remember_variable_type(index);
+            self.spell.variables[index].ty = ty;
+            self.spell.variables[index].default = Self::reset_value(ty);
+            if let Some(edit) = self.var_default_edits.get_mut(index) {
+                *edit = TextEdit::new(Self::format_value(self.spell.variables[index].default.as_ref()));
+            }
+            self.pending_type_reset = None;
+            self.dirty = true;
+            return;
+        }
+        if let Some(parsed) = Self::try_parse_value(&raw, ty) {
+            self.remember_variable_type(index);
+            self.spell.variables[index].ty = ty;
+            self.spell.variables[index].default = Some(parsed);
+            if let Some(edit) = self.var_default_edits.get_mut(index) {
+                *edit = TextEdit::new(Self::format_value(self.spell.variables[index].default.as_ref()));
+            }
+            self.pending_type_reset = None;
+            self.dirty = true;
+        } else {
+            self.pending_type_reset = Some((index, ty));
+        }
+    }
+
+    pub fn confirm_variable_type_reset(&mut self) {
+        if self.is_running() {
+            return;
+        }
+        let Some((index, ty)) = self.pending_type_reset.take() else { return };
+        if index >= self.spell.variables.len() {
+            return;
+        }
+        self.remember_variable_type(index);
+        self.spell.variables[index].ty = ty;
+        self.spell.variables[index].default = Self::reset_value(ty);
+        if let Some(edit) = self.var_default_edits.get_mut(index) {
+            *edit = TextEdit::new(Self::format_value(self.spell.variables[index].default.as_ref()));
+        }
+        self.dirty = true;
+    }
+
+    fn remember_variable_type(&mut self, index: usize) {
+        let variable = self.spell.variables[index].clone();
+        let default_edit = self.var_default_edits.get(index).cloned().unwrap_or_else(|| TextEdit::new(Self::format_value(variable.default.as_ref())));
+        self.undo_banner = Some(format!("Changed the type of {}", variable.name));
+        self.undo_stack.push(UndoEntry::VariableType { index, variable, default_edit });
+        self.variables_touched = true;
+        self.validation = ValidationState::Unchecked;
+        self.canvas.validated = false;
+    }
+
+    pub fn cancel_variable_type_reset(&mut self) {
+        self.pending_type_reset = None;
+    }
+
+    pub fn selected_model_name(&self) -> String {
+        let Some(id) = self.canvas.selection.as_ref() else { return "gpt-4o-mini".to_owned() };
+        self.configs.get(id).and_then(|c| c.get("model")).and_then(serde_json::Value::as_str).filter(|s| !s.is_empty()).unwrap_or("gpt-4o-mini").to_owned()
+    }
+
+    pub fn toggle_model_menu(&mut self) {
+        if self.is_running() {
+            return;
+        }
+        self.model_menu_open = !self.model_menu_open;
+    }
+
+    pub fn select_model(&mut self, provider: &str, model: &str) {
+        if self.is_running() {
+            return;
+        }
+        self.model_menu_open = false;
+        let Some(id) = self.canvas.selection.clone() else { return };
+        let entry = self.configs.entry(id).or_insert_with(|| json!({}));
+        if !entry.is_object() {
+            *entry = json!({});
+        }
+        if let Some(map) = entry.as_object_mut() {
+            map.insert("provider".to_owned(), serde_json::Value::String(provider.to_owned()));
+            map.insert("model".to_owned(), serde_json::Value::String(model.to_owned()));
+        }
+        self.discrete_edit = true;
+        self.sync_spell();
+    }
+
+    pub fn load_graph(&mut self, graph: SpellGraph) {
+        self.wire_error = None;
+        self.wire_homes.clear();
+        let mode = self.canvas.mode;
+        let light = self.theme == Theme::Light;
+        self.stop_active_run();
+        self.aside_wires.clear();
+        self.aside_bridges.clear();
+        self.aside_refused.clear();
+        self.spell = graph;
+        self.canvas = CanvasState::from_graph(&self.spell, &self.specs);
+        self.canvas.mode = mode;
+        self.canvas.light = light;
+        self.prompts.clear();
+        self.versions.clear();
+        self.configs.clear();
+        self.trace.clear();
+        self.trace_stale = false;
+        self.trace_events.clear();
+        self.pending_trace.clear();
+        self.model_menu_open = false;
+        self.open_var_type = None;
+        self.pending_type_reset = None;
+        self.pending_restore_version = None;
+        self.pending_switch = None;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.undo_banner = None;
+        self.validation = ValidationState::Unchecked;
+        let nodes: Vec<(NodeId, String, serde_json::Value)> =
+            self.spell.nodes.iter().map(|node| (node.id.clone(), node.kind.clone(), node.config.clone())).collect();
+        for (id, kind, config) in nodes {
+            self.track_config(id, &kind, config);
+        }
+        self.sync_var_edits_from_spell();
+        for entry in self.spell.shelf.clone() {
+            self.canvas.shelve(&entry.node);
+            let parked = socket_pairs(&entry.parked);
+            for (from, to) in &parked {
+                self.canvas.adopt_sockets(from, to, &self.specs);
+            }
+            for ((pair, wire), at) in parked.iter().zip(&entry.parked).zip(entry.parked_at.iter().map(|at| Some(*at as usize)).chain(std::iter::repeat(None))) {
+                if !wire.id.0.starts_with("parked-") {
+                    self.wire_homes.push((pair.clone(), (wire.id.clone(), at.unwrap_or(usize::MAX))));
+                }
+            }
+            if !parked.is_empty() {
+                self.aside_wires.insert(entry.node.clone(), parked);
+            }
+            let bridges = socket_pairs(&entry.bridges);
+            if !bridges.is_empty() {
+                self.aside_bridges.insert(entry.node.clone(), bridges);
+            }
+            let refused = socket_pairs(&entry.refused);
+            if !refused.is_empty() {
+                self.aside_refused.insert(entry.node.clone(), refused);
+            }
+        }
+        self.rebuild_bridges();
+        let viewport = self.canvas_size();
+        self.canvas.fit(viewport);
+        self.canvas.select(self.canvas.nodes.iter().find(|card| card.kind == "ai/generate_text").map(|card| card.id.clone()));
+        self.last_synced = Some(Box::new(self.edit_snapshot(None)));
+        self.seed_wire_ledger();
+        self.canvas.notes = self.card_notes();
+    }
+
+    fn has_unsaved_work(&self) -> bool {
+        self.dirty
+            && (!self.canvas.nodes.is_empty() || !self.spell.variables.is_empty() || self.saved_potions.iter().any(|(saved, _)| saved == &self.spell.name))
+    }
+
+    pub fn request_new_spell(&mut self) {
+        if self.has_unsaved_work() {
+            self.pending_switch = Some(PendingSwitch::NewPotion);
+        } else {
+            self.new_empty_spell();
+        }
+    }
+
+    pub fn request_open_sample(&mut self, name: &str) {
+        if self.spell.name == name {
+            return;
+        }
+        if self.has_unsaved_work() {
+            self.pending_switch = Some(PendingSwitch::Sample(name.to_owned()));
+        } else {
+            self.open_sample_spell(name);
+        }
+    }
+
+    pub fn confirm_switch(&mut self) {
+        let Some(target) = self.pending_switch.take() else { return };
+        match target {
+            PendingSwitch::NewPotion => self.new_empty_spell(),
+            PendingSwitch::Sample(name) => self.open_sample_spell(&name),
+        }
+    }
+
+    pub fn cancel_switch(&mut self) {
+        self.pending_switch = None;
+    }
+
+    fn stop_active_run(&mut self) {
+        if let Some(active) = self.active.take() {
+            active.token.cancel();
+            if !active.handle.is_finished() {
+                self.stopping.push(active.handle);
+            }
+        }
+        self.trace.clear();
+        self.trace_events.clear();
+        self.pending_trace.clear();
+        self.last_run = None;
+        self.run_started = None;
+        self.canvas.running_brew = false;
+        self.canvas.last_brew = None;
+        self.canvas.brew_total_ms = None;
+    }
+
+    fn drop_active_run(&mut self) {
+        self.stop_active_run();
+        self.chat.clear();
+    }
+
+    fn detach_spell_history(&mut self) {
+        self.drop_active_run();
+        if let Some(store) = self.store.as_mut() {
+            store.detach_record();
+        }
+        self.releases.clear();
+        self.release_graphs.clear();
+        self.release_notes.clear();
+        self.last_published = None;
+        self.active_release_version = None;
+        self.draft_status = None;
+        self.publish_status = None;
+        self.store_error = None;
+        self.canvas.release_badge = None;
+        self.canvas.brew_summary = None;
+        self.dirty = false;
+    }
+
+    pub fn recipe_summary(&self, graph: &SpellGraph) -> String {
+        let mut canvas = CanvasState::from_graph(graph, &self.specs);
+        for entry in &graph.shelf {
+            canvas.shelve(&entry.node);
+        }
+        let plan = magicklala_canvas::brew_plan(&canvas, self.canvas_size());
+        let ingredients = plan.with_role(magicklala_canvas::BrewRole::Ingredient).count();
+        let aside = plan.with_role(magicklala_canvas::BrewRole::Aside).count();
+        let word = if ingredients == 1 { "ingredient" } else { "ingredients" };
+        if aside > 0 { format!("{ingredients} {word} · {aside} aside") } else { format!("{ingredients} {word}") }
+    }
+
+    pub fn refresh_saved_potions(&mut self) {
+        self.saved_potions = self
+            .store
+            .as_ref()
+            .map(|store| store.saved_spells().into_iter().map(|record| (record.name.clone(), self.recipe_summary(&record.graph))).collect())
+            .unwrap_or_default();
+        self.saved_live = self
+            .store
+            .as_ref()
+            .map(|store| {
+                store
+                    .saved_spells()
+                    .into_iter()
+                    .filter_map(|record| store.releases_of_record(record.id).last().map(|release| (record.name.clone(), release.version)))
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+
+    fn adopt_releases(&mut self, workspace: &StudioWorkspace) {
+        self.releases = workspace.releases.iter().map(|release| Release { version: release.version, nodes: release.graph.nodes.len() }).collect();
+        self.release_graphs = workspace.releases.iter().map(|release| (release.version, release.graph.clone())).collect();
+        self.release_notes = workspace.releases.iter().map(|release| (release.version, release.created_at.format("%b %d · %H:%M").to_string())).collect();
+        self.last_published = workspace.releases.last().cloned();
+        self.active_release_version = workspace.active_release;
+        self.canvas.release_badge = self.active_release_version.map(|v| format!("v{v}"));
+        self.dirty = false;
+    }
+
+    pub fn open_sample_spell(&mut self, name: &str) {
+        if let Some(record) = self.store.as_ref().and_then(|store| store.saved_spells().into_iter().find(|record| record.name == name)) {
+            self.detach_spell_history();
+            let releases = self.store.as_ref().map(|store| store.releases_of_record(record.id)).unwrap_or_default();
+            let workspace = StudioWorkspace::of(record.clone(), releases);
+            self.load_graph(workspace.graph.clone());
+            if let Some(store) = self.store.as_mut() {
+                store.attach_record(record.id);
+            }
+            self.adopt_releases(&workspace);
+            self.refresh_saved_potions();
+            return;
+        }
+        let graph = if name == "Research Agent" {
+            let mut spell = SpellGraph::new("Research Agent");
+            let place = |id: &str, kind: &str, pos: [f32; 2], config: serde_json::Value| NodeInstance {
+                id: NodeId::from(id),
+                kind: kind.to_owned(),
+                position: pos,
+                config,
+            };
+            spell.nodes = vec![
+                place("trigger", "event/on_message", [0.0, 90.0], serde_json::Value::Null),
+                place("search", "knowledge/search", [250.0, 40.0], json!({ "limit": 5 })),
+                place("llm", "ai/generate_text", [500.0, 90.0], json!({ "prompt": "Summarize the research findings and answer the question." })),
+                place("reply", "io/send_message", [750.0, 90.0], serde_json::Value::Null),
+            ];
+            let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
+                id: WireId::from(id),
+                from_node: NodeId::from(from.0),
+                from_socket: from.1.to_owned(),
+                to_node: NodeId::from(to.0),
+                to_socket: to.1.to_owned(),
+            };
+            spell.wires = vec![
+                wire("w1", ("trigger", "out"), ("search", "in")),
+                wire("w2", ("trigger", "content"), ("search", "query")),
+                wire("w3", ("search", "out"), ("llm", "in")),
+                wire("w4", ("trigger", "content"), ("llm", "prompt")),
+                wire("w7", ("search", "text"), ("llm", "system")),
+                wire("w5", ("llm", "out"), ("reply", "in")),
+                wire("w6", ("llm", "text"), ("reply", "content")),
+            ];
+            spell
+        } else {
+            demo_spell()
+        };
+        self.detach_spell_history();
+        self.load_graph(graph);
+    }
+
+    pub fn request_restore_release(&mut self, version: u32) {
+        if self.is_running() {
+            return;
+        }
+        self.pending_restore_version = Some(version);
+    }
+
+    pub fn cancel_restore_release(&mut self) {
+        self.pending_restore_version = None;
+    }
+
+    pub fn confirm_restore_to_draft(&mut self) {
+        if self.is_running() {
+            return;
+        }
+        let Some(version) = self.pending_restore_version.take() else { return };
+        let graph = self
+            .store
+            .as_ref()
+            .and_then(|store| store.releases_of(&self.spell).ok())
+            .and_then(|list| list.into_iter().find(|r| r.version == version).map(|r| r.graph))
+            .or_else(|| self.release_graphs.get(&version).cloned());
+        if let Some(graph) = graph {
+            self.load_graph(graph);
+        }
+        self.active_release_version = self.live_release_matching_recipe();
+        self.canvas.release_badge = self.active_release_version.map(|version| format!("v{version}"));
+        self.dirty = true;
+        self.draft_status = Some(format!("Loaded v{version} into draft"));
+    }
+
+    pub fn selected_temperature(&self) -> Option<f64> {
+        let id = self.canvas.selection.as_ref()?;
+        let setting = self.configs.get(id).and_then(|c| c.get("temperature"))?;
+        match self.temperature_variable(setting) {
+            Some(index) => self.var_default_edits.get(index).and_then(|edit| edit.text.trim().parse::<f64>().ok()),
+            None => setting.as_f64(),
+        }
+    }
+
+    pub fn selected_temperature_source(&self) -> Option<String> {
+        let id = self.canvas.selection.as_ref()?;
+        let setting = self.configs.get(id)?.get("temperature")?;
+        self.temperature_variable(setting).map(|index| self.spell.variables[index].name.clone())
+    }
+
+    fn temperature_variable(&self, setting: &serde_json::Value) -> Option<usize> {
+        let name = magicklala_graph::bound_variable(setting)?;
+        self.spell.variables.iter().position(|variable| variable.name == name)
+    }
+
+    pub fn selected_provider(&self) -> String {
+        let Some(id) = self.canvas.selection.as_ref() else { return "openai".to_owned() };
+        self.configs.get(id).and_then(|c| c.get("provider")).and_then(serde_json::Value::as_str).filter(|s| !s.is_empty()).unwrap_or("openai").to_owned()
+    }
+
+    pub fn adjust_temperature(&mut self, delta: f64) {
+        if self.is_running() {
+            return;
+        }
+        let current = self.selected_temperature().unwrap_or(0.7);
+        let next = ((current + delta).clamp(0.0, 2.0) * 10.0).round() / 10.0;
+        self.discrete_edit = true;
+        let bound = self
+            .canvas
+            .selection
+            .as_ref()
+            .and_then(|id| self.configs.get(id))
+            .and_then(|c| c.get("temperature"))
+            .and_then(|setting| self.temperature_variable(setting));
+        if let Some(index) = bound {
+            if let Some(edit) = self.var_default_edits.get_mut(index) {
+                *edit = TextEdit::new(next.to_string());
+            }
+            self.sync_spell();
+            return;
+        }
+        if let Some(id) = self.canvas.selection.clone() {
+            let entry = self.configs.entry(id).or_insert_with(|| json!({}));
+            if !entry.is_object() {
+                *entry = json!({});
+            }
+            if let Some(map) = entry.as_object_mut() {
+                map.insert("temperature".to_owned(), serde_json::json!(next));
+            }
+        }
+        self.sync_spell();
+    }
+
+    pub fn clear_chat(&mut self) {
+        self.chat.clear();
     }
 
     pub fn spawn(&mut self, kind: &str) -> Option<NodeId> {
@@ -735,20 +1898,633 @@ impl StudioApp {
     }
 
     pub fn spawn_at(&mut self, kind: &str, screen: [f32; 2]) -> Option<NodeId> {
+        let wire_in = self.canvas.mode == WorkbenchMode::Cauldron;
+        self.place_ingredient(kind, screen, wire_in)
+    }
+
+    pub fn earlier_fitting_outputs(&self, node: &NodeId, socket: &str) -> Vec<SocketRef> {
+        let Some(to_ty) = self.canvas.card(node).and_then(|card| card.inputs.iter().find(|input| input.name == socket)).map(|input| input.ty) else {
+            return Vec::new();
+        };
+        if to_ty.is_flow() {
+            return Vec::new();
+        }
+        let mut earlier: Vec<NodeId> = Vec::new();
+        let mut frontier = vec![node.clone()];
+        while let Some(at) = frontier.pop() {
+            for wire in self.canvas.wires.iter().filter(|wire| wire.to_node == at) {
+                if &wire.from_node != node && !earlier.contains(&wire.from_node) {
+                    earlier.push(wire.from_node.clone());
+                    frontier.push(wire.from_node.clone());
+                }
+            }
+        }
+        let graph = self.brew_graph();
+        let is_flow =
+            |wire: &magicklala_graph::Wire| self.input_type(&SocketRef::new(wire.to_node.clone(), wire.to_socket.clone())).is_some_and(|ty| ty.is_flow());
+        let readers = flow_readers(&graph, node, &is_flow);
+        let mut ready: HashMap<NodeId, bool> = HashMap::new();
+        let mut fitting: Vec<(bool, bool, SocketRef)> = self
+            .canvas
+            .nodes
+            .iter()
+            .filter(|card| earlier.contains(&card.id) && !self.canvas.shelved.contains(&card.id))
+            .filter(|card| readers.is_empty() || self.source_ready(&graph, &card.id, &readers, &is_flow, &mut ready))
+            .flat_map(|card| {
+                card.outputs
+                    .iter()
+                    .filter(|output| !output.ty.is_flow() && to_ty.accepts(output.ty))
+                    .map(|output| (card.category != "events", output.ty != to_ty, SocketRef::new(card.id.clone(), output.name.clone())))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        fitting.sort_by_key(|(not_event, loose, _)| (*not_event, *loose));
+        fitting.into_iter().map(|(_, _, source)| source).collect()
+    }
+
+    fn source_ready(
+        &self,
+        graph: &SpellGraph,
+        source: &NodeId,
+        readers: &[NodeId],
+        is_flow: &dyn Fn(&magicklala_graph::Wire) -> bool,
+        ready: &mut HashMap<NodeId, bool>,
+    ) -> bool {
+        if let Some(known) = ready.get(source) {
+            return *known;
+        }
+        ready.insert(source.clone(), false);
+        let trigger = graph.node(source).is_some_and(|step| self.specs.iter().any(|spec| spec.kind == step.kind && spec.is_trigger));
+        let on_flow = graph.wires.iter().any(|wire| &wire.to_node == source && is_flow(wire));
+        let known = if trigger || on_flow {
+            readers.iter().all(|reader| ran_before(graph, reader, source, is_flow, &mut HashMap::new()))
+        } else {
+            let feeders: Vec<NodeId> = graph.wires.iter().filter(|wire| &wire.to_node == source && !is_flow(wire)).map(|wire| wire.from_node.clone()).collect();
+            feeders.iter().all(|from| self.source_ready(graph, from, readers, is_flow, ready))
+        };
+        ready.insert(source.clone(), known);
+        known
+    }
+
+    pub fn toggle_plug_menu(&mut self, node: &NodeId, socket: &str) {
+        let pick = (node.clone(), socket.to_owned());
+        self.plug_menu = if self.plug_menu.as_ref() == Some(&pick) { None } else { Some(pick) };
+    }
+
+    pub fn plug_input(&mut self, from: &SocketRef, to: &SocketRef) {
+        if self.is_running() {
+            return;
+        }
+        self.plug_menu = None;
+        let was_hexed = matches!(self.validation, ValidationState::Invalid(_));
+        let before = self.edit_snapshot(None);
+        match self.canvas.connect_sockets(from, to) {
+            Ok(_) => {
+                self.undo_stack.push(UndoEntry::Edit(Box::new(before)));
+                self.redo_stack.clear();
+                self.wire_error = None;
+                self.sync_spell();
+                if was_hexed {
+                    self.validate();
+                }
+            }
+            Err(error) => self.wire_error = Some(error.to_string()),
+        }
+    }
+
+    pub fn unplug_wire(&mut self, wire: &magicklala_graph::WireId) {
+        if self.is_running() || !self.canvas.wires.iter().any(|candidate| &candidate.id == wire) {
+            return;
+        }
+        let was_hexed = matches!(self.validation, ValidationState::Invalid(_));
+        self.undo_stack.push(UndoEntry::Edit(Box::new(self.edit_snapshot(None))));
+        self.redo_stack.clear();
+        let cut = self
+            .canvas
+            .wires
+            .iter()
+            .find(|candidate| &candidate.id == wire)
+            .map(|cut| (SocketRef::new(cut.from_node.clone(), cut.from_socket.clone()), SocketRef::new(cut.to_node.clone(), cut.to_socket.clone())));
+        if let Some(pair) = cut {
+            for (id, bridges) in &mut self.aside_bridges {
+                if let Some(index) = bridges.iter().position(|bridge| bridge == &pair) {
+                    bridges.remove(index);
+                    self.aside_refused.entry(id.clone()).or_default().push(pair.clone());
+                }
+            }
+            self.aside_bridges.retain(|_, bridges| !bridges.is_empty());
+        }
+        self.canvas.wires.retain(|candidate| &candidate.id != wire);
+        self.validation = ValidationState::Unchecked;
+        self.sync_spell();
+        if was_hexed {
+            self.validate();
+        }
+    }
+
+    fn place_ingredient(&mut self, kind: &str, screen: [f32; 2], wire_in: bool) -> Option<NodeId> {
+        if self.is_running() {
+            return None;
+        }
         let spec = self.specs.iter().find(|spec| spec.kind == kind)?.clone();
+        let mark = self.undo_stack.len();
+        self.undo_stack.push(UndoEntry::Edit(Box::new(self.edit_snapshot(None))));
+        self.undo_banner = Some(format!("Added {}", spec.title));
         let center = self.canvas.camera.screen_to_world(screen);
         let id = self.canvas.add_node_from_spec(&spec, center);
         self.track_config(id.clone(), kind, serde_json::Value::Null);
+        if editable_field(kind) == Some("name")
+            && let Some(first) = self.spell.variables.first()
+        {
+            self.prompts.insert(id.clone(), TextEdit::new(first.name.clone()));
+        }
+        if wire_in && kind != SUBGRAPH_KIND {
+            self.auto_wire_cauldron_ingredient(&id, &spec);
+            self.canvas.toss_count += 1;
+        } else if self.canvas.mode == WorkbenchMode::Cauldron {
+            self.canvas.shelve(&id);
+        }
+        let source = self
+            .canvas
+            .wires
+            .iter()
+            .find(|wire| wire.to_node == id && wire.ty.is_flow())
+            .or_else(|| self.canvas.wires.iter().find(|wire| wire.to_node == id))
+            .map(|wire| wire.from_node.clone());
+        let near = match source.and_then(|from| self.canvas.card(&from).map(|card| [card.position[0] + card.size[0] + 40.0, card.position[1]])) {
+            Some(after) => after,
+            None => self.canvas.card(&id).map(|card| card.position).unwrap_or(center),
+        };
+        let spot = self.canvas.free_spot(&id, near);
+        self.canvas.move_node(&id, spot);
         self.validation = ValidationState::Unchecked;
         self.sync_spell();
+        self.fold_undo_since(mark);
         Some(id)
+    }
+
+    fn fold_undo_since(&mut self, mark: usize) {
+        self.undo_stack.truncate(mark + 1);
+        self.undo_seen = self.undo_stack.len();
+    }
+
+    pub fn canvas_origin(&self) -> [f32; 2] {
+        [self.left_rail_width(), TOOLBAR_HEIGHT]
+    }
+
+    pub fn pantry_drag_point(&self) -> Option<[f32; 2]> {
+        let drag = self.pantry_drag.as_ref()?;
+        let origin = self.canvas_origin();
+        let local = [drag.at[0] - origin[0], drag.at[1] - origin[1]];
+        let size = self.canvas_size();
+        (local[0] >= 0.0 && local[1] >= 0.0 && local[0] <= size.0 && local[1] <= size.1).then_some(local)
+    }
+
+    pub fn pantry_drag_over_pot(&self) -> bool {
+        self.canvas.mode == WorkbenchMode::Cauldron
+            && self.pantry_drag_point().is_some_and(|point| magicklala_canvas::brew_plan(&self.canvas, self.canvas_size()).is_over_pot(point))
+    }
+
+    pub fn pantry_drag_move(&mut self, kind: &str, at: [f32; 2]) {
+        if self.is_running() {
+            self.pantry_drag = None;
+            return;
+        }
+        self.pantry_drag = Some(PantryDrag { kind: kind.to_owned(), at });
+        self.canvas.pot_hover = self.pantry_drag_over_pot();
+    }
+
+    pub fn pantry_drop(&mut self, cancelled: bool) -> Option<NodeId> {
+        if self.is_running() {
+            self.pantry_drag = None;
+            self.canvas.pot_hover = false;
+            return None;
+        }
+        let point = self.pantry_drag_point();
+        let over_pot = self.pantry_drag_over_pot();
+        let drag = self.pantry_drag.take()?;
+        self.canvas.pot_hover = false;
+        if cancelled {
+            return None;
+        }
+        let point = point?;
+        match self.canvas.mode {
+            WorkbenchMode::Cauldron => {
+                let view = self.canvas_size();
+                let count = self.canvas.nodes.len() as f32;
+                self.place_ingredient(&drag.kind, [view.0 * 0.5 - 100.0 + count * 12.0, view.1 * 0.62 + count * 8.0], over_pot)
+            }
+            WorkbenchMode::Grimoire => self.place_ingredient(&drag.kind, [point[0] - magicklala_canvas::CARD_WIDTH * 0.5, point[1] - 14.0], false),
+        }
+    }
+
+    pub fn toss(&mut self, toss: magicklala_canvas::Toss) {
+        if self.is_running() {
+            return;
+        }
+        match toss {
+            magicklala_canvas::Toss::Aside(id) => {
+                let shortcuts: Vec<(SocketRef, SocketRef)> = self.aside_bridges.values().flatten().cloned().collect();
+                let removed: Vec<(SocketRef, SocketRef)> = self
+                    .canvas
+                    .wires
+                    .iter()
+                    .filter(|wire| wire.from_node == id || wire.to_node == id)
+                    .map(|wire| {
+                        (SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()), SocketRef::new(wire.to_node.clone(), wire.to_socket.clone()))
+                    })
+                    .filter(|pair| !shortcuts.contains(pair))
+                    .collect();
+                self.order_wires();
+                for wire in &self.canvas.wires {
+                    let pair = (SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()), SocketRef::new(wire.to_node.clone(), wire.to_socket.clone()));
+                    if removed.contains(&pair) {
+                        let index = self.wire_ledger.iter().position(|known| known == &wire.id).unwrap_or(usize::MAX);
+                        let home = (pair, (wire.id.clone(), index));
+                        self.wire_homes.retain(|(known, _)| known != &home.0);
+                        self.wire_homes.push(home);
+                    }
+                }
+                if removed.is_empty() {
+                    let title = self.canvas.display_title(&id);
+                    self.canvas.set_aside(&id);
+                    self.rebuild_bridges();
+                    self.undo_stack.push(UndoEntry::Aside { id, wires: Vec::new(), bridges: Vec::new() });
+                    self.undo_banner = Some(format!("Set aside {title}"));
+                    self.validation = ValidationState::Unchecked;
+                    self.sync_spell();
+                    return;
+                }
+                self.canvas.set_aside(&id);
+                self.aside_wires.insert(id.clone(), removed.clone());
+                self.rebuild_bridges();
+                let title = self.canvas.display_title(&id);
+                let bridges = self.aside_bridges.get(&id).cloned().unwrap_or_default();
+                self.undo_banner = Some(self.aside_banner(&title, &bridges));
+                self.undo_stack.push(UndoEntry::Aside { id, wires: removed, bridges });
+            }
+            magicklala_canvas::Toss::IntoPot(id) => {
+                self.canvas.unshelve(&id);
+                let stash = self.aside_wires.remove(&id).unwrap_or_default();
+                let stale: Vec<(SocketRef, SocketRef)> = self.aside_bridges.drain().flat_map(|(_, wires)| wires).collect();
+                self.drop_bridges(&stale);
+                let (waiting, stash): (Vec<_>, Vec<_>) = stash.into_iter().partition(|(from, to)| {
+                    let other = if from.node == id { &to.node } else { &from.node };
+                    self.canvas.is_shelved(other)
+                });
+                for (from, to) in waiting {
+                    let other = if from.node == id { to.node.clone() } else { from.node.clone() };
+                    let parked = self.aside_wires.entry(other).or_default();
+                    if !parked.contains(&(from.clone(), to.clone())) {
+                        parked.push((from, to));
+                    }
+                }
+                let mut restored = 0;
+                for (from, to) in &stash {
+                    let flow = self
+                        .canvas
+                        .card(&to.node)
+                        .and_then(|card| card.inputs.iter().find(|socket| socket.name == to.socket))
+                        .is_some_and(|socket| socket.ty.is_flow());
+                    let open = (flow || !self.is_fed(&to.node, &to.socket)) && self.canvas.card(&from.node).is_some() && self.canvas.card(&to.node).is_some();
+                    if open && self.canvas.connect_sockets(from, to).is_ok() {
+                        restored += 1;
+                    }
+                }
+                let mut homed: Vec<((SocketRef, SocketRef), usize)> =
+                    stash.iter().filter_map(|pair| self.wire_home(pair).map(|(_, at)| (pair.clone(), at))).collect();
+                homed.sort_by_key(|(_, at)| *at);
+                for (pair, _) in homed {
+                    self.rehome_wire(&pair);
+                }
+                if restored == 0
+                    && let Some(kind) = self.canvas.card(&id).map(|card| card.kind.clone())
+                    && let Some(spec) = self.specs.iter().find(|spec| spec.kind == kind).cloned()
+                {
+                    self.auto_wire_cauldron_ingredient(&id, &spec);
+                }
+                self.rebuild_bridges();
+                self.canvas.toss_count += 1;
+            }
+        }
+        self.validation = ValidationState::Unchecked;
+        self.sync_spell();
+    }
+
+    fn spec_of(&self, node: &NodeId) -> Option<NodeSpec> {
+        let kind = &self.canvas.card(node)?.kind;
+        self.specs.iter().find(|spec| &spec.kind == kind).cloned()
+    }
+
+    fn flow_ancestors(&self, id: &NodeId) -> std::collections::HashSet<NodeId> {
+        let mut seen = std::collections::HashSet::new();
+        let mut queue = VecDeque::from([id.clone()]);
+        while let Some(node) = queue.pop_front() {
+            for wire in self.canvas.wires.iter().filter(|wire| wire.to_node == node && wire.ty.is_flow()) {
+                if seen.insert(wire.from_node.clone()) {
+                    queue.push_back(wire.from_node.clone());
+                }
+            }
+        }
+        seen
+    }
+
+    fn runs_on(&self, node: &NodeId, route: &std::collections::HashSet<NodeId>) -> bool {
+        self.runs_on_seen(node, route, &mut std::collections::HashSet::new())
+    }
+
+    fn runs_on_seen(&self, node: &NodeId, route: &std::collections::HashSet<NodeId>, seen: &mut std::collections::HashSet<NodeId>) -> bool {
+        if route.contains(node) {
+            return true;
+        }
+        if !seen.insert(node.clone()) {
+            return false;
+        }
+        let flowless = self.canvas.card(node).is_some_and(|card| card.inputs.iter().chain(card.outputs.iter()).all(|socket| !socket.ty.is_flow()));
+        flowless && self.canvas.wires.iter().filter(|wire| &wire.to_node == node).all(|wire| self.runs_on_seen(&wire.from_node, route, seen))
+    }
+
+    fn downstream_of(&self, id: &NodeId) -> std::collections::HashSet<NodeId> {
+        let mut seen = std::collections::HashSet::from([id.clone()]);
+        let mut queue = VecDeque::from([id.clone()]);
+        while let Some(node) = queue.pop_front() {
+            for wire in self.canvas.wires.iter().filter(|wire| wire.from_node == node) {
+                if seen.insert(wire.to_node.clone()) {
+                    queue.push_back(wire.to_node.clone());
+                }
+            }
+        }
+        seen
+    }
+
+    fn feeds(&self, node: &NodeId, socket: &str) -> bool {
+        self.canvas.wires.iter().any(|wire| &wire.from_node == node && wire.from_socket == socket)
+    }
+
+    fn is_fed(&self, node: &NodeId, socket: &str) -> bool {
+        self.canvas.wires.iter().any(|wire| &wire.to_node == node && wire.to_socket == socket)
+    }
+
+    fn connect(&mut self, from: (&NodeId, &str), to: (&NodeId, &str)) -> bool {
+        self.canvas.connect_sockets(&SocketRef::new(from.0.clone(), from.1.to_owned()), &SocketRef::new(to.0.clone(), to.1.to_owned())).is_ok()
+    }
+
+    fn feed_from(&mut self, sources: &[NodeId], target: &NodeId, socket: &str, ty: SocketType) -> bool {
+        let banned = self.downstream_of(target);
+        for exact in [true, false] {
+            for source in sources.iter().filter(|source| !banned.contains(*source)) {
+                let Some(card) = self.canvas.card(source) else { continue };
+                let outs: Vec<String> = card
+                    .outputs
+                    .iter()
+                    .filter(|out| !out.ty.is_flow() && if exact { out.ty == ty } else { out.ty != ty })
+                    .map(|out| out.name.clone())
+                    .collect();
+                for out in outs {
+                    if self.connect((source, &out), (target, socket)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn season_reply(&mut self, id: &NodeId, spec: &NodeSpec) -> bool {
+        let Some(out) = spec.outputs.iter().find(|socket| !socket.ty.is_flow()) else { return false };
+        let bottles: Vec<NodeId> =
+            self.canvas.nodes.iter().filter(|card| magicklala_canvas::brew::is_bottle(card) && &card.id != id).map(|card| card.id.clone()).collect();
+        for bottle in bottles {
+            let Some(bottle_spec) = self.spec_of(&bottle) else { continue };
+            let Some(words) = bottle_spec.inputs.iter().find(|input| input.required && !input.ty.is_flow()) else { continue };
+            let Some(feed) = self.canvas.wires.iter().find(|wire| wire.to_node == bottle && wire.to_socket == words.name).cloned() else { continue };
+            let Some(intake) = spec.inputs.iter().filter(|input| !input.ty.is_flow()).find(|input| input.ty == feed.ty || input.ty == SocketType::Any) else {
+                continue;
+            };
+            if !(out.ty == words.ty || words.ty == SocketType::Any) {
+                continue;
+            }
+            self.canvas.wires.retain(|wire| wire.id != feed.id);
+            let fed = self.connect((&feed.from_node, &feed.from_socket), (id, &intake.name));
+            let poured = self.connect((id, &out.name), (&bottle, &words.name));
+            if fed && poured {
+                return true;
+            }
+            let _ = self.canvas.connect_sockets(
+                &SocketRef::new(feed.from_node.clone(), feed.from_socket.clone()),
+                &SocketRef::new(feed.to_node.clone(), feed.to_socket.clone()),
+            );
+        }
+        false
+    }
+
+    fn auto_wire_cauldron_ingredient(&mut self, id: &NodeId, spec: &NodeSpec) {
+        let widened;
+        let spec = match spec.inputs.iter().position(|input| input.name == magicklala_graph::DYNAMIC_SOCKET) {
+            Some(open) => {
+                let mut wide = spec.clone();
+                wide.inputs[open].name = "content".to_owned();
+                wide.inputs[open].label = "content".to_owned();
+                wide.inputs[open].required = true;
+                if let Some(card) = self.canvas.nodes.iter_mut().find(|card| &card.id == id) {
+                    card.ensure_socket("content", wide.inputs[open].ty, false);
+                }
+                widened = wide;
+                &widened
+            }
+            None => spec,
+        };
+        let my_flow_in_of = |spec: &NodeSpec| spec.inputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone());
+        let my_flow_out_of = |spec: &NodeSpec| spec.outputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone());
+        let mut without = self.canvas.clone();
+        without.nodes.retain(|card| &card.id != id);
+        without.wires.retain(|wire| &wire.from_node != id && &wire.to_node != id);
+        let in_pot = magicklala_canvas::brewing_nodes(&without);
+        let waiting: Vec<NodeId> = self
+            .canvas
+            .nodes
+            .iter()
+            .filter(|card| &card.id != id && !self.aside_wires.contains_key(&card.id))
+            .filter(|card| card.inputs.iter().chain(card.outputs.iter()).all(|socket| !socket.ty.is_flow()))
+            .filter(|card| self.canvas.wires.iter().any(|wire| wire.to_node == card.id) && !self.canvas.wires.iter().any(|wire| wire.from_node == card.id))
+            .map(|card| card.id.clone())
+            .collect();
+        let order: Vec<NodeId> = magicklala_canvas::recipe_order(&self.canvas)
+            .into_iter()
+            .filter(|node| node != id)
+            .filter(|node| !self.canvas.is_shelved(node))
+            .filter(|node| {
+                in_pot.contains(node) || waiting.contains(node) || self.canvas.card(node).is_some_and(|card| card.category.eq_ignore_ascii_case("events"))
+            })
+            .collect();
+        if my_flow_in_of(spec).is_none() && my_flow_out_of(spec).is_none() && !spec.is_trigger && self.season_reply(id, spec) {
+            return;
+        }
+        let bottle = |app: &Self, node: &NodeId| app.canvas.card(node).is_some_and(magicklala_canvas::brew::is_bottle);
+        let flow_out_of =
+            |app: &Self, node: &NodeId| app.canvas.card(node).and_then(|card| card.outputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone()));
+        let flow_in_of = |app: &Self, node: &NodeId| app.canvas.card(node).and_then(|card| card.inputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone()));
+        let free_flow_out_of = |app: &Self, node: &NodeId| {
+            app.canvas.card(node).and_then(|card| card.outputs.iter().find(|s| s.ty.is_flow() && !app.feeds(node, &s.name)).map(|s| s.name.clone()))
+        };
+        let my_flow_in = spec.inputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone());
+        let my_flow_out = spec.outputs.iter().find(|s| s.ty.is_flow()).map(|s| s.name.clone());
+        let mut sources: Vec<NodeId> = Vec::new();
+
+        if spec.is_trigger {
+            if let Some(out) = &my_flow_out {
+                let head = order.iter().find(|node| flow_in_of(self, node).is_some_and(|input| !self.is_fed(node, &input))).cloned();
+                if let Some(head) = head {
+                    let input = flow_in_of(self, &head).unwrap_or_default();
+                    self.connect((id, out), (&head, &input));
+                    let wanted: Vec<(String, SocketType)> = self
+                        .spec_of(&head)
+                        .map(|spec| spec.inputs.iter().filter(|s| s.required && !s.ty.is_flow()).map(|s| (s.name.clone(), s.ty)).collect())
+                        .unwrap_or_default();
+                    for (name, ty) in wanted {
+                        if !self.is_fed(&head, &name) {
+                            self.feed_from(std::slice::from_ref(id), &head, &name, ty);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        if let Some(input) = &my_flow_in {
+            let free_tail = order.iter().rev().filter(|node| !bottle(self, node)).find(|node| free_flow_out_of(self, node).is_some()).cloned();
+            let before_bottle = order.iter().rev().find_map(|node| {
+                let out = flow_out_of(self, node)?;
+                self.canvas
+                    .wires
+                    .iter()
+                    .find(|wire| &wire.from_node == node && wire.from_socket == out && bottle(self, &wire.to_node))
+                    .map(|wire| (node.clone(), wire.id.clone(), wire.to_node.clone(), wire.to_socket.clone()))
+            });
+            let splice = before_bottle.filter(|_| !bottle(self, id) && my_flow_out.is_some());
+            match (free_tail.filter(|_| splice.is_none()), splice) {
+                (Some(tail), _) => {
+                    let out = free_flow_out_of(self, &tail).unwrap_or_default();
+                    if self.connect((&tail, &out), (id, input)) {
+                        sources.push(tail);
+                    }
+                }
+                (None, Some((prev, wire, next, next_in))) => {
+                    let out = flow_out_of(self, &prev).unwrap_or_default();
+                    self.canvas.wires.retain(|candidate| candidate.id != wire);
+                    if self.connect((&prev, &out), (id, input)) {
+                        sources.push(prev.clone());
+                    }
+                    let mine = my_flow_out.clone().unwrap_or_default();
+                    self.connect((id, &mine), (&next, &next_in));
+                    let makes_content = spec.category.eq_ignore_ascii_case("ai") || spec.category.eq_ignore_ascii_case("text");
+                    let reply_words = self
+                        .spec_of(&next)
+                        .and_then(|bottle| bottle.inputs.iter().find(|input| input.required && !input.ty.is_flow()).map(|input| input.name.clone()));
+                    let handed: Vec<(WireModel, String)> = self
+                        .canvas
+                        .wires
+                        .iter()
+                        .filter(|wire| makes_content && wire.from_node == prev && wire.to_node == next && !wire.ty.is_flow())
+                        .filter(|wire| reply_words.as_deref() == Some(wire.to_socket.as_str()))
+                        .filter_map(|wire| spec.outputs.iter().find(|out| out.ty == wire.ty).map(|out| (wire.clone(), out.name.clone())))
+                        .collect();
+                    for (wire, out) in handed {
+                        self.canvas.wires.retain(|candidate| candidate.id != wire.id);
+                        if !self.connect((id, &out), (&next, &wire.to_socket)) {
+                            let _ = self.canvas.connect_sockets(
+                                &SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()),
+                                &SocketRef::new(wire.to_node.clone(), wire.to_socket.clone()),
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    let any = order.iter().rev().filter(|node| !bottle(self, node)).find(|node| flow_out_of(self, node).is_some()).cloned();
+                    if let Some(prev) = any {
+                        let out = flow_out_of(self, &prev).unwrap_or_default();
+                        if self.connect((&prev, &out), (id, input)) {
+                            sources.push(prev);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(out) = &my_flow_out
+            && !bottle(self, id)
+            && !self.feeds(id, out)
+            && let Some(next) = order.iter().find(|node| bottle(self, node) && flow_in_of(self, node).is_some_and(|input| !self.is_fed(node, &input))).cloned()
+        {
+            let input = flow_in_of(self, &next).unwrap_or_default();
+            self.connect((id, out), (&next, &input));
+        }
+
+        let rest: Vec<NodeId> = order.iter().rev().filter(|node| !sources.contains(node) && !waiting.contains(node)).cloned().collect();
+        let mut fed_first: Vec<NodeId> = waiting.iter().rev().cloned().collect();
+        fed_first.extend(sources);
+        sources = fed_first;
+        sources.extend(rest);
+        let route = self.flow_ancestors(id);
+        if !route.is_empty() {
+            sources.retain(|node| self.runs_on(node, &route));
+        }
+        for socket in spec.inputs.iter().filter(|s| s.required && !s.ty.is_flow()) {
+            if !self.is_fed(id, &socket.name) {
+                self.feed_from(&sources, id, &socket.name, socket.ty);
+            }
+        }
+        if bottle(self, id) && spec.inputs.iter().any(|s| s.required && !s.ty.is_flow() && !self.is_fed(id, &s.name)) {
+            self.toss(magicklala_canvas::Toss::Aside(id.clone()));
+        }
+
+        if my_flow_in.is_none() && my_flow_out.is_none() {
+            let downstream = self.downstream_of(id);
+            let consumers: Vec<NodeId> = order.iter().filter(|node| !downstream.contains(*node) && flow_in_of(self, node).is_some()).cloned().collect();
+            let outs: Vec<(String, SocketType)> = spec.outputs.iter().filter(|s| !s.ty.is_flow()).map(|s| (s.name.clone(), s.ty)).collect();
+            'outer: for required_first in [true, false] {
+                for exact in [true, false] {
+                    for consumer in consumers.iter().rev() {
+                        let open: Vec<(String, SocketType)> = self
+                            .spec_of(consumer)
+                            .map(|spec| {
+                                spec.inputs
+                                    .iter()
+                                    .filter(|s| !s.ty.is_flow() && s.required == required_first && !self.is_fed(consumer, &s.name))
+                                    .map(|s| (s.name.clone(), s.ty))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        for (input, in_ty) in open {
+                            for (out, out_ty) in &outs {
+                                if (*out_ty == in_ty) == exact && self.connect((id, out), (consumer, &input)) {
+                                    break 'outer;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn track_config(&mut self, id: NodeId, kind: &str, config: serde_json::Value) {
         if let Some(field) = editable_field(kind) {
             let text = match config.get(field) {
                 Some(serde_json::Value::String(text)) => text.clone(),
+                Some(serde_json::Value::Array(items)) if listed_field(kind) => {
+                    listed_text(&items.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>())
+                }
                 Some(other) => other.to_string(),
+                None if listed_field(kind) => self
+                    .specs
+                    .iter()
+                    .find(|spec| spec.kind == kind)
+                    .and_then(|spec| spec.config.iter().find(|entry| entry.key == field))
+                    .and_then(|entry| entry.default.as_ref())
+                    .and_then(serde_json::Value::as_array)
+                    .map(|items| listed_text(&items.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>()))
+                    .unwrap_or_default(),
                 None if config.is_null() => default_prompt(kind),
                 None => String::new(),
             };
@@ -762,7 +2538,24 @@ impl StudioApp {
     }
 
     pub fn node_config(&self, id: &NodeId, kind: &str) -> serde_json::Value {
-        let config = self.prompted_config(id, kind);
+        let mut config = self.prompted_config(id, kind);
+        if kind == "code/rhai_script" && config.get("inputs").is_none() {
+            let fed: Vec<serde_json::Value> = self
+                .canvas
+                .wires
+                .iter()
+                .filter(|wire| &wire.to_node == id && !wire.ty.is_flow())
+                .map(|wire| serde_json::Value::String(wire.to_socket.clone()))
+                .collect();
+            if !fed.is_empty() {
+                if !config.is_object() {
+                    config = json!({});
+                }
+                if let Some(map) = config.as_object_mut() {
+                    map.insert("inputs".to_owned(), serde_json::Value::Array(fed));
+                }
+            }
+        }
         match self.versions.get(id).filter(|_| kind == SUBGRAPH_KIND) {
             Some(edit) => with_release_version(config, &edit.text),
             None => config,
@@ -773,7 +2566,31 @@ impl StudioApp {
         let mut config = self.configs.get(id).cloned().unwrap_or(serde_json::Value::Null);
         let (Some(field), Some(edit)) = (editable_field(kind), self.prompts.get(id)) else { return config };
         let present = config.get(field).is_some();
-        if !present && edit.text.is_empty() {
+        if edit.text.trim().is_empty() {
+            let cleared_list = listed_field(kind) && (present || self.listed_default(kind, field) != json!([]));
+            if cleared_list {
+                if !config.is_object() {
+                    config = json!({});
+                }
+                if let Some(map) = config.as_object_mut() {
+                    map.insert(field.to_owned(), json!([]));
+                }
+            } else if let Some(map) = config.as_object_mut().filter(|_| present) {
+                map.remove(field);
+            }
+            return config;
+        }
+        if listed_field(kind) {
+            let names = listed_names(&edit.text);
+            if !present && json!(names) == self.listed_default(kind, field) {
+                return config;
+            }
+            if !config.is_object() {
+                config = json!({});
+            }
+            if let Some(map) = config.as_object_mut() {
+                map.insert(field.to_owned(), json!(names));
+            }
             return config;
         }
         if present
@@ -791,14 +2608,296 @@ impl StudioApp {
         config
     }
 
+    fn card_notes(&self) -> BTreeMap<NodeId, String> {
+        self.canvas
+            .nodes
+            .iter()
+            .filter_map(|card| {
+                let spec = self.specs.iter().find(|spec| spec.kind == card.kind);
+                card_note(&card.kind, &self.node_config(&card.id, &card.kind), spec, &self.spell.variables).map(|note| (card.id.clone(), note))
+            })
+            .collect()
+    }
+
+    fn sync_listed_outputs(&mut self) {
+        let listed: Vec<(NodeId, Vec<String>, SocketType, Vec<String>)> = self
+            .canvas
+            .nodes
+            .iter()
+            .filter(|card| listed_field(&card.kind))
+            .filter_map(|card| {
+                let spec = self.specs.iter().find(|spec| spec.kind == card.kind)?;
+                let open = spec.outputs.iter().find(|socket| socket.name == magicklala_graph::DYNAMIC_SOCKET)?;
+                let field = editable_field(&card.kind)?;
+                let configured = self.prompted_config(&card.id, &card.kind);
+                let listed = configured.get(field).cloned().unwrap_or_else(|| self.listed_default(&card.kind, field));
+                let names = listed.as_array().map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect()).unwrap_or_default();
+                Some((card.id.clone(), names, open.ty, fixed_outputs(spec)))
+            })
+            .collect();
+        for (id, names, ty, fixed) in listed {
+            self.canvas.list_outputs(&id, &names, ty, &fixed);
+        }
+    }
+
+    fn carry_rename(&mut self, old: &str, new: &str) {
+        let renamed = format!("{{{{{new}}}}}");
+        let kinds: BTreeMap<NodeId, String> = self.canvas.nodes.iter().map(|card| (card.id.clone(), card.kind.clone())).collect();
+        let aside = self.aside_wires.values().flatten().map(|(_, to)| to.clone()).filter(|to| self.input_type(to).is_some_and(|ty| !ty.is_flow()));
+        let fed: std::collections::HashSet<NodeId> = self
+            .canvas
+            .wires
+            .iter()
+            .filter(|wire| !wire.ty.is_flow())
+            .map(|wire| SocketRef::new(wire.to_node.clone(), wire.to_socket.clone()))
+            .chain(aside)
+            .filter(|to| to.socket == old)
+            .map(|to| to.node)
+            .collect();
+        let binds = |kind: &str, key: &str| self.specs.iter().any(|spec| spec.kind == kind && spec.binds_setting(key));
+        let binding: Vec<(NodeId, String)> = self
+            .configs
+            .iter()
+            .flat_map(|(id, config)| {
+                let kind = kinds.get(id).cloned().unwrap_or_default();
+                config
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter(|(key, value)| binds(&kind, key) && magicklala_graph::bound_variable(value) == Some(old))
+                    .map(|(key, _)| (id.clone(), key.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (id, key) in binding {
+            if let Some(value) = self.configs.get_mut(&id).and_then(|config| config.get_mut(&key)) {
+                *value = serde_json::Value::String(renamed.clone());
+            }
+        }
+        for (id, config) in self.configs.iter_mut() {
+            let kind = kinds.get(id).map_or("", String::as_str);
+            let Some(settings) = config.as_object_mut() else { continue };
+            if kind.starts_with("var/") {
+                if let Some(name) = settings.get_mut("name").filter(|name| name.as_str().is_some_and(|name| name.trim() == old)) {
+                    *name = serde_json::Value::String(new.to_owned());
+                }
+            } else if kind == "text/template"
+                && !fed.contains(id)
+                && let Some(template) = settings.get_mut("template")
+                && let Some(text) = template.as_str().filter(|text| template_roots(text).iter().any(|root| root == old))
+            {
+                *template = serde_json::Value::String(magicklala_nodes::rename_template_root(text, old, new));
+            }
+        }
+        for (id, edit) in self.prompts.iter_mut() {
+            let kind = kinds.get(id).map_or("", String::as_str);
+            if kind.starts_with("var/") && edit.text.trim() == old {
+                *edit = TextEdit::new(new);
+            } else if kind == "text/template" && !fed.contains(id) && template_roots(&edit.text).iter().any(|root| root == old) {
+                *edit = TextEdit::new(magicklala_nodes::rename_template_root(&edit.text, old, new));
+            }
+        }
+    }
+
+    fn where_they_stand(&self, mut nodes: Vec<NodeCardModel>) -> Vec<NodeCardModel> {
+        for card in &mut nodes {
+            if let Some(now) = self.canvas.card(&card.id) {
+                card.position = now.position;
+            }
+        }
+        nodes
+    }
+
+    fn edit_snapshot(&self, typing: Option<String>) -> EditSnapshot {
+        EditSnapshot {
+            nodes: self.canvas.nodes.clone(),
+            wires: self.canvas.wires.clone(),
+            shelved: self.canvas.shelved.clone(),
+            configs: self.configs.clone(),
+            prompts: self.prompts.clone(),
+            versions: self.versions.clone(),
+            subgraphs: self.spell.subgraphs.clone(),
+            variables: self.spell.variables.clone(),
+            var_name_edits: self.var_name_edits.clone(),
+            var_default_edits: self.var_default_edits.clone(),
+            aside_wires: self.aside_wires.clone(),
+            aside_bridges: self.aside_bridges.clone(),
+            aside_refused: self.aside_refused.clone(),
+            wire_homes: self.wire_homes.clone(),
+            wire_ledger: self.wire_ledger.clone(),
+            typing,
+        }
+    }
+
+    fn typed_node(&self, nodes: &[NodeInstance], wires: &[Wire], subgraphs: &[SubgraphRef], shelf: &[magicklala_graph::ShelfEntry]) -> Option<NodeId> {
+        if wires != self.spell.wires.as_slice()
+            || subgraphs != self.spell.subgraphs.as_slice()
+            || shelf != self.spell.shelf.as_slice()
+            || nodes.len() != self.spell.nodes.len()
+        {
+            return None;
+        }
+        let mut changed = nodes.iter().zip(&self.spell.nodes).filter(|(now, before)| now != before);
+        let (now, before) = changed.next()?;
+        (changed.next().is_none() && now.id == before.id && now.kind == before.kind && now.position == before.position).then(|| now.id.clone())
+    }
+
     pub fn sync_spell(&mut self) {
         self.sync_edits();
     }
 
+    fn wire_refusal(error: &magicklala_canvas::ConnectError) -> String {
+        use magicklala_canvas::ConnectError;
+        match error {
+            ConnectError::FlowMismatch { .. } => "Wire refused: a flow socket and a value socket cannot meet".to_owned(),
+            ConnectError::TypeMismatch { from, to } => format!("Wire refused: {from:?} does not fit {to:?}"),
+            ConnectError::UnknownSocket { socket, .. } => format!("Wire refused: no socket {socket}"),
+            ConnectError::SameNode => "Wire refused: a step cannot wire into itself".to_owned(),
+            ConnectError::Duplicate => "Wire refused: that wire already exists".to_owned(),
+        }
+    }
+
     pub fn sync_edits(&mut self) -> bool {
-        let (nodes, wires, subgraphs) = self.rebuilt_parts();
-        if nodes == self.spell.nodes && wires == self.spell.wires && subgraphs == self.spell.subgraphs {
+        if self.is_running() {
             return false;
+        }
+        self.sync_listed_outputs();
+        self.order_wires();
+        self.canvas.notes = self.card_notes();
+        let refusal = self.canvas.last_connect_error.take().map(|error| Self::wire_refusal(&error));
+        if refusal.is_some() {
+            self.wire_error = refusal.clone();
+        }
+        if self.aside_wires.keys().chain(self.aside_bridges.keys()).chain(self.aside_refused.keys()).any(|id| !self.canvas.is_shelved(id)) {
+            self.rebuild_bridges();
+        }
+        let pulled: Vec<(NodeId, (SocketRef, SocketRef))> = self
+            .aside_bridges
+            .iter()
+            .flat_map(|(id, bridges)| bridges.iter().map(move |bridge| (id.clone(), bridge.clone())))
+            .filter(|(_, (from, to))| {
+                !self
+                    .canvas
+                    .wires
+                    .iter()
+                    .any(|wire| wire.from_node == from.node && wire.from_socket == from.socket && wire.to_node == to.node && wire.to_socket == to.socket)
+            })
+            .collect();
+        for (id, bridge) in pulled {
+            if let Some(bridges) = self.aside_bridges.get_mut(&id) {
+                bridges.retain(|kept| kept != &bridge);
+            }
+            self.aside_refused.entry(id).or_default().push(bridge);
+        }
+        self.aside_bridges.retain(|_, bridges| !bridges.is_empty());
+        let mut vars_changed = std::mem::take(&mut self.variables_touched);
+        let discrete = std::mem::take(&mut self.discrete_edit);
+        let variables_before = self.spell.variables.clone();
+        let mut renames: Vec<(String, String)> = Vec::new();
+        let mut taken: Vec<String> = self.spell.variables.iter().map(|variable| variable.name.clone()).collect();
+        taken.extend(self.canvas.wires.iter().filter(|wire| !wire.ty.is_flow()).map(|wire| wire.to_socket.clone()));
+        for (idx, var) in self.spell.variables.iter_mut().enumerate() {
+            if let Some(edit) = self.var_name_edits.get(idx) {
+                let next_name = edit.text.trim();
+                let free = magicklala_nodes::is_template_name(next_name) && !taken.iter().any(|name| name == next_name);
+                if free && next_name != var.name {
+                    renames.push((var.name.clone(), next_name.to_owned()));
+                    var.name = next_name.to_owned();
+                    vars_changed = true;
+                }
+            }
+            if let Some(edit) = self.var_default_edits.get(idx)
+                && edit.text.trim().is_empty()
+                && !matches!(var.ty, SocketType::String | SocketType::Any)
+                && var.default.is_some()
+            {
+                var.default = None;
+                vars_changed = true;
+            }
+            if let Some(edit) = self.var_default_edits.get(idx)
+                && edit.text != Self::format_value(var.default.as_ref())
+                && let Some(parsed) = Self::try_parse_value(&edit.text, var.ty)
+                && var.default.as_ref() != Some(&parsed)
+            {
+                var.default = Some(parsed);
+                vars_changed = true;
+            }
+        }
+        for (old, new) in renames {
+            self.carry_rename(&old, &new);
+        }
+        let edited_variable = (self.spell.variables.len() == variables_before.len())
+            .then(|| {
+                let mut changed =
+                    self.spell.variables.iter().zip(&variables_before).enumerate().filter(|(_, (now, before))| now != before).map(|(index, _)| index);
+                let first = changed.next()?;
+                changed.next().is_none().then(|| format!("variable:{first}"))
+            })
+            .flatten();
+        let problems = self.variable_errors();
+        let problems_changed = problems != self.var_problems;
+        self.var_problems = problems;
+        let (nodes, wires, subgraphs) = self.rebuilt_parts();
+        let shelf = self.shelf_entries();
+        if refusal.is_some() && !problems_changed && !vars_changed && wires == self.spell.wires && shelf == self.spell.shelf {
+            return true;
+        }
+        if !problems_changed
+            && !vars_changed
+            && nodes == self.spell.nodes
+            && wires == self.spell.wires
+            && subgraphs == self.spell.subgraphs
+            && shelf == self.spell.shelf
+        {
+            self.undo_seen = self.undo_stack.len();
+            if self.last_synced.is_none() {
+                self.last_synced = Some(Box::new(self.edit_snapshot(None)));
+            }
+            return false;
+        }
+        let shelf_changed = shelf != self.spell.shelf;
+        let unplaced = |list: &[NodeInstance]| list.iter().map(|node| (node.id.clone(), node.kind.clone(), node.config.clone())).collect::<Vec<_>>();
+        let recipe_changed = vars_changed
+            || problems_changed
+            || wires != self.spell.wires
+            || subgraphs != self.spell.subgraphs
+            || shelf_changed
+            || unplaced(&nodes) != unplaced(&self.spell.nodes);
+        if recipe_changed && !self.restoring {
+            self.redo_stack.clear();
+        }
+        if recipe_changed && !self.restoring && self.undo_stack.len() == self.undo_seen {
+            let typing = if discrete {
+                None
+            } else {
+                edited_variable.clone().or_else(|| self.typed_node(&nodes, &wires, &subgraphs, &shelf).map(|id| format!("node:{}", id.0)))
+            };
+            let same_typing = typing.is_some() && matches!(self.undo_stack.last(), Some(UndoEntry::Edit(kept)) if kept.typing == typing);
+            match self.last_synced.take() {
+                Some(_) if same_typing => {}
+                Some(mut before) => {
+                    before.typing = typing;
+                    self.undo_stack.push(UndoEntry::Edit(before));
+                }
+                None => self.undo_stack.clear(),
+            }
+            self.undo_banner = None;
+        }
+        self.undo_seen = self.undo_stack.len();
+        self.last_synced = Some(Box::new(self.edit_snapshot(None)));
+        self.spell.shelf = shelf;
+        if recipe_changed {
+            self.canvas.clear_run_marks();
+            self.canvas.last_brew = None;
+            self.canvas.brew_total_ms = None;
+            self.validation = ValidationState::Unchecked;
+            self.canvas.invalid_brew = false;
+            self.canvas.validated = false;
+            self.hex_findings.clear();
+            self.trace.retain(|line| line.kind != "RunRejected");
+            if !self.trace.is_empty() {
+                self.trace_stale = true;
+            }
         }
         self.spell.nodes = nodes;
         self.spell.wires = wires;
@@ -806,7 +2905,14 @@ impl StudioApp {
         self.draft_status = None;
         self.publish_status = None;
         self.store_error = None;
-        self.active_release_version = None;
+        self.wire_error = refusal;
+        self.active_release_version = if self.var_problems.is_empty() { self.live_release_matching_recipe() } else { None };
+        self.canvas.release_badge = self.active_release_version.map(|version| format!("v{version}"));
+        self.dirty = true;
+        self.canvas.spell_name = self.spell.name.clone();
+        self.canvas.validated = matches!(self.validation, ValidationState::Valid);
+        self.canvas.invalid_brew = matches!(self.validation, ValidationState::Invalid(_));
+        self.canvas.running_brew = self.is_running();
         true
     }
 
@@ -846,11 +2952,11 @@ impl StudioApp {
     }
 
     pub fn subgraph_resolver(&self) -> Result<StudioSubgraphResolver, StudioError> {
-        StudioSubgraphResolver::load(self.store.as_ref(), &self.spell)
+        StudioSubgraphResolver::load(self.store.as_ref(), &self.brew_graph())
     }
 
     fn release_version_errors(&self) -> Vec<String> {
-        self.spell
+        self.brew_graph()
             .nodes
             .iter()
             .filter(|node| node.kind == SUBGRAPH_KIND)
@@ -858,41 +2964,662 @@ impl StudioApp {
             .collect()
     }
 
-    fn check_spell(&self) -> Result<(), Vec<String>> {
-        self.check_spell_with_root(self.root_subgraph())
+    pub fn brew_graph(&self) -> SpellGraph {
+        recipe_from(&self.spell, &self.canvas, &self.specs)
     }
 
-    fn check_spell_with_root(&self, root: SubgraphKey) -> Result<(), Vec<String>> {
-        let version_errors = self.release_version_errors();
-        if !version_errors.is_empty() {
-            return Err(version_errors);
+    fn wire_home(&self, pair: &(SocketRef, SocketRef)) -> Option<(WireId, usize)> {
+        self.wire_homes.iter().find(|(known, _)| known == pair).map(|(_, home)| home.clone())
+    }
+
+    fn homed_wires(&self, pairs: &[(SocketRef, SocketRef)]) -> Vec<Wire> {
+        let mut wires = stored_wires("parked", pairs);
+        for (wire, pair) in wires.iter_mut().zip(pairs) {
+            if let Some((id, _)) = self.wire_home(pair) {
+                wire.id = id;
+            }
         }
+        wires
+    }
+
+    fn rehome_wire(&mut self, pair: &(SocketRef, SocketRef)) {
+        let Some((id, _)) = self.wire_home(pair) else { return };
+        self.wire_homes.retain(|(known, _)| known != pair);
+        let (from, to) = pair;
+        if let Some(wire) = self
+            .canvas
+            .wires
+            .iter_mut()
+            .find(|wire| wire.from_node == from.node && wire.from_socket == from.socket && wire.to_node == to.node && wire.to_socket == to.socket)
+        {
+            wire.id = id;
+        }
+        self.order_wires();
+    }
+
+    fn seed_wire_ledger(&mut self) {
+        let mut ledger: Vec<WireId> = self.canvas.wires.iter().map(|wire| wire.id.clone()).collect();
+        let mut homes: Vec<(WireId, usize)> = self.wire_homes.iter().map(|(_, home)| home.clone()).collect();
+        homes.sort_by_key(|(_, at)| *at);
+        for (id, at) in homes {
+            if !ledger.contains(&id) {
+                let at = at.min(ledger.len());
+                ledger.insert(at, id);
+            }
+        }
+        self.wire_ledger = ledger;
+    }
+
+    fn order_wires(&mut self) {
+        for wire in &self.canvas.wires {
+            if !self.wire_ledger.contains(&wire.id) {
+                self.wire_ledger.push(wire.id.clone());
+            }
+        }
+        let ledger = &self.wire_ledger;
+        self.canvas.wires.sort_by_key(|wire| ledger.iter().position(|known| known == &wire.id));
+    }
+
+    fn shelf_entries(&self) -> Vec<magicklala_graph::ShelfEntry> {
+        self.canvas
+            .nodes
+            .iter()
+            .filter(|card| self.canvas.is_shelved(&card.id))
+            .map(|card| magicklala_graph::ShelfEntry {
+                node: card.id.clone(),
+                parked: self.aside_wires.get(&card.id).map(|wires| self.homed_wires(wires)).unwrap_or_default(),
+                parked_at: self
+                    .aside_wires
+                    .get(&card.id)
+                    .map(|wires| wires.iter().map(|pair| self.wire_home(pair).map_or(u32::MAX, |(_, at)| at as u32)).collect())
+                    .unwrap_or_default(),
+                bridges: self.aside_bridges.get(&card.id).map(|wires| stored_wires("bridge", wires)).unwrap_or_default(),
+                refused: self.aside_refused.get(&card.id).map(|wires| stored_wires("refused", wires)).unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    fn bridge_around(&mut self, id: &NodeId) -> Vec<(SocketRef, SocketRef)> {
+        let sources: Vec<SocketRef> = self
+            .canvas
+            .wires
+            .iter()
+            .filter(|wire| &wire.to_node == id && wire.ty.is_flow())
+            .map(|wire| SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()))
+            .collect();
+        let targets: Vec<SocketRef> = self
+            .canvas
+            .wires
+            .iter()
+            .filter(|wire| &wire.from_node == id && wire.ty.is_flow())
+            .map(|wire| SocketRef::new(wire.to_node.clone(), wire.to_socket.clone()))
+            .collect();
+        let value_sources: Vec<(SocketRef, SocketType)> = self
+            .canvas
+            .wires
+            .iter()
+            .filter(|wire| &wire.to_node == id && !wire.ty.is_flow())
+            .map(|wire| (SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()), wire.ty))
+            .collect();
+        let value_targets: Vec<(SocketRef, SocketType)> = self
+            .canvas
+            .wires
+            .iter()
+            .filter(|wire| &wire.from_node == id && !wire.ty.is_flow())
+            .map(|wire| {
+                let want = self
+                    .canvas
+                    .card(&wire.to_node)
+                    .and_then(|card| card.inputs.iter().find(|socket| socket.name == wire.to_socket))
+                    .map_or(wire.ty, |socket| socket.ty);
+                (SocketRef::new(wire.to_node.clone(), wire.to_socket.clone()), want)
+            })
+            .collect();
+        self.canvas.set_aside(id);
+        let mut bridges = Vec::new();
+        let straight = sources.len() == 1 && targets.len() == 1;
+        for target in targets.iter().filter(|_| straight) {
+            if self.is_fed(&target.node, &target.socket) {
+                continue;
+            }
+            for source in &sources {
+                if self.canvas.connect_sockets(source, target).is_ok() {
+                    bridges.push((source.clone(), target.clone()));
+                }
+            }
+        }
+        for (target, want) in &value_targets {
+            if self.is_fed(&target.node, &target.socket) {
+                continue;
+            }
+            let mut ranked: Vec<&(SocketRef, SocketType)> = value_sources.iter().filter(|(_, ty)| want.accepts(*ty)).collect();
+            ranked.sort_by_key(|(_, ty)| ty != want);
+            for (source, _) in ranked {
+                if self.canvas.connect_sockets(source, target).is_ok() {
+                    bridges.push((source.clone(), target.clone()));
+                    break;
+                }
+            }
+        }
+        bridges
+    }
+
+    fn rebuild_bridges(&mut self) {
+        let stale: Vec<(SocketRef, SocketRef)> = self.aside_bridges.drain().flat_map(|(_, wires)| wires).collect();
+        self.drop_bridges(&stale);
+        let canvas = &self.canvas;
+        self.aside_wires.retain(|id, _| canvas.is_shelved(id));
+        self.aside_refused.retain(|id, _| canvas.is_shelved(id));
+        let mut known: Vec<(SocketRef, SocketRef)> = self
+            .canvas
+            .wires
+            .iter()
+            .map(|wire| (SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()), SocketRef::new(wire.to_node.clone(), wire.to_socket.clone())))
+            .collect();
+        for pair in self.aside_wires.values().flatten() {
+            if !known.contains(pair) {
+                known.push(pair.clone());
+            }
+        }
+        let shelved: Vec<NodeId> = self.canvas.nodes.iter().filter(|card| self.canvas.is_shelved(&card.id)).map(|card| card.id.clone()).collect();
+        for id in shelved {
+            let bridges = self.bypass_for(&id, &known);
+            if !bridges.is_empty() {
+                self.aside_bridges.insert(id, bridges);
+            }
+        }
+    }
+
+    fn output_type(&self, socket: &SocketRef) -> Option<SocketType> {
+        self.canvas.card(&socket.node)?.outputs.iter().find(|output| output.name == socket.socket).map(|output| output.ty)
+    }
+
+    fn input_type(&self, socket: &SocketRef) -> Option<SocketType> {
+        self.canvas.card(&socket.node)?.inputs.iter().find(|input| input.name == socket.socket).map(|input| input.ty)
+    }
+
+    fn reach_past_shelf(&self, id: &NodeId, known: &[(SocketRef, SocketRef)], flow: bool, upstream: bool) -> Vec<SocketRef> {
+        let mut found = Vec::new();
+        let mut seen = vec![id.clone()];
+        let mut queue = VecDeque::from([id.clone()]);
+        while let Some(node) = queue.pop_front() {
+            for (from, to) in known {
+                let (near, far) = if upstream { (to, from) } else { (from, to) };
+                if near.node != node || self.output_type(from).is_some_and(|ty| ty.is_flow()) != flow {
+                    continue;
+                }
+                if node != *id && !flow {
+                    continue;
+                }
+                if self.canvas.is_shelved(&far.node) {
+                    if !seen.contains(&far.node) {
+                        seen.push(far.node.clone());
+                        queue.push_back(far.node.clone());
+                    }
+                } else if !found.contains(far) {
+                    found.push(far.clone());
+                }
+            }
+        }
+        found
+    }
+
+    fn bypass_for(&mut self, id: &NodeId, known: &[(SocketRef, SocketRef)]) -> Vec<(SocketRef, SocketRef)> {
+        let mut bridges = Vec::new();
+        let refused: Vec<(SocketRef, SocketRef)> = self.aside_refused.values().flatten().cloned().collect();
+        let welcome = |source: &SocketRef, target: &SocketRef| !refused.iter().any(|(from, to)| from == source && to == target);
+        let sources = self.reach_past_shelf(id, known, true, true);
+        let targets = self.reach_past_shelf(id, known, true, false);
+        if let ([source], [target]) = (sources.as_slice(), targets.as_slice())
+            && !self.is_fed(&target.node, &target.socket)
+            && welcome(source, target)
+            && self.canvas.connect_sockets(source, target).is_ok()
+        {
+            bridges.push((source.clone(), target.clone()));
+        }
+        let value_sources: Vec<(SocketRef, SocketType)> =
+            self.reach_past_shelf(id, known, false, true).into_iter().filter_map(|source| self.output_type(&source).map(|ty| (source, ty))).collect();
+        for target in self.reach_past_shelf(id, known, false, false) {
+            if self.is_fed(&target.node, &target.socket) {
+                continue;
+            }
+            let Some(want) = self.input_type(&target) else { continue };
+            let mut ranked: Vec<&(SocketRef, SocketType)> = value_sources.iter().filter(|(_, ty)| want.accepts(*ty)).collect();
+            ranked.sort_by_key(|(_, ty)| *ty != want);
+            for (source, _) in ranked.into_iter().filter(|(source, _)| welcome(source, &target)) {
+                if self.canvas.connect_sockets(source, &target).is_ok() {
+                    bridges.push((source.clone(), target.clone()));
+                    break;
+                }
+            }
+        }
+        bridges
+    }
+
+    fn aside_banner(&self, title: &str, bridges: &[(SocketRef, SocketRef)]) -> String {
+        let reroutes: Vec<String> = bridges
+            .iter()
+            .filter(|(_, to)| self.input_type(to).is_some_and(|ty| !ty.is_flow()))
+            .map(|(from, to)| {
+                format!("{} {} now reads {} · {}", self.canvas.display_title(&to.node), to.socket, self.canvas.display_title(&from.node), from.socket)
+            })
+            .collect();
+        if reroutes.is_empty() { format!("Set aside {title}") } else { format!("Set aside {title} · {}", reroutes.join("; ")) }
+    }
+
+    pub fn is_stand_in(&self, node: &NodeId, socket: &str) -> bool {
+        self.aside_bridges.values().flatten().any(|(_, to)| &to.node == node && to.socket == socket)
+    }
+
+    fn drop_bridges(&mut self, bridges: &[(SocketRef, SocketRef)]) {
+        self.canvas.wires.retain(|wire| {
+            !bridges
+                .iter()
+                .any(|(from, to)| wire.from_node == from.node && wire.from_socket == from.socket && wire.to_node == to.node && wire.to_socket == to.socket)
+        });
+    }
+
+    fn hex_findings_for_spell(&self) -> Vec<HexFinding> {
+        self.hex_findings_for_root(self.root_subgraph())
+    }
+
+    fn hex_findings_for_root(&self, root: SubgraphKey) -> Vec<HexFinding> {
+        let variable_findings: Vec<HexFinding> = self
+            .variable_errors()
+            .into_iter()
+            .map(|message| HexFinding { node: None, socket: None, readable: message.clone(), message, mistyped: false })
+            .collect();
+        let version_findings: Vec<HexFinding> = self
+            .brew_graph()
+            .nodes
+            .iter()
+            .filter(|node| node.kind == SUBGRAPH_KIND)
+            .filter_map(|node| {
+                configured_release_version(node).err().map(|error| {
+                    let message = format!("node {:?}: {error}", node.id.0);
+                    HexFinding { node: Some(node.id.clone()), socket: None, readable: message.clone(), message, mistyped: false }
+                })
+            })
+            .collect();
+        let mut findings: Vec<HexFinding> = variable_findings
+            .into_iter()
+            .chain(version_findings)
+            .chain(self.blank_field_findings())
+            .chain(self.stale_list_findings())
+            .chain(self.undeclared_variable_findings())
+            .chain(self.bound_setting_findings())
+            .chain(self.unfilled_word_findings())
+            .collect();
         let validator = SpellValidator::new(self.specs.clone());
-        validator.validate(&self.spell).map_err(|errors| errors.iter().map(ToString::to_string).collect::<Vec<_>>())?;
-        if self.spell.subgraphs.is_empty() {
-            return Ok(());
+        if let Err(errors) = validator.validate(&self.brew_graph()) {
+            let title_of = |id: &NodeId| self.canvas.display_title(id);
+            findings.extend(errors.iter().map(|error| HexFinding::from_validation(error, &self.spell, &title_of)));
         }
-        let resolver = self.subgraph_resolver().map_err(|error| vec![error.to_string()])?;
-        resolve_subgraphs_from(&self.spell, root, &resolver, &validator).map(drop).map_err(|error| vec![error.to_string()])
+        if !findings.is_empty() {
+            return findings;
+        }
+        if self.spell.subgraphs.is_empty() {
+            return Vec::new();
+        }
+        let resolver = match self.subgraph_resolver() {
+            Ok(resolver) => resolver,
+            Err(error) => return vec![HexFinding::loose(error.to_string())],
+        };
+        match resolve_subgraphs_from(&self.brew_graph(), root, &resolver, &validator) {
+            Ok(_) => Vec::new(),
+            Err(error) => vec![HexFinding::loose(error.to_string())],
+        }
+    }
+
+    fn unfilled_word_findings(&self) -> Vec<HexFinding> {
+        let graph = self.brew_graph();
+        let fed = |node: &NodeId, socket: &str| graph.wires.iter().any(|wire| &wire.to_node == node && wire.to_socket == socket);
+        graph
+            .nodes
+            .iter()
+            .flat_map(|node| {
+                let words = |field: &str| node.config.get(field).and_then(serde_json::Value::as_str).map(template_roots).unwrap_or_default();
+                let (missing, why): (Vec<String>, &str) = match editable_field(&node.kind) {
+                    Some("template") => (
+                        words("template")
+                            .into_iter()
+                            .filter(|root| !fed(&node.id, root) && !graph.variables.iter().any(|variable| &variable.name == root))
+                            .collect(),
+                        "no wire or variable has that name",
+                    ),
+                    _ => (Vec::new(), ""),
+                };
+                missing.into_iter().map(move |root| {
+                    let readable = format!("{}: nothing fills {{{{{root}}}}}, {why}", self.canvas.display_title(&node.id));
+                    HexFinding { node: Some(node.id.clone()), socket: None, readable: readable.clone(), message: readable, mistyped: false }
+                })
+            })
+            .collect()
+    }
+
+    fn undeclared_variable_findings(&self) -> Vec<HexFinding> {
+        let graph = self.brew_graph();
+        let bound = graph.nodes.iter().flat_map(|node| {
+            let spec = self.specs.iter().find(|spec| spec.kind == node.kind);
+            node.config
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(move |(key, _)| spec.is_some_and(|spec| spec.binds_setting(key)))
+                .filter_map(|(_, value)| magicklala_graph::bound_variable(value))
+                .filter(|name| !self.spell.variables.iter().any(|variable| variable.name == *name))
+                .map(move |name| {
+                    let readable = format!("{}: no variable is named {name}, add it on the Variables tab", self.canvas.display_title(&node.id));
+                    HexFinding { node: Some(node.id.clone()), socket: None, readable: readable.clone(), message: readable, mistyped: false }
+                })
+                .collect::<Vec<_>>()
+        });
+        let bound: Vec<HexFinding> = bound.collect();
+        bound.into_iter().chain(self.undeclared_variable_steps()).collect()
+    }
+
+    fn bound_setting_findings(&self) -> Vec<HexFinding> {
+        use magicklala_graph::FieldKind;
+        let graph = self.brew_graph();
+        let mut findings = Vec::new();
+        for node in &graph.nodes {
+            let Some(spec) = self.specs.iter().find(|spec| spec.kind == node.kind) else { continue };
+            for (key, setting) in node.config.as_object().into_iter().flatten().filter(|(key, _)| !magicklala_graph::UNBOUND_SETTINGS.contains(&key.as_str())) {
+                let Some(name) = magicklala_graph::bound_variable(setting) else { continue };
+                let Some(field) = spec.config.iter().find(|field| &field.key == key) else { continue };
+                let Some(variable) = self.spell.variables.iter().find(|variable| variable.name == name) else { continue };
+                let value = variable.default.as_ref().map(|value| value.to_json()).filter(|value| !value.is_null());
+                let whole = matches!(field.kind, FieldKind::Number { min, .. } if min == Some(1.0))
+                    || field.default.as_ref().is_some_and(|default| default.is_i64() || default.is_u64());
+                let need = match &field.kind {
+                    FieldKind::Number { min, max } => {
+                        let noun = if whole { "a whole number" } else { "a number" };
+                        Some(match (min, max) {
+                            (Some(min), Some(max)) => format!("{noun} from {min} to {max}"),
+                            (Some(min), None) => format!("{noun} of at least {min}"),
+                            (None, Some(max)) => format!("{noun} of at most {max}"),
+                            (None, None) => noun.to_owned(),
+                        })
+                    }
+                    FieldKind::Boolean => Some("true or false".to_owned()),
+                    FieldKind::Select { options } => Some(format!("one of {}", options.join(", "))),
+                    FieldKind::Json => Some("JSON".to_owned()),
+                    FieldKind::Text | FieldKind::TextArea | FieldKind::Code { .. } | FieldKind::Credential { .. } | FieldKind::Model { .. } => {
+                        Some("text".to_owned())
+                    }
+                };
+                let Some(need) = need else { continue };
+                let type_fits = match &field.kind {
+                    FieldKind::Number { .. } => matches!(variable.ty, SocketType::Int | SocketType::Float | SocketType::Any),
+                    FieldKind::Boolean => matches!(variable.ty, SocketType::Bool | SocketType::Any),
+                    FieldKind::Json => matches!(variable.ty, SocketType::Json | SocketType::Any),
+                    _ => matches!(variable.ty, SocketType::String | SocketType::Any),
+                };
+                let value_fits = |value: &serde_json::Value| match &field.kind {
+                    FieldKind::Number { min, max } => value
+                        .as_f64()
+                        .is_some_and(|number| min.is_none_or(|min| number >= min) && max.is_none_or(|max| number <= max) && (!whole || number.fract() == 0.0)),
+                    FieldKind::Boolean => value.is_boolean(),
+                    FieldKind::Select { options } => value.as_str().is_some_and(|text| options.iter().any(|option| option == text)),
+                    FieldKind::Json => value.is_object() || value.is_array(),
+                    _ => value.is_string(),
+                };
+                let problem = match &value {
+                    _ if !type_fits => Some(format!("holds {}", type_words(variable.ty))),
+                    None if !set_earlier_on_route(&graph, &node.id, name, |wire| {
+                        self.input_type(&SocketRef::new(wire.to_node.clone(), wire.to_socket.clone())).is_some_and(|ty| ty.is_flow())
+                    }) =>
+                    {
+                        Some("has no value".to_owned())
+                    }
+                    None => None,
+                    Some(value) if !value_fits(value) => Some(match value.as_f64().filter(|number| value.is_f64() && number.fract() == 0.0) {
+                        Some(whole) => format!("is {whole}"),
+                        None => format!("is {value}"),
+                    }),
+                    Some(_) => None,
+                };
+                if let Some(problem) = problem {
+                    let readable = format!("{}: {} needs {need}, but the variable {name} {problem}", self.canvas.display_title(&node.id), field.label);
+                    findings.push(HexFinding { node: Some(node.id.clone()), socket: None, readable: readable.clone(), message: readable, mistyped: false });
+                }
+            }
+        }
+        findings
+    }
+    fn undeclared_variable_steps(&self) -> Vec<HexFinding> {
+        self.brew_graph()
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.kind.as_str(), "var/get" | "var/set" | "var/reset"))
+            .filter_map(|node| {
+                let name = node.config.get("name")?.as_str()?.trim();
+                (!name.is_empty() && !self.spell.variables.iter().any(|variable| variable.name == name)).then(|| {
+                    let readable = format!("{}: no variable is named {name}, add it on the Variables tab", self.canvas.display_title(&node.id));
+                    HexFinding { node: Some(node.id.clone()), socket: None, readable: readable.clone(), message: readable, mistyped: false }
+                })
+            })
+            .collect()
+    }
+
+    fn listed_default(&self, kind: &str, field: &str) -> serde_json::Value {
+        self.specs
+            .iter()
+            .find(|spec| spec.kind == kind)
+            .and_then(|spec| spec.config.iter().find(|entry| entry.key == field))
+            .and_then(|entry| entry.default.clone())
+            .unwrap_or_else(|| json!([]))
+    }
+
+    fn stale_list_findings(&self) -> Vec<HexFinding> {
+        let graph = self.brew_graph();
+        let clashes = graph.nodes.iter().filter(|node| listed_field(&node.kind)).flat_map(|node| {
+            let fixed = self.specs.iter().find(|spec| spec.kind == node.kind).map(fixed_outputs).unwrap_or_default();
+            editable_field(&node.kind)
+                .and_then(|field| node.config.get(field))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|name| fixed.iter().any(|kept| kept == name))
+                .map(|name| {
+                    let readable = format!("{}: {name} is already an output, pick another name", self.canvas.display_title(&node.id));
+                    HexFinding { node: Some(node.id.clone()), socket: None, readable: readable.clone(), message: readable, mistyped: false }
+                })
+                .collect::<Vec<_>>()
+        });
+        let clashes: Vec<HexFinding> = clashes.collect();
+        clashes
+            .into_iter()
+            .chain(graph.wires.iter().filter_map(|wire| {
+                let node = graph.nodes.iter().find(|node| node.id == wire.from_node && listed_field(&node.kind))?;
+                let names = node.config.get(editable_field(&node.kind)?)?.as_array()?;
+                let spec = self.specs.iter().find(|spec| spec.kind == node.kind)?;
+                let listed = names.iter().any(|name| name.as_str() == Some(wire.from_socket.as_str()));
+                (!listed && !fixed_outputs(spec).contains(&wire.from_socket)).then(|| {
+                    let readable = format!("{}: {} is no longer listed but still has a wire", self.canvas.display_title(&node.id), wire.from_socket);
+                    HexFinding { node: Some(node.id.clone()), socket: None, readable: readable.clone(), message: readable, mistyped: false }
+                })
+            }))
+            .collect()
+    }
+
+    fn blank_field_findings(&self) -> Vec<HexFinding> {
+        self.brew_graph()
+            .nodes
+            .iter()
+            .filter(|node| node.kind != SUBGRAPH_KIND)
+            .filter_map(|node| {
+                let key = editable_field(&node.kind)?;
+                let field = self.specs.iter().find(|spec| spec.kind == node.kind)?.config.iter().find(|field| field.key == key && field.required)?;
+                let blank = node.config.get(key).or(field.default.as_ref()).is_none_or(|value| {
+                    value.is_null() || value.as_str().is_some_and(|text| text.trim().is_empty()) || value.as_array().is_some_and(Vec::is_empty)
+                });
+                blank.then(|| {
+                    let label = field.label.to_lowercase();
+                    let readable = if label.ends_with('s') {
+                        format!("{}: needs {label}", self.canvas.display_title(&node.id))
+                    } else {
+                        format!("{}: needs a {label}", self.canvas.display_title(&node.id))
+                    };
+                    HexFinding { node: Some(node.id.clone()), socket: None, readable: readable.clone(), message: readable, mistyped: false }
+                })
+            })
+            .collect()
     }
 
     pub fn validate(&mut self) -> &ValidationState {
+        if self.is_running() {
+            return &self.validation;
+        }
         self.sync_spell();
-        self.validation = match self.check_spell() {
-            Ok(()) => ValidationState::Valid,
-            Err(errors) => ValidationState::Invalid(errors),
+        self.wire_error = None;
+        let findings = self.hex_findings_for_spell();
+        self.show_findings(findings)
+    }
+
+    fn show_findings(&mut self, findings: Vec<HexFinding>) -> &ValidationState {
+        let old_run = self.canvas.last_brew.is_some() || self.trace.iter().any(|line| line.kind != "RunRejected");
+        if old_run && findings.is_empty() && self.canvas.last_brew.is_some() {
+            self.hex_findings.clear();
+            self.trace.retain(|line| line.kind != "RunRejected");
+            self.validation = ValidationState::Valid;
+            self.canvas.validated = true;
+            self.canvas.invalid_brew = false;
+            return &self.validation;
+        }
+        if old_run {
+            self.canvas.clear_run_marks();
+            self.canvas.last_brew = None;
+            self.canvas.brew_total_ms = None;
+            self.canvas.brew_summary = None;
+            self.trace_stale = true;
+        }
+        for card in &mut self.canvas.nodes {
+            if card.status == ExecutionStatus::Failed {
+                card.status = ExecutionStatus::Idle;
+            }
+            for socket in &mut card.inputs {
+                socket.flagged = false;
+            }
+        }
+        self.hex_findings = findings.clone();
+        self.validation = match if findings.is_empty() { Ok(()) } else { Err(findings) } {
+            Ok(()) => {
+                self.trace.retain(|line| line.kind != "RunRejected");
+                if self.canvas.brew_summary.as_deref().is_some_and(|s| s.starts_with("Hexed")) {
+                    self.canvas.brew_summary = None;
+                }
+                ValidationState::Valid
+            }
+            Err(findings) => {
+                let mut rejected: Vec<TraceLine> = Vec::new();
+                for finding in &findings {
+                    if let Some(card) = finding.node.as_ref().and_then(|id| self.canvas.nodes.iter_mut().find(|card| &card.id == id)) {
+                        card.status = ExecutionStatus::Failed;
+                        if let Some(socket) = finding.socket.as_ref().and_then(|name| card.inputs.iter_mut().find(|socket| &socket.name == name)) {
+                            socket.flagged = true;
+                            socket.mistyped = finding.mistyped;
+                        }
+                    }
+                    rejected.push(TraceLine {
+                        at_ms: 0,
+                        kind: "RunRejected",
+                        detail: finding.readable.clone(),
+                        status: ExecutionStatus::Failed,
+                        node: finding.node.clone(),
+                        path: Vec::new(),
+                    });
+                }
+                self.canvas.brew_summary = Some(hex_plaque(&findings, &self.canvas));
+                let errors: Vec<String> = findings.into_iter().map(|finding| finding.message).collect();
+                if old_run || self.trace.is_empty() || self.trace.iter().all(|line| line.kind == "RunRejected") {
+                    self.trace = rejected;
+                    self.trace_stale = false;
+                }
+                ValidationState::Invalid(errors)
+            }
         };
+        self.canvas.validated = matches!(self.validation, ValidationState::Valid);
+        self.canvas.invalid_brew = matches!(self.validation, ValidationState::Invalid(_));
         &self.validation
     }
 
+    fn live_release_matching_recipe(&self) -> Option<u32> {
+        let release = self.last_published.as_ref()?;
+        same_recipe(&release.graph, &self.brew_graph()).then_some(release.version)
+    }
+
+    pub fn is_unchanged_from_live_release(&self) -> bool {
+        self.active_release_version.is_some() && self.live_release_matching_recipe().is_some() && calls_only_pinned_spells(&self.brew_graph())
+    }
+
+    fn variable_errors(&self) -> Vec<String> {
+        let typed: Vec<String> = self.var_name_edits.iter().map(|edit| edit.text.trim().to_owned()).collect();
+        let naming = typed.iter().enumerate().filter_map(|(index, name)| {
+            if name.is_empty() {
+                Some(format!("Variable {} needs a name", index + 1))
+            } else if typed[..index].contains(name) {
+                Some(format!("{name}: two variables share this name"))
+            } else if self.spell.variables.get(index).is_some_and(|variable| &variable.name != name)
+                && self.canvas.wires.iter().any(|wire| !wire.ty.is_flow() && &wire.to_socket == name)
+            {
+                Some(format!("{name}: a step input already uses this name"))
+            } else if !magicklala_nodes::is_template_name(name) {
+                Some(format!("{name}: a variable name uses only letters, digits, _ and -"))
+            } else {
+                None
+            }
+        });
+        let defaults = (0..self.spell.variables.len())
+            .filter_map(|index| self.var_default_error(index).map(|problem| format!("{}: {problem}", self.spell.variables[index].name)));
+        naming.chain(defaults).collect()
+    }
+
+    pub fn chat_door(&self) -> Option<&'static str> {
+        let graph = self.brew_graph();
+        [CHAT_TRIGGER_KIND, "core/on_message"].into_iter().find(|kind| graph.nodes.iter().any(|node| node.kind == *kind))
+    }
+
+    pub fn has_recipe_trigger(&self) -> bool {
+        self.brew_graph().nodes.iter().any(|node| self.specs.iter().any(|spec| spec.kind == node.kind && spec.is_trigger))
+    }
+
     pub fn run_spell(&mut self) -> bool {
-        let payload = self.run_payload.clone();
+        if !self.has_recipe_trigger() || matches!(self.validation, ValidationState::Invalid(_)) {
+            return false;
+        }
+        let payload = self.brew_payload();
         self.start_run(None, payload, false)
+    }
+
+    fn brew_payload(&self) -> serde_json::Value {
+        let chat_shaped = self.run_payload.get("channel").is_some() && self.run_payload.get("content").is_some();
+        let door = self.trigger(None, &self.run_payload).and_then(|trigger| self.spell.node(&trigger.node).map(|node| node.kind.clone())).unwrap_or_default();
+        if !chat_shaped {
+            return self.run_payload.clone();
+        }
+        let content = self.run_payload.get("content").cloned().unwrap_or_default();
+        match door.as_str() {
+            "event/on_webhook" => serde_json::json!({ "method": "POST", "path": "/hooks/studio", "headers": {}, "query": {}, "body": { "content": content } }),
+            "event/on_tick" => {
+                let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|since| since.as_secs()).unwrap_or_default();
+                serde_json::json!({ "tick": self.runs.max(1), "at": format!("unix {at}") })
+            }
+            "event/on_variable_changed" => {
+                let name = self.spell.variables.first().map_or_else(|| "variable".to_owned(), |variable| variable.name.clone());
+                serde_json::json!({ "name": name, "value": content })
+            }
+            "event/on_memory" => serde_json::json!({ "content": content, "payload": {} }),
+            _ => self.run_payload.clone(),
+        }
     }
 
     fn trigger(&self, prefer: Option<&str>, payload: &serde_json::Value) -> Option<RunTrigger> {
         let spec_of = |node: &NodeInstance| self.specs.iter().find(|spec| spec.kind == node.kind && spec.is_trigger);
-        let triggers: Vec<(&NodeInstance, &NodeSpec)> = self.spell.nodes.iter().filter_map(|node| spec_of(node).map(|spec| (node, spec))).collect();
+        let graph = self.brew_graph();
+        let mut triggers: Vec<(&NodeInstance, &NodeSpec)> = graph.nodes.iter().filter_map(|node| spec_of(node).map(|spec| (node, spec))).collect();
+        triggers.sort_by_key(|(node, _)| !graph.wires.iter().any(|wire| wire.from_node == node.id));
         let (node, spec) = prefer.and_then(|kind| triggers.iter().find(|(node, _)| node.kind == kind)).or_else(|| triggers.first()).copied()?;
         let socket = spec.outputs.first().map_or_else(|| "out".to_owned(), |socket| socket.name.clone());
         Some(RunTrigger { node: node.id.clone(), socket, payload: Value::from(payload.clone()) })
@@ -911,7 +3638,9 @@ impl StudioApp {
             return false;
         }
         self.runs += 1;
+        self.canvas.brew_summary = None;
         self.trace.clear();
+        self.trace_stale = false;
         self.trace_events.clear();
         self.pending_trace.clear();
         self.last_run = None;
@@ -924,11 +3653,24 @@ impl StudioApp {
         };
         match trigger.and_then(|trigger| self.spawn_engine(trigger, reply_to_chat)) {
             Ok(active) => {
+                self.trace_stale = false;
                 self.active = Some(active);
+                self.canvas.running_brew = true;
+                self.canvas.last_brew = None;
+                self.canvas.brew_total_ms = None;
                 true
             }
             Err(error) => {
-                self.trace.push(TraceLine { at_ms: 0, kind: "RunRejected", detail: error.clone(), status: ExecutionStatus::Failed });
+                if self.trace.is_empty() {
+                    self.trace.push(TraceLine {
+                        at_ms: 0,
+                        kind: "RunRejected",
+                        detail: error.clone(),
+                        status: ExecutionStatus::Failed,
+                        node: None,
+                        path: Vec::new(),
+                    });
+                }
                 self.conclude(RunReport::invalid(error), reply_to_chat);
                 false
             }
@@ -946,7 +3688,7 @@ impl StudioApp {
             engine.with_subgraph_resolver(Arc::new(self.subgraph_resolver().map_err(|error| error.to_string())?))
         };
         let emitter: Arc<dyn EventEmitter> = Arc::new(channel.clone());
-        let graph = self.spell.clone();
+        let graph = self.brew_graph();
         let deadline = self.run_timeout;
         let token = CancellationToken::new();
         let cancellation = token.clone();
@@ -994,6 +3736,11 @@ impl StudioApp {
             };
             self.apply_background(message);
         }
+        self.canvas.spell_name = self.spell.name.clone();
+        self.canvas.release_badge = self.active_release_version.map(|v| format!("v{v}"));
+        self.canvas.validated = matches!(self.validation, ValidationState::Valid);
+        self.canvas.invalid_brew = matches!(self.validation, ValidationState::Invalid(_));
+        self.canvas.running_brew = self.is_running();
         true
     }
 
@@ -1042,8 +3789,20 @@ impl StudioApp {
 
     fn close_run(&mut self, kind: &'static str, detail: String, report: RunReport) {
         let at_ms = self.elapsed_ms();
-        self.trace.push(TraceLine { at_ms, kind, detail, status: ExecutionStatus::Failed });
-        self.canvas.nodes.iter_mut().filter(|card| card.status == ExecutionStatus::Running).for_each(|card| card.status = ExecutionStatus::Failed);
+        self.trace.push(TraceLine { at_ms, kind, detail, status: ExecutionStatus::Failed, node: None, path: Vec::new() });
+        let unfinished_bottles: Vec<NodeId> = magicklala_canvas::brew::potion_ends(&self.canvas)
+            .into_iter()
+            .filter(|id| self.canvas.card(id).is_some_and(|card| matches!(card.status, ExecutionStatus::Idle | ExecutionStatus::Running)))
+            .collect();
+        let cut_short: Vec<NodeId> = self.canvas.nodes.iter().filter(|card| card.status == ExecutionStatus::Running).map(|card| card.id.clone()).collect();
+        for id in cut_short.iter().chain(&unfinished_bottles) {
+            if let Some(card) = self.canvas.card_mut(id) {
+                card.status = ExecutionStatus::Idle;
+            }
+            if !self.canvas.stopped.contains(id) {
+                self.canvas.stopped.push(id.clone());
+            }
+        }
         let reply_to_chat = self.release_active();
         self.conclude(report, reply_to_chat);
     }
@@ -1057,6 +3816,12 @@ impl StudioApp {
     }
 
     fn conclude(&mut self, report: RunReport, reply_to_chat: bool) {
+        self.canvas.running_brew = self.is_running();
+        self.canvas.last_brew = match report.outcome {
+            RunOutcome::Finished(status) => Some(status),
+            RunOutcome::Invalid => None,
+        };
+        self.canvas.brew_total_ms = self.trace.last().map(|line| line.at_ms);
         if reply_to_chat {
             self.chat.push(ChatMessage { from_user: false, text: report.chat_reply(self.runs) });
         }
@@ -1085,11 +3850,94 @@ impl StudioApp {
         let at_ms = self.elapsed_ms();
         self.trace.push(trace_line(&event, at_ms, &self.canvas));
         self.trace_events.push(event);
+        self.canvas.spell_name = self.spell.name.clone();
+        self.canvas.release_badge = self.active_release_version.map(|v| format!("v{v}"));
+        self.canvas.validated = matches!(self.validation, ValidationState::Valid);
+        self.canvas.invalid_brew = matches!(self.validation, ValidationState::Invalid(_));
+        self.canvas.running_brew = self.is_running();
         true
+    }
+
+    pub fn plug_menu_shown(&self) -> bool {
+        self.plug_menu.as_ref().is_some_and(|(node, _)| self.right_tab == RightTab::Inspector && self.canvas.selection.as_ref() == Some(node))
+    }
+
+    pub fn has_open_popover(&self) -> bool {
+        self.pantry_drag.is_some()
+            || self.canvas.context_menu.is_some()
+            || self.model_menu_open
+            || self.open_var_type.is_some()
+            || self.pending_type_reset.is_some()
+            || self.pending_restore_version.is_some()
+            || self.pending_switch.is_some()
+            || self.plug_menu_shown()
+    }
+
+    pub fn dismiss_topmost(&mut self) -> bool {
+        if self.pantry_drag.take().is_some() {
+            return true;
+        }
+        if self.canvas.context_menu.is_some() {
+            self.close_context_menu();
+            return true;
+        }
+        if std::mem::take(&mut self.model_menu_open) {
+            return true;
+        }
+        if self.open_var_type.take().is_some() || self.pending_type_reset.take().is_some() {
+            return true;
+        }
+        if self.pending_restore_version.take().is_some() || self.pending_switch.take().is_some() || self.plug_menu.take().is_some() {
+            return true;
+        }
+        if self.canvas.selection.is_some() {
+            self.canvas.select(None);
+            return true;
+        }
+        false
     }
 
     pub fn close_context_menu(&mut self) {
         self.canvas.context_menu = None;
+    }
+
+    pub fn open_cauldron(&mut self) {
+        self.canvas.mode = WorkbenchMode::Cauldron;
+        self.close_context_menu();
+    }
+
+    pub fn open_grimoire(&mut self) {
+        self.canvas.mode = WorkbenchMode::Grimoire;
+        self.close_context_menu();
+        let viewport = self.canvas_size();
+        self.canvas.fit(viewport);
+    }
+
+    pub fn new_empty_spell(&mut self) {
+        self.detach_spell_history();
+        let taken = |name: &str| self.saved_potions.iter().any(|(saved, _)| saved == name);
+        let name = std::iter::once("New Potion".to_owned()).chain((2..).map(|n| format!("New Potion {n}"))).find(|name| !taken(name)).unwrap_or_default();
+        self.spell = SpellGraph::new(&name);
+        self.canvas = CanvasState::from_graph(&self.spell, &self.specs);
+        self.canvas.light = self.theme == Theme::Light;
+        self.prompts.clear();
+        self.versions.clear();
+        self.configs.clear();
+        self.trace.clear();
+        self.trace_events.clear();
+        self.pending_trace.clear();
+        self.open_var_type = None;
+        self.pending_type_reset = None;
+        self.pending_restore_version = None;
+        self.pending_switch = None;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.undo_banner = None;
+        self.validation = ValidationState::Unchecked;
+        self.sync_var_edits_from_spell();
+        self.last_synced = Some(Box::new(self.edit_snapshot(None)));
+        self.seed_wire_ledger();
+        self.canvas.notes = self.card_notes();
     }
 
     pub fn quick_add_from_menu(&mut self) {
@@ -1098,14 +3946,285 @@ impl StudioApp {
         self.spawn_at(QUICK_ADD_KIND, anchor);
     }
 
-    pub fn delete_selected_node(&mut self) {
+    pub fn duplicate_selected_node(&mut self) {
+        if self.is_running() {
+            return;
+        }
+        let anchor = self.canvas.context_menu.unwrap_or([self.canvas_size().0 * 0.5, self.canvas_size().1 * 0.5]);
+        let Some(card) = self.canvas.selected_card().cloned() else { return self.close_context_menu() };
+        let mark = self.undo_stack.len();
+        let selected_clone = Some((
+            self.configs.get(&card.id).cloned(),
+            self.prompts.get(&card.id).map(|e| e.text.clone()),
+            self.versions.get(&card.id).map(|e| e.text.clone()),
+        ));
         self.close_context_menu();
-        if let Some(removed) = self.canvas.remove_selected_node() {
-            self.prompts.remove(&removed.id);
-            self.versions.remove(&removed.id);
-            self.configs.remove(&removed.id);
-            self.validation = ValidationState::Unchecked;
+        let at = [anchor[0] + 24.0, anchor[1] + 24.0];
+        let spawned = if self.canvas.is_shelved(&card.id) { self.place_ingredient(&card.kind, at, false) } else { self.spawn_at(&card.kind, at) };
+        if let Some(new_id) = &spawned
+            && let Some(copy) = self.canvas.nodes.iter_mut().find(|other| &other.id == new_id)
+        {
+            for socket in &card.inputs {
+                copy.ensure_socket(&socket.name, socket.ty, false);
+            }
+            for socket in &card.outputs {
+                copy.ensure_socket(&socket.name, socket.ty, true);
+            }
+        }
+        if let Some(new_id) = spawned
+            && let Some((cfg, prompt, version)) = selected_clone
+        {
+            if let Some(cfg) = cfg {
+                self.configs.insert(new_id.clone(), cfg);
+            }
+            if let Some(prompt) = prompt {
+                self.prompts.insert(new_id.clone(), TextEdit::new(prompt));
+            }
+            if let Some(version) = version {
+                self.versions.insert(new_id.clone(), TextEdit::new(version));
+            }
             self.sync_spell();
+            self.fold_undo_since(mark);
+        }
+    }
+
+    pub fn set_aside_selected(&mut self) {
+        self.close_context_menu();
+        if let Some(id) = self.canvas.selection.clone() {
+            self.toss(magicklala_canvas::Toss::Aside(id));
+        }
+    }
+
+    pub fn pour_selected_in(&mut self) {
+        self.close_context_menu();
+        if let Some(id) = self.canvas.selection.clone() {
+            self.toss(magicklala_canvas::Toss::IntoPot(id));
+        }
+    }
+
+    pub fn delete_selected_node(&mut self) {
+        if self.is_running() {
+            return;
+        }
+        self.close_context_menu();
+        let Some(selected_id) = self.canvas.selection.clone() else { return };
+        let attached_wires: Vec<WireModel> = self.canvas.wires.iter().filter(|w| w.from_node == selected_id || w.to_node == selected_id).cloned().collect();
+        let shelf = self.canvas.is_shelved(&selected_id).then(|| ParkedShelf {
+            parked: self.aside_wires.get(&selected_id).cloned().unwrap_or_default(),
+            bridges: self.aside_bridges.get(&selected_id).cloned().unwrap_or_default(),
+            refused: self.aside_refused.get(&selected_id).cloned().unwrap_or_default(),
+        });
+        let at = self.canvas.nodes.iter().position(|card| card.id == selected_id).unwrap_or(self.canvas.nodes.len());
+        let call = self.spell.subgraphs.iter().find(|reference| reference.node_id == selected_id).cloned();
+        let title = self.canvas.display_title(&selected_id);
+        let bridges = self.bridge_around(&selected_id);
+        self.canvas.select(Some(selected_id.clone()));
+        if let Some(removed) = self.canvas.remove_selected_node() {
+            self.aside_wires.remove(&removed.id);
+            self.aside_bridges.remove(&removed.id);
+            self.aside_refused.remove(&removed.id);
+            let prompt = self.prompts.remove(&removed.id);
+            let version = self.versions.remove(&removed.id);
+            let config = self.configs.remove(&removed.id);
+            self.undo_stack.push(UndoEntry::Node { at, card: Box::new(removed), prompt, version, config, wires: attached_wires, bridges, shelf, call });
+            self.undo_banner = Some(format!("Removed {title}"));
+            self.validation = ValidationState::Unchecked;
+            self.dirty = true;
+            self.sync_spell();
+        }
+    }
+
+    fn restore_edit(&mut self, before: EditSnapshot) {
+        let EditSnapshot {
+            nodes,
+            wires,
+            shelved,
+            configs,
+            prompts,
+            versions,
+            subgraphs,
+            variables,
+            var_name_edits,
+            var_default_edits,
+            aside_wires,
+            aside_bridges,
+            aside_refused,
+            wire_homes,
+            wire_ledger,
+            ..
+        } = before;
+        self.aside_wires = aside_wires;
+        self.aside_bridges = aside_bridges;
+        self.aside_refused = aside_refused;
+        self.wire_homes = wire_homes;
+        self.wire_ledger = wire_ledger;
+        self.spell.variables = variables;
+        self.var_name_edits = var_name_edits;
+        self.var_default_edits = var_default_edits;
+        self.variables_touched = true;
+        self.canvas.nodes = self.where_they_stand(nodes);
+        self.canvas.wires = wires;
+        let spots: Vec<(NodeId, [f32; 2])> = self.canvas.nodes.iter().map(|card| (card.id.clone(), card.position)).collect();
+        for (id, spot) in spots {
+            self.canvas.move_node(&id, spot);
+        }
+        self.canvas.shelved = shelved;
+        self.configs = configs;
+        self.prompts = prompts;
+        self.versions = versions;
+        self.spell.subgraphs = subgraphs;
+        let kept = self.canvas.selection.clone().filter(|id| self.canvas.card(id).is_some());
+        self.canvas.select(kept);
+        self.validation = ValidationState::Unchecked;
+        self.canvas.validated = false;
+        self.dirty = true;
+        self.sync_spell();
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    pub fn redo(&mut self) {
+        if self.is_running() {
+            return;
+        }
+        let Some(after) = self.redo_stack.pop() else { return };
+        self.plug_menu = None;
+        let now = self.edit_snapshot(None);
+        self.restoring = true;
+        self.restore_edit(after);
+        self.restoring = false;
+        self.undo_stack.push(UndoEntry::Edit(Box::new(now)));
+        self.undo_seen = self.undo_stack.len();
+        self.undo_banner = None;
+    }
+
+    pub fn undo(&mut self) {
+        if self.is_running() {
+            return;
+        }
+        let Some(entry) = self.undo_stack.pop() else { return };
+        self.plug_menu = None;
+        let now = self.edit_snapshot(None);
+        self.undo_banner = None;
+        self.restoring = true;
+        self.apply_undo(entry);
+        self.restoring = false;
+        self.redo_stack.push(now);
+    }
+
+    fn apply_undo(&mut self, entry: UndoEntry) {
+        match entry {
+            UndoEntry::Aside { id, wires, bridges } => {
+                self.drop_bridges(&bridges);
+                let stale: Vec<(SocketRef, SocketRef)> = self.aside_bridges.drain().flat_map(|(_, wires)| wires).collect();
+                self.drop_bridges(&stale);
+                self.canvas.unshelve(&id);
+                for (from, to) in &wires {
+                    let _ = self.canvas.connect_sockets(from, to);
+                }
+                for pair in &wires {
+                    self.rehome_wire(pair);
+                }
+                self.aside_wires.remove(&id);
+                self.rebuild_bridges();
+                self.validation = ValidationState::Unchecked;
+                self.sync_spell();
+            }
+            UndoEntry::Node { at, card, prompt, version, config, wires, bridges, shelf, call } => {
+                self.drop_bridges(&bridges);
+                let id = card.id.clone();
+                if let Some(call) = call.filter(|call| !self.spell.subgraphs.iter().any(|kept| kept.node_id == call.node_id)) {
+                    self.spell.subgraphs.push(call);
+                }
+                if let Some(prompt) = prompt {
+                    self.prompts.insert(id.clone(), prompt);
+                }
+                if let Some(version) = version {
+                    self.versions.insert(id.clone(), version);
+                }
+                if let Some(config) = config {
+                    self.configs.insert(id.clone(), config);
+                }
+                self.canvas.restore_node(*card, wires, at);
+                if let Some(ParkedShelf { parked, bridges, refused }) = shelf {
+                    self.canvas.shelve(&id);
+                    if !parked.is_empty() {
+                        self.aside_wires.insert(id.clone(), parked);
+                    }
+                    if !refused.is_empty() {
+                        self.aside_refused.insert(id.clone(), refused);
+                    }
+                    if !bridges.is_empty() {
+                        self.aside_bridges.insert(id.clone(), bridges);
+                    }
+                }
+                self.validation = ValidationState::Unchecked;
+                self.dirty = true;
+                self.sync_spell();
+            }
+            UndoEntry::VariableAdded { index } => {
+                if index < self.spell.variables.len() {
+                    self.spell.variables.remove(index);
+                    if index < self.var_name_edits.len() {
+                        self.var_name_edits.remove(index);
+                    }
+                    if index < self.var_default_edits.len() {
+                        self.var_default_edits.remove(index);
+                    }
+                    self.open_var_type = None;
+                    self.pending_type_reset = None;
+                    self.variables_touched = true;
+                    self.validation = ValidationState::Unchecked;
+                    self.dirty = true;
+                    self.sync_spell();
+                }
+            }
+            UndoEntry::Edit(before) => self.restore_edit(*before),
+            UndoEntry::Recipe { nodes, wires, shelved } => {
+                self.canvas.nodes = self.where_they_stand(nodes);
+                self.canvas.wires = wires;
+                let spots: Vec<(NodeId, [f32; 2])> = self.canvas.nodes.iter().map(|card| (card.id.clone(), card.position)).collect();
+                for (id, spot) in spots {
+                    self.canvas.move_node(&id, spot);
+                }
+                self.canvas.shelved = shelved;
+                self.canvas.select(None);
+                self.validation = ValidationState::Unchecked;
+                self.canvas.validated = false;
+                self.dirty = true;
+                self.sync_spell();
+            }
+            UndoEntry::VariableType { index, variable, default_edit } => {
+                if index < self.spell.variables.len() {
+                    self.spell.variables[index].ty = variable.ty;
+                    self.spell.variables[index].default = variable.default;
+                    if let Some(edit) = self.var_default_edits.get_mut(index) {
+                        *edit = default_edit;
+                    }
+                    self.open_var_type = None;
+                    self.pending_type_reset = None;
+                    self.variables_touched = true;
+                    self.validation = ValidationState::Unchecked;
+                    self.canvas.validated = false;
+                    self.dirty = true;
+                    self.sync_spell();
+                }
+            }
+            UndoEntry::Variable { index, variable, name_edit, default_edit } => {
+                let at = index.min(self.spell.variables.len());
+                self.spell.variables.insert(at, variable);
+                let name_at = at.min(self.var_name_edits.len());
+                self.var_name_edits.insert(name_at, name_edit);
+                let def_at = at.min(self.var_default_edits.len());
+                self.var_default_edits.insert(def_at, default_edit);
+                self.variables_touched = true;
+                self.validation = ValidationState::Unchecked;
+                self.canvas.validated = false;
+                self.dirty = true;
+                self.sync_spell();
+            }
         }
     }
 
@@ -1131,13 +4250,13 @@ impl StudioApp {
 
     fn require_disk(&mut self, action: &str) -> Result<(), StudioError> {
         if let Some(error) = &self.open_error {
-            let message = format!("the database passed with --db could not be opened: {error}");
+            let message = format!("The database passed with --db could not be opened: {error}");
             return Err(self.refuse(message));
         }
         if self.store.as_ref().is_some_and(StudioStore::is_persistent) {
             return Ok(());
         }
-        Err(self.refuse(format!("pass --db <file.sqlite> to {action} on disk")))
+        Err(self.refuse(format!("Pass --db <file.sqlite> to {action} on disk")))
     }
 
     pub fn next_release_version(&self) -> Result<u32, StudioError> {
@@ -1149,18 +4268,40 @@ impl StudioApp {
 
     fn refresh_releases(&mut self, published: &SpellRelease) {
         let stored = self.store.as_ref().map(|store| store.releases_of(&self.spell));
-        self.releases = match stored {
-            Some(Ok(releases)) => releases.iter().map(|release| Release { version: release.version, nodes: release.graph.nodes.len() }).collect(),
+        match stored {
+            Some(Ok(releases)) => {
+                self.release_graphs = releases.iter().map(|release| (release.version, release.graph.clone())).collect();
+                self.release_notes = releases.iter().map(|release| (release.version, release.created_at.format("%b %d · %H:%M").to_string())).collect();
+                self.releases = releases.iter().map(|release| Release { version: release.version, nodes: release.graph.nodes.len() }).collect();
+            }
             _ => {
+                self.release_graphs.insert(published.version, published.graph.clone());
+                self.release_notes.insert(published.version, published.created_at.format("%b %d · %H:%M").to_string());
                 let mut releases = std::mem::take(&mut self.releases);
                 releases.push(Release { version: published.version, nodes: published.graph.nodes.len() });
-                releases
+                self.releases = releases;
             }
-        };
+        }
+    }
+
+    pub fn explain_publish_blocked(&mut self) {
+        if let ValidationState::Invalid(errors) = &self.validation {
+            let message = format!("Cannot publish an invalid potion: {}", errors.join("; "));
+            self.store_error = Some(message);
+        }
     }
 
     pub fn publish(&mut self) -> Result<u32, StudioError> {
+        if self.is_running() {
+            return Err(self.refuse("Publish waits until the brew ends".to_owned()));
+        }
         self.sync_spell();
+        if self.canvas.nodes.is_empty() {
+            return Err(self.refuse("Cannot publish an empty potion".to_owned()));
+        }
+        if self.is_unchanged_from_live_release() {
+            return Err(self.refuse("No changes since the live release".to_owned()));
+        }
         self.publish_status = None;
         self.require_disk("publish releases")?;
         let next = match self.next_release_version() {
@@ -1168,40 +4309,57 @@ impl StudioApp {
             Err(error) => return Err(self.refuse(error.to_string())),
         };
         let target = (self.root_spell(), Some(next));
-        if let Err(errors) = self.check_spell_with_root(target) {
-            let message = format!("cannot publish an invalid spell: {}", errors.join("; "));
-            self.validation = ValidationState::Invalid(errors);
+        let findings = self.hex_findings_for_root(target);
+        if !findings.is_empty() {
+            let readable: Vec<String> = findings.iter().map(|finding| finding.readable.clone()).collect();
+            let message = format!("Cannot publish an invalid potion: {}", readable.join("; "));
+            self.show_findings(findings);
             return Err(self.refuse(message));
         }
         self.validation = ValidationState::Valid;
+        let recipe = self.brew_graph();
+        let draft = self.spell.clone();
         let store = self.store.as_mut().ok_or_else(|| StudioError::Store("no studio store".to_owned()))?;
-        let published = store.publish(&self.spell);
+        if let Err(error) = store.save_draft(&draft) {
+            self.store_error = Some(error.to_string());
+            return Err(error);
+        }
+        let published = store.publish(&recipe);
         let release = published.inspect_err(|error| self.store_error = Some(error.to_string()))?;
         self.refresh_releases(&release);
         self.store_error = None;
         self.draft_status = None;
+        self.dirty = false;
         self.active_release_version = Some(release.version);
         let version = release.version;
+        self.canvas.release_badge = Some(format!("v{version}"));
         self.publish_status = Some(format!("Published v{version}"));
         self.last_published = Some(release);
+        self.refresh_saved_potions();
         Ok(version)
     }
 
     pub fn save_draft(&mut self) -> Result<SpellRecordId, StudioError> {
+        if self.is_running() {
+            return Err(self.refuse("Save waits until the brew ends".to_owned()));
+        }
         self.sync_spell();
         self.draft_status = None;
         self.publish_status = None;
         self.require_disk("save drafts")?;
-        let version_errors = self.release_version_errors();
+        let version_errors = [self.variable_errors(), self.release_version_errors()].concat();
         if !version_errors.is_empty() {
-            return Err(self.refuse(format!("cannot save the draft: {}", version_errors.join("; "))));
+            return Err(self.refuse(format!("Cannot save the draft: {}", version_errors.join("; "))));
         }
         let store = self.store.as_mut().ok_or_else(|| StudioError::Store("no studio store".to_owned()))?;
         let saved = store.save_draft(&self.spell);
         let record = saved.inspect_err(|error| self.store_error = Some(error.to_string()))?;
         self.store_error = None;
-        self.active_release_version = None;
+        self.dirty = false;
+        self.active_release_version = self.live_release_matching_recipe();
+        self.canvas.release_badge = self.active_release_version.map(|version| format!("v{version}"));
         self.draft_status = Some(DRAFT_SAVED.to_owned());
+        self.refresh_saved_potions();
         Ok(record.id)
     }
 
@@ -1211,12 +4369,13 @@ impl StudioApp {
 
     pub fn send_chat(&mut self) {
         let message = self.chat_input.text.trim().to_owned();
+        let Some(door) = self.chat_door() else { return };
         if message.is_empty() || self.is_running() {
             return;
         }
         self.chat.push(ChatMessage { from_user: true, text: message.clone() });
         self.chat_input = TextEdit::new("");
-        self.start_run(Some(CHAT_TRIGGER_KIND), json!({ "channel": STUDIO_CHANNEL, "sender": STUDIO_SENDER, "content": message }), true);
+        self.start_run(Some(door), json!({ "channel": STUDIO_CHANNEL, "sender": STUDIO_SENDER, "content": message }), true);
     }
 }
 
@@ -1229,7 +4388,7 @@ impl Drop for StudioApp {
 }
 
 pub fn run_studio(config: StudioConfig) -> Result<(), StudioError> {
-    remember_launch(&config, Theme::Dark);
+    remember_launch(&config, Theme::Light);
     App::new(spec(config)).args(Vec::new()).try_run().map_err(StudioError::Rune)
 }
 
@@ -1238,7 +4397,7 @@ pub fn render_headless_snapshot(out_path: &Path) -> Result<(), StudioError> {
 }
 
 pub fn render_headless_snapshot_sized(out_path: &Path, size: (f32, f32)) -> Result<(), StudioError> {
-    render_headless_snapshot_themed(out_path, size, Theme::Dark)
+    render_headless_snapshot_themed(out_path, size, Theme::Light)
 }
 
 pub fn render_headless_snapshot_themed(out_path: &Path, size: (f32, f32), theme: Theme) -> Result<(), StudioError> {
@@ -1255,10 +4414,32 @@ pub fn render_headless_snapshot_with_config(out_path: &Path, config: StudioConfi
     if out_path.is_file() { Ok(()) } else { Err(StudioError::MissingSnapshot(target)) }
 }
 
+pub fn render_headless_snapshot_state(out_path: &Path, app: StudioApp) -> Result<(), StudioError> {
+    let size = app.size;
+    let theme = app.theme;
+    let config = StudioConfig { size, ..StudioConfig::default() };
+    remember_launch(&config, theme);
+    if let Ok(mut slot) = LAUNCH_PREPARED.lock() {
+        *slot = Some(app);
+    }
+    let target = out_path.display().to_string();
+    let args =
+        vec!["--snap".to_owned(), target.clone(), "--size".to_owned(), format!("{}x{}", size.0 as u32, size.1 as u32), "--scale".to_owned(), "1".to_owned()];
+    let result = App::new(spec(config)).args(args).try_run().map_err(StudioError::Rune);
+    if let Ok(mut slot) = LAUNCH_PREPARED.lock() {
+        *slot = None;
+    }
+    result?;
+    if out_path.is_file() { Ok(()) } else { Err(StudioError::MissingSnapshot(target)) }
+}
+
 fn remember_launch(config: &StudioConfig, theme: Theme) {
     remember_size(config.size);
     if let Ok(mut slot) = LAUNCH_DB.lock() {
         slot.clone_from(&config.db_path);
+    }
+    if let Ok(mut slot) = LAUNCH_PREPARED.lock() {
+        *slot = None;
     }
     remember_theme(theme);
 }
@@ -1275,11 +4456,39 @@ fn remember_size(size: (f32, f32)) {
     }
 }
 
+pub fn studio_key(app: &mut StudioApp, key: &rune::KeyEvent, _: &mut rune::Tx) -> bool {
+    if !app.plug_menu_shown() {
+        app.plug_menu = None;
+    }
+    if key.key == rune::Key::Escape {
+        return app.dismiss_topmost();
+    }
+    let on_workbench = matches!(app.right_tab, RightTab::Inspector | RightTab::Trace) && !app.has_open_popover();
+    match &key.key {
+        rune::Key::Delete | rune::Key::Backspace if on_workbench && app.canvas.selection.is_some() && !app.is_running() => {
+            app.delete_selected_node();
+            true
+        }
+        _ if !app.has_open_popover() && key.is_command('z') && key.mods.shift && !app.redo_stack.is_empty() && !app.is_running() => {
+            app.redo();
+            true
+        }
+        _ if !app.has_open_popover() && key.is_command('z') && !key.mods.shift && !app.undo_stack.is_empty() && !app.is_running() => {
+            app.undo();
+            true
+        }
+        _ => false,
+    }
+}
+
 fn spec(config: StudioConfig) -> AppSpec<StudioApp> {
     remember_run_timeout(config.run_timeout);
     AppSpec {
+        fonts: STUDIO_FONTS,
+        families: STUDIO_FAMILIES,
         setup: Some(StudioApp::set_waker),
         poll: Some(|app, _, _| app.poll_background() | app.sync_edits()),
+        on_key: Some(studio_key),
         ..AppSpec::new(TITLE, config.size, StudioApp::demo, studio_view)
     }
 }
@@ -1290,568 +4499,107 @@ fn remember_run_timeout(timeout: Duration) {
     }
 }
 
-struct Tones {
-    background: Color,
-    panel: Color,
-    raised: Color,
-    line: Color,
-    ink: Color,
-    muted: Color,
-    accent: Color,
-    accent_ink: Color,
-}
-
-fn rgba(r: f32, g: f32, b: f32, a: f32) -> Color {
-    Color { r, g, b, a }
-}
-
-fn tones(theme: Theme) -> Tones {
-    match theme {
-        Theme::Dark => Tones {
-            background: rgba(0.04, 0.043, 0.052, 1.0),
-            panel: rgba(0.078, 0.082, 0.098, 1.0),
-            raised: rgba(0.12, 0.126, 0.148, 1.0),
-            line: rgba(1.0, 1.0, 1.0, 0.07),
-            ink: rgba(0.92, 0.93, 0.95, 1.0),
-            muted: rgba(0.55, 0.58, 0.64, 1.0),
-            accent: rgba(0.47, 0.4, 0.98, 1.0),
-            accent_ink: rgba(1.0, 1.0, 1.0, 1.0),
-        },
-        Theme::Light => Tones {
-            background: rgba(0.93, 0.935, 0.945, 1.0),
-            panel: rgba(0.985, 0.987, 0.99, 1.0),
-            raised: rgba(0.93, 0.935, 0.95, 1.0),
-            line: rgba(0.0, 0.0, 0.0, 0.09),
-            ink: rgba(0.1, 0.11, 0.13, 1.0),
-            muted: rgba(0.4, 0.42, 0.47, 1.0),
-            accent: rgba(0.4, 0.33, 0.93, 1.0),
-            accent_ink: rgba(1.0, 1.0, 1.0, 1.0),
-        },
-    }
-}
-
-fn font(size: f32, weight: f32) -> TextStyle {
-    TextStyle::new(size, weight)
-}
-
-fn label(content: impl Into<String>, size: f32, weight: f32, color: Color) -> El {
-    text(content).font(font(size, weight)).color(color)
-}
-
-fn button(key: &str, caption: &str, primary: bool, t: &Tones, action: fn(&mut StudioApp)) -> El {
-    sized_button(key, caption, primary, 12.0, t, action)
-}
-
-fn sized_button(key: &str, caption: &str, primary: bool, padding: f32, t: &Tones, action: fn(&mut StudioApp)) -> El {
-    let (fill, ink) = if primary { (t.accent, t.accent_ink) } else { (t.raised, t.ink) };
-    row().key(key).h(30.0).px(padding).items_center().radius(7.0).fill(fill).border(1.0, t.line).child(label(caption, 12.5, 600.0, ink)).on_press(action)
-}
-
-fn menu_item(key: &str, caption: &str, enabled: bool, t: &Tones, action: fn(&mut StudioApp)) -> El {
-    row()
-        .key(key)
-        .w_full()
-        .h(30.0)
-        .px(10.0)
-        .items_center()
-        .radius(6.0)
-        .fill(t.raised)
-        .child(label(caption, 12.5, 550.0, if enabled { t.ink } else { t.muted }))
-        .on_press(action)
-}
-
-fn context_menu(app: &StudioApp, t: &Tones) -> Option<El> {
-    let anchor = app.canvas.context_menu?;
-    let view = app.canvas_size();
-    let x = anchor[0].min(view.0 - CONTEXT_MENU_SIZE.0).max(0.0);
-    let y = anchor[1].min(view.1 - CONTEXT_MENU_SIZE.1).max(0.0);
-    let quick_add = app.specs.iter().find(|spec| spec.kind == QUICK_ADD_KIND).map_or_else(|| QUICK_ADD_KIND.to_owned(), |spec| format!("Add {}", spec.title));
-    let delete = app.canvas.selected_card().map_or_else(|| "Delete node (none selected)".to_owned(), |card| format!("Delete {}", card.title));
-    Some(
-        col()
-            .key("context-menu")
-            .size(CONTEXT_MENU_SIZE.0, CONTEXT_MENU_SIZE.1)
-            .padding(6.0)
-            .gap(4.0)
-            .radius(9.0)
-            .fill(t.panel)
-            .border(1.0, t.line)
-            .shadow(6.0, 18.0, rgba(0.0, 0.0, 0.0, 0.35))
-            .absolute(x, y)
-            .child(menu_item(&palette_key(QUICK_ADD_KIND).replacen("palette-", "context-add-", 1), &quick_add, true, t, StudioApp::quick_add_from_menu))
-            .child(menu_item("context-delete-node", &delete, app.canvas.selection.is_some(), t, StudioApp::delete_selected_node))
-            .child(menu_item("context-fit-view", "Fit view", true, t, StudioApp::fit_view))
-            .child(menu_item("context-dismiss", "Dismiss", true, t, StudioApp::close_context_menu)),
-    )
-}
-
-fn pill(caption: impl Into<String>, color: Color, t: &Tones) -> El {
-    row()
-        .gap(6.0)
-        .h(24.0)
-        .px(9.0)
-        .items_center()
-        .radius(12.0)
-        .fill(t.raised)
-        .child(el().size(7.0, 7.0).radius(3.5).fill(color))
-        .child(label(caption, 11.5, 550.0, t.ink))
-}
-
-pub fn studio_view(app: &StudioApp, _: &mut Cx<StudioApp>) -> El {
-    let t = tones(app.theme);
-    let middle = row()
-        .key("workspace")
-        .w_full()
-        .grow(1.0)
-        .min_h(0.0)
-        .child(left_rail(app, &t))
-        .child(el().key("center").grow(1.0).min_w(0.0).h_full().child(canvas_with_menu(app, &t)))
-        .child(inspector(app, &t));
-    col().key("studio").w_full().h_full().fill(t.background).child(toolbar(app, &t)).child(middle).child(trace_strip(app, &t))
-}
-
-fn canvas_with_menu(app: &StudioApp, t: &Tones) -> El {
-    let board = interactive_canvas_view::<StudioApp>(&app.canvas, app.canvas_size(), |app| &mut app.canvas);
-    match context_menu(app, t) {
-        Some(menu) => board.child(menu),
-        None => board,
-    }
-}
-
-fn toolbar(app: &StudioApp, t: &Tones) -> El {
-    let compact = app.compact_toolbar();
-    let (padding, gap, readout) = if compact { (9.0, 6.0, 44.0) } else { (12.0, 8.0, 52.0) };
-    let tool = |key: &str, caption: &str, primary: bool, action: fn(&mut StudioApp)| sized_button(key, caption, primary, padding, t, action);
-    let brand = row()
-        .gap(8.0)
-        .items_center()
-        .child(el().size(22.0, 22.0).radius(6.0).fill(t.accent).center().child(label("M", 13.0, 800.0, t.accent_ink)))
-        .child(label("MagickLaLa", 14.0, 700.0, t.ink));
-    let validation_color = match app.validation {
-        ValidationState::Unchecked => t.muted,
-        ValidationState::Valid => status_color(ExecutionStatus::Succeeded),
-        ValidationState::Invalid(_) => status_color(ExecutionStatus::Failed),
-    };
-    let zoom = row()
-        .gap(4.0)
-        .items_center()
-        .child(tool("zoom-out", "-", false, |app| app.canvas.camera.zoom_by(1.0 / 1.2, [app.canvas_size().0 / 2.0, app.canvas_size().1 / 2.0])))
-        .child(row().key("zoom-readout").w(readout).justify_center().child(label(format!("{}%", app.canvas.camera.zoom_percent()), 12.0, 600.0, t.ink)))
-        .child(tool("zoom-in", "+", false, |app| app.canvas.camera.zoom_by(1.2, [app.canvas_size().0 / 2.0, app.canvas_size().1 / 2.0])))
-        .child(tool("zoom-fit", "Fit", false, StudioApp::fit_view));
-    let stats = if compact {
-        format!("{}n · {}w", app.canvas.nodes.len(), app.canvas.wires.len())
-    } else {
-        format!("{} nodes · {} wires", app.canvas.nodes.len(), app.canvas.wires.len())
-    };
-    let left = row()
-        .key("toolbar-left")
-        .gap(if compact { 10.0 } else { 14.0 })
-        .items_center()
-        .child(brand)
-        .child(el().w(1.0).h(22.0).fill(t.line))
-        .child(label(&app.spell.name, 13.0, 600.0, t.ink))
-        .child(pill(stats, t.accent, t));
-    let right = row()
-        .gap(gap)
-        .items_center()
-        .child(pill(app.validation.label(), validation_color, t).key("validation-pill"))
-        .child(tool("validate", "Validate", false, |app| {
-            app.validate();
-        }))
-        .child(
-            row().key("run-slot").w(if compact { COMPACT_RUN_SLOT_WIDTH } else { RUN_SLOT_WIDTH }).child(
-                if app.is_running() {
-                    tool("cancel-run", "Cancel", true, StudioApp::cancel_run)
-                } else {
-                    tool("run-spell", if compact { "Run" } else { "Run Spell" }, true, |app| {
-                        app.run_spell();
-                    })
-                }
-                .w_full()
-                .justify_center(),
-            ),
-        )
-        .child(tool("save", "Save", false, |app| {
-            app.save_draft().ok();
-        }))
-        .child(tool("publish", "Publish", false, |app| {
-            app.publish().ok();
-        }))
-        .child(tool("theme-toggle", if app.theme == Theme::Dark { "Light" } else { "Dark" }, false, StudioApp::toggle_theme))
-        .child(zoom);
-    row()
-        .key("toolbar")
-        .w_full()
-        .h(TOOLBAR_HEIGHT)
-        .px(if compact { 10.0 } else { 14.0 })
-        .gap(gap)
-        .items_center()
-        .justify_between()
-        .fill(t.panel)
-        .border_sides([0.0, 0.0, 1.0, 0.0], t.line)
-        .child(left)
-        .child(right)
-}
-
-fn tab(key: &str, caption: &str, active: bool, t: &Tones, action: fn(&mut StudioApp)) -> El {
-    row()
-        .key(key)
-        .grow(1.0)
-        .h(28.0)
-        .justify_center()
-        .items_center()
-        .radius(6.0)
-        .fill(if active { t.raised } else { rgba(0.0, 0.0, 0.0, 0.0) })
-        .child(label(caption, 12.0, if active { 650.0 } else { 500.0 }, if active { t.ink } else { t.muted }))
-        .on_press(action)
-}
-
-fn palette_key(kind: &str) -> String {
-    format!("palette-{}", kind.replace('/', "-"))
-}
-
-fn left_rail(app: &StudioApp, t: &Tones) -> El {
-    let tabs = row()
-        .gap(4.0)
-        .p_all(4.0, t)
-        .child(tab("tab-palette", "Nodes", app.left_tab == LeftTab::Palette, t, |app| app.left_tab = LeftTab::Palette))
-        .child(tab("tab-agents", "Agents & Releases", app.left_tab == LeftTab::Agents, t, |app| app.left_tab = LeftTab::Agents));
-    let body = match app.left_tab {
-        LeftTab::Palette => palette_categories(&app.specs).iter().fold(col().gap(4.0), |list, category| {
-            let entries: Vec<&NodeSpec> = app.specs.iter().filter(|spec| spec.category.eq_ignore_ascii_case(category)).collect();
-            if entries.is_empty() {
-                return list;
-            }
-            let heading = row().gap(6.0).items_center().pt(8.0).pb(2.0).child(el().size(6.0, 6.0).radius(3.0).fill(category_accent(category))).child(label(
-                category.to_uppercase(),
-                10.5,
-                700.0,
-                t.muted,
-            ));
-            entries.into_iter().fold(list.child(heading), |list, spec| {
-                let kind = spec.kind.clone();
-                list.child(
-                    row()
-                        .key(palette_key(&spec.kind))
-                        .w_full()
-                        .h(30.0)
-                        .px(10.0)
-                        .gap(8.0)
-                        .items_center()
-                        .radius(6.0)
-                        .fill(t.raised)
-                        .child(el().w(3.0).h(14.0).radius(1.5).fill(category_accent(&spec.category)))
-                        .child(label(&spec.title, 12.5, 500.0, t.ink))
-                        .on_press(move |app: &mut StudioApp| {
-                            app.spawn(&kind);
-                        }),
-                )
-            })
-        }),
-        LeftTab::Agents => {
-            let agents = ["Support Agent", "Research Agent"].iter().fold(col().gap(6.0).child(label("AGENTS", 10.5, 700.0, t.muted)), |list, name| {
-                list.child(
-                    row().h(34.0).px(10.0).items_center().radius(6.0).fill(t.raised).justify_between().child(label(*name, 12.5, 550.0, t.ink)).child(pill(
-                        "live",
-                        status_color(ExecutionStatus::Succeeded),
-                        t,
-                    )),
-                )
-            });
-            let heading = agents.child(label("RELEASES", 10.5, 700.0, t.muted));
-            let heading = match (&app.store_error, app.releases.is_empty()) {
-                (Some(error), _) => heading.child(label(error, 11.5, 500.0, status_color(ExecutionStatus::Failed)).wrap()),
-                (None, true) => heading.child(label("Nothing published yet. Press Publish.", 11.5, 500.0, t.muted)),
-                (None, false) => heading,
-            };
-            let heading = match (&app.store_error, app.draft_status.as_ref().or(app.publish_status.as_ref())) {
-                (None, Some(status)) => heading.child(label(status, 11.5, 500.0, t.muted).key("draft-status")),
-                _ => heading,
-            };
-            app.releases
-                .iter()
-                .rev()
-                .fold(heading, |list, release| list.child(label(format!("v{} · {} nodes", release.version, release.nodes), 12.0, 500.0, t.ink)))
-        }
-    };
-    col()
-        .key("left-rail")
-        .w(LEFT_RAIL_WIDTH)
-        .h_full()
-        .min_h(0.0)
-        .fill(t.panel)
-        .border_sides([0.0, 1.0, 0.0, 0.0], t.line)
-        .child(tabs)
-        .child(col().key("left-rail-scroll").w_full().grow(1.0).min_h(0.0).px(10.0).pb(10.0).scroll(ScrollSpec { stick_bottom: false }).child(body))
-}
-
-trait PanelPadding {
-    fn p_all(self, amount: f32, t: &Tones) -> Self;
-}
-
-impl PanelPadding for El {
-    fn p_all(self, amount: f32, t: &Tones) -> Self {
-        self.padding(amount).mx(8.0).mt(8.0).mb(4.0).radius(8.0).fill(t.background)
-    }
-}
-
-fn inspector(app: &StudioApp, t: &Tones) -> El {
-    let tabs = row()
-        .gap(4.0)
-        .p_all(4.0, t)
-        .child(tab("tab-inspector", "Inspector", app.right_tab == RightTab::Inspector, t, |app| app.right_tab = RightTab::Inspector))
-        .child(tab("tab-variables", "Variables", app.right_tab == RightTab::Variables, t, |app| app.right_tab = RightTab::Variables))
-        .child(tab("tab-playground", "Playground", app.right_tab == RightTab::Playground, t, |app| app.right_tab = RightTab::Playground));
-    let body = match app.right_tab {
-        RightTab::Inspector => inspector_body(app, t),
-        RightTab::Variables => app.spell.variables.iter().fold(col().gap(6.0), |list, variable| {
-            list.child(
-                row()
-                    .h(32.0)
-                    .px(10.0)
-                    .items_center()
-                    .justify_between()
-                    .radius(6.0)
-                    .fill(t.raised)
-                    .child(label(&variable.name, 12.5, 600.0, t.ink))
-                    .child(label(format!("{:?}", variable.ty), 11.5, 500.0, t.muted)),
-            )
-        }),
-        RightTab::Playground => playground(app, t),
-    };
-    col()
-        .key("inspector")
-        .w(INSPECTOR_WIDTH)
-        .h_full()
-        .min_h(0.0)
-        .fill(t.panel)
-        .border_sides([1.0, 0.0, 0.0, 0.0], t.line)
-        .child(tabs)
-        .child(col().key("inspector-scroll").w_full().grow(1.0).min_h(0.0).px(12.0).pb(12.0).scroll(ScrollSpec { stick_bottom: false }).child(body))
-}
-
-fn inspector_body(app: &StudioApp, t: &Tones) -> El {
-    let Some(card) = app.canvas.selected_card() else {
-        return col().pt(12.0).child(label("Select a node on the canvas to inspect it.", 12.5, 500.0, t.muted));
-    };
-    let sockets = card.inputs.iter().map(|socket| ("in", socket)).chain(card.outputs.iter().map(|socket| ("out", socket))).fold(
-        col().gap(4.0),
-        |list, (side, socket)| {
-            list.child(
-                row()
-                    .gap(8.0)
-                    .items_center()
-                    .child(el().size(8.0, 8.0).radius(4.0).fill(magicklala_canvas::socket_color(socket.ty)))
-                    .child(label(format!("{side} · {}", socket.name), 12.0, 500.0, t.ink))
-                    .child(label(format!("{:?}", socket.ty), 11.0, 500.0, t.muted)),
-            )
-        },
-    );
-    let id = card.id.clone();
-    let field = editable_field(&card.kind);
-    let editor_height = prompt_editor_height(app.size);
-    let editor = field.and_then(|field| app.prompts.get(&card.id).map(|edit| (field, edit))).map(|(field, edit)| {
-        let input = text_input(edit, prompt_font())
-            .key("prompt-field")
-            .label(format!("{} {field}", card.title))
-            .w_full()
-            .color(t.ink)
-            .on_edit(move |app: &mut StudioApp| app.prompts.entry(id.clone()).or_insert_with(|| TextEdit::new("")));
-        col()
-            .key("prompt-editor")
-            .w_full()
-            .h(editor_height)
-            .padding(PROMPT_EDITOR_PADDING)
-            .radius(8.0)
-            .fill(t.background)
-            .border(1.0, t.line)
-            .clip_rounded(8.0)
-            .scroll(ScrollSpec { stick_bottom: false })
-            .child(input)
-    });
-    let column = col()
-        .gap(10.0)
-        .pt(10.0)
-        .child(row().gap(8.0).items_center().child(el().w(4.0).h(28.0).radius(2.0).fill(category_accent(&card.category))).child(
-            col().gap(2.0).child(label(&card.title, 15.0, 700.0, t.ink)).child(label(format!("{} · {}", card.kind, card.status.label()), 11.5, 500.0, t.muted)),
-        ))
-        .child(label("SOCKETS", 10.5, 700.0, t.muted))
-        .child(sockets)
-        .pb(14.0);
-    let column = match (field, editor) {
-        (Some(field), Some(editor)) => column.child(label(editor_caption(field), 10.5, 700.0, t.muted)).child(editor),
-        _ => column,
-    };
-    match release_version_editor(app, card, t) {
-        Some(version) => column.child(label("RELEASE VERSION", 10.5, 700.0, t.muted)).child(version),
-        None => column,
-    }
-}
-
-fn release_version_editor(app: &StudioApp, card: &magicklala_canvas::NodeCardModel, t: &Tones) -> Option<El> {
-    let edit = app.versions.get(&card.id).filter(|_| card.kind == SUBGRAPH_KIND)?;
-    let id = card.id.clone();
-    Some(
-        text_input(edit, prompt_font())
-            .single_line()
-            .key("release-version-field")
-            .label(format!("{} release version, blank runs the saved draft", card.title))
-            .w_full()
-            .h(32.0)
-            .px(10.0)
-            .radius(8.0)
-            .fill(t.background)
-            .border(1.0, t.line)
-            .color(t.ink)
-            .on_edit(move |app: &mut StudioApp| app.versions.entry(id.clone()).or_insert_with(|| TextEdit::new(""))),
-    )
-}
-
-pub fn prompt_font() -> TextStyle {
-    font(12.5, 450.0).mono()
-}
-
-pub fn prompt_editor_height(size: (f32, f32)) -> f32 {
-    if size.1 < COMPACT_INSPECTOR_BELOW { COMPACT_PROMPT_EDITOR_HEIGHT } else { PROMPT_EDITOR_HEIGHT }
-}
-
-fn editor_caption(field: &str) -> &'static str {
-    match field {
-        "script" => "RHAI SCRIPT",
-        "template" => "TEMPLATE",
-        SUBGRAPH_SPELL_FIELD => "SPELL ID",
-        _ => "PROMPT",
-    }
-}
-
-fn playground(app: &StudioApp, t: &Tones) -> El {
-    let messages = app.chat.iter().fold(col().gap(8.0).pt(10.0), |list, message| {
-        let bubble = el()
-            .max_w(230.0)
-            .padding(10.0)
-            .radius(10.0)
-            .fill(if message.from_user { t.accent } else { t.raised })
-            .child(label(&message.text, 12.5, 500.0, if message.from_user { t.accent_ink } else { t.ink }).wrap());
-        list.child(if message.from_user { row().w_full().justify_end().child(bubble) } else { row().w_full().child(bubble) })
-    });
-    let composer = row()
-        .gap(8.0)
-        .pt(10.0)
-        .items_center()
-        .child(
-            text_input(&app.chat_input, font(12.5, 450.0))
-                .single_line()
-                .key("chat-input")
-                .label("Chat message")
-                .grow(1.0)
-                .h(32.0)
-                .px(10.0)
-                .radius(8.0)
-                .fill(t.background)
-                .border(1.0, t.line)
-                .color(t.ink)
-                .on_edit(|app: &mut StudioApp| &mut app.chat_input)
-                .on_submit(|app: &mut StudioApp, _| app.send_chat()),
-        )
-        .child(button("chat-send", "Send", true, t, StudioApp::send_chat));
-    col().child(messages).child(composer)
-}
-
-pub fn studio_status(app: &StudioApp) -> Option<(&str, bool)> {
-    match (&app.store_error, &app.draft_status, &app.publish_status) {
-        (Some(error), _, _) => Some((error, true)),
-        (None, Some(status), _) | (None, None, Some(status)) => Some((status, false)),
-        (None, None, None) => None,
-    }
-}
-
-fn status_badge(app: &StudioApp, t: &Tones) -> Option<El> {
-    let (message, failed) = studio_status(app)?;
-    let color = if failed { status_color(ExecutionStatus::Failed) } else { status_color(ExecutionStatus::Succeeded) };
-    Some(
-        row()
-            .key("studio-status-badge")
-            .gap(6.0)
-            .min_w(0.0)
-            .items_center()
-            .child(el().size(7.0, 7.0).radius(3.5).fill(color))
-            .child(label(message, 11.5, 600.0, if failed { color } else { t.ink }).key("studio-status").truncate()),
-    )
-}
-
-fn trace_strip(app: &StudioApp, t: &Tones) -> El {
-    let header = row().w_full().gap(10.0).items_center().child(label("TRACE", 10.5, 700.0, t.muted)).child(label(
-        match (app.runs, app.is_running()) {
-            (0, _) => "No runs yet. Press Run Spell.".to_owned(),
-            (runs, true) => format!("run #{runs} · running · {} events · Cancel stops it", app.trace.len()),
-            (runs, false) => format!("run #{runs} · {} events", app.trace.len()),
-        },
-        11.5,
-        500.0,
-        t.muted,
-    ));
-    let header = match status_badge(app, t) {
-        Some(badge) => header.child(el().grow(1.0).min_w(0.0)).child(badge),
-        None => header,
-    };
-    let entries = app.trace.iter().fold(row().gap(6.0).flex_wrap(), |list, line| {
-        list.child(
-            row()
-                .gap(6.0)
-                .h(22.0)
-                .px(8.0)
-                .items_center()
-                .radius(5.0)
-                .fill(t.raised)
-                .child(el().size(6.0, 6.0).radius(3.0).fill(status_color(line.status)))
-                .child(label(format!("+{}ms", line.at_ms), 10.5, 500.0, t.muted).font(font(10.5, 500.0).mono()))
-                .child(label(line.kind, 11.0, 650.0, t.ink))
-                .child(label(&line.detail, 11.0, 450.0, t.muted)),
-        )
-    });
-    col()
-        .key("trace-strip")
-        .w_full()
-        .h(TRACE_HEIGHT)
-        .min_h(0.0)
-        .padding(10.0)
-        .gap(6.0)
-        .fill(t.panel)
-        .border_sides([0.0, 0.0, 0.0, 1.0], t.line)
-        .child(header)
-        .child(col().key("trace-scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: true }).child(entries))
-}
+mod view;
+pub use view::{potion_mood, prompt_editor_height, prompt_font, studio_status, studio_view};
 
 fn trace_line(event: &TraceEvent, at_ms: u64, canvas: &CanvasState) -> TraceLine {
     let path = event.subgraph_path();
     let along_path = |leaf: &str| path.iter().map(|step| step.0.as_str()).chain(std::iter::once(leaf)).collect::<Vec<_>>().join(" › ");
     let title = |id: &NodeId| {
-        if path.is_empty() { canvas.card(id).map_or_else(|| id.0.clone(), |card| card.title.clone()) } else { along_path(&id.0) }
+        if !path.is_empty() {
+            return along_path(&id.0);
+        }
+        canvas.display_title(id)
     };
-    let (kind, detail, status) = match event {
-        TraceEvent::RunStarted { .. } => ("RunStarted", String::new(), ExecutionStatus::Running),
-        TraceEvent::NodeStarted { node_id, .. } => ("NodeStarted", title(node_id), ExecutionStatus::Running),
-        TraceEvent::NodeFinished { node_id, duration_ms, .. } => ("NodeFinished", format!("{} {duration_ms}ms", title(node_id)), ExecutionStatus::Succeeded),
-        TraceEvent::NodeFailed { node_id, error, .. } => ("NodeFailed", format!("{} {error}", title(node_id)), ExecutionStatus::Failed),
-        TraceEvent::WireActivated { wire_id, .. } => ("WireActivated", along_path(&wire_id.0), ExecutionStatus::Succeeded),
-        TraceEvent::StreamChunk { node_id, .. } => ("StreamChunk", title(node_id), ExecutionStatus::Running),
-        TraceEvent::VariableSet { name, .. } => ("VariableSet", name.clone(), ExecutionStatus::Succeeded),
+    let wire_label = |wire_id: &WireId| {
+        if !path.is_empty() {
+            return along_path(&wire_id.0);
+        }
+        canvas
+            .wires
+            .iter()
+            .find(|wire| &wire.id == wire_id)
+            .map_or_else(|| wire_id.0.clone(), |wire| format!("{}.{} → {}.{}", title(&wire.from_node), wire.from_socket, title(&wire.to_node), wire.to_socket))
+    };
+    let (kind, detail, status, node) = match event {
+        TraceEvent::RunStarted { .. } => ("RunStarted", String::new(), ExecutionStatus::Running, None),
+        TraceEvent::NodeStarted { node_id, .. } => ("NodeStarted", title(node_id), ExecutionStatus::Running, Some(node_id.clone())),
+        TraceEvent::NodeFinished { node_id, duration_ms, .. } => {
+            let timing = if *duration_ms == 0 { "<1ms".to_owned() } else { format!("{duration_ms}ms") };
+            ("NodeFinished", format!("{} · {timing}", title(node_id)), ExecutionStatus::Succeeded, Some(node_id.clone()))
+        }
+        TraceEvent::NodeFailed { node_id, error, .. } => ("NodeFailed", format!("{}: {error}", title(node_id)), ExecutionStatus::Failed, Some(node_id.clone())),
+        TraceEvent::WireActivated { wire_id, .. } => ("WireActivated", wire_label(wire_id), ExecutionStatus::Succeeded, None),
+        TraceEvent::StreamChunk { node_id, .. } => ("StreamChunk", title(node_id), ExecutionStatus::Running, Some(node_id.clone())),
+        TraceEvent::VariableSet { name, .. } => ("VariableSet", name.clone(), ExecutionStatus::Succeeded, None),
         TraceEvent::RunFinished { summary, .. } => (
             "RunFinished",
             format!("{:?}", summary.status),
             if summary.status == RunStatus::Succeeded { ExecutionStatus::Succeeded } else { ExecutionStatus::Failed },
+            None,
         ),
     };
-    TraceLine { at_ms, kind, detail, status }
+    TraceLine { at_ms, kind, detail, status, node, path: path.to_vec() }
+}
+
+pub fn numbered_steps(trace: &[TraceLine]) -> Vec<(String, &TraceLine)> {
+    let steps: Vec<&TraceLine> = trace.iter().filter(|line| line.kind == "NodeFinished" || line.kind == "NodeFailed").collect();
+    let mut tops: Vec<&NodeId> = Vec::new();
+    for line in &steps {
+        let Some(node) = line.node.as_ref() else { continue };
+        let top = line.path.first().filter(|_| !line.path.is_empty());
+        if top.is_none() && !tops.contains(&node) {
+            tops.push(node);
+        }
+    }
+    for line in &steps {
+        if let Some(parent) = line.path.first()
+            && !tops.contains(&parent)
+        {
+            tops.push(parent);
+        }
+    }
+    let mut numbered = Vec::new();
+    for (index, top) in tops.iter().enumerate() {
+        let number = index + 1;
+        numbered.extend(steps.iter().filter(|line| line.path.is_empty() && line.node.as_ref() == Some(top)).map(|line| (number.to_string(), *line)));
+        let mut children: Vec<(&[NodeId], &NodeId)> = Vec::new();
+        for line in steps.iter().filter(|line| line.path.first() == Some(top)) {
+            let Some(node) = line.node.as_ref() else { continue };
+            let key = (line.path.as_slice(), node);
+            if !children.contains(&key) {
+                children.push(key);
+            }
+            let child = children.iter().position(|known| known == &key).unwrap_or(0) + 1;
+            numbered.push((format!("{number}.{child}"), *line));
+        }
+    }
+    numbered
+}
+
+pub fn top_step_count(trace: &[TraceLine]) -> usize {
+    numbered_steps(trace).iter().filter(|(number, _)| !number.contains('.')).map(|(number, _)| number.clone()).collect::<std::collections::BTreeSet<_>>().len()
+}
+
+fn type_words(ty: SocketType) -> &'static str {
+    match ty {
+        SocketType::Bool => "true or false",
+        SocketType::Int => "a whole number",
+        SocketType::Float => "a number",
+        SocketType::String => "text",
+        _ => "structured data",
+    }
+}
+
+pub fn template_roots(text: &str) -> Vec<String> {
+    magicklala_nodes::template_roots(text)
 }
 
 fn default_prompt(kind: &str) -> String {
     match kind {
-        "ai/generate_text" => "You are a helpful agent.\n\nMemory:\n{{memory}}\n\nKnowledge:\n{{knowledge}}\n\nUser: {{content}}".to_owned(),
-        "memory/search" => "Recall the 5 most relevant memories for {{content}}".to_owned(),
-        "knowledge/search" => "Search the knowledge base for {{content}}".to_owned(),
-        "code/rhai_script" => "let reply = input.content;\nreply.to_upper()".to_owned(),
+        "ai/generate_text" => "You are a helpful agent. Answer the user clearly and kindly.".to_owned(),
+        "code/rhai_script" => "content.to_upper()".to_owned(),
+        "text/template" => "{{content}}".to_owned(),
         _ => String::new(),
     }
 }
@@ -1873,16 +4621,35 @@ pub fn palette_categories(specs: &[NodeSpec]) -> Vec<String> {
     found
 }
 
+fn hex_plaque(findings: &[HexFinding], canvas: &CanvasState) -> String {
+    let title_of = |id: &NodeId| canvas.card(id).map(|_| canvas.display_title(id));
+    if findings.len() > 1 {
+        return format!("Hexed · {} issues", findings.len());
+    }
+    match findings.first() {
+        Some(HexFinding { socket: Some(socket), mistyped: true, .. }) => format!("Hexed · wrong type \"{socket}\""),
+        Some(HexFinding { socket: Some(socket), .. }) => format!("Hexed · missing \"{socket}\""),
+        Some(HexFinding { node: Some(node), .. }) => format!("Hexed · {}", title_of(node).unwrap_or_else(|| node.0.clone())),
+        Some(HexFinding { node: None, readable, .. }) => format!("Hexed · {readable}"),
+        None => "Hexed".to_owned(),
+    }
+}
+
 fn demo_spell() -> SpellGraph {
     let mut spell = SpellGraph::new("Support Agent");
     let place =
-        |id: &str, kind: &str, position: [f32; 2]| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position, config: serde_json::Value::Null };
+        |id: &str, kind: &str, position: [f32; 2], config: serde_json::Value| NodeInstance { id: NodeId::from(id), kind: kind.to_owned(), position, config };
     spell.nodes = vec![
-        place("trigger", "event/on_message", [40.0, 170.0]),
-        place("recall", "memory/search", [310.0, 40.0]),
-        place("search", "knowledge/search", [310.0, 290.0]),
-        place("llm", "ai/generate_text", [590.0, 140.0]),
-        place("reply", "io/send_message", [870.0, 210.0]),
+        place("trigger", "event/on_message", [0.0, 108.0], serde_json::Value::Null),
+        place("recall", "memory/search", [250.0, 12.0], json!({ "limit": "{{max_memories}}" })),
+        place("search", "knowledge/search", [500.0, 208.0], serde_json::Value::Null),
+        place(
+            "llm",
+            "ai/generate_text",
+            [750.0, 86.0],
+            json!({ "provider": "openai", "model": "gpt-4o-mini", "temperature": "{{temperature}}", "prompt": default_prompt("ai/generate_text") }),
+        ),
+        place("reply", "io/send_message", [1000.0, 128.0], serde_json::Value::Null),
     ];
     let wire = |id: &str, from: (&str, &str), to: (&str, &str)| Wire {
         id: WireId::from(id),
@@ -1906,10 +4673,8 @@ fn demo_spell() -> SpellGraph {
     spell
 }
 fn variables() -> Vec<VariableDef> {
-    serde_json::from_value(json!([
-        { "name": "agent_name", "ty": "string", "default": "Support Agent" },
-        { "name": "max_memories", "ty": "int", "default": 5 },
-        { "name": "temperature", "ty": "float", "default": 0.4 }
-    ]))
-    .unwrap_or_default()
+    vec![
+        VariableDef { name: "max_memories".to_owned(), ty: SocketType::Int, default: Some(Value::Int(5)), exposed: true },
+        VariableDef { name: "temperature".to_owned(), ty: SocketType::Float, default: Some(Value::Float(0.4)), exposed: true },
+    ]
 }

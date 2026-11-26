@@ -1,118 +1,1078 @@
-use magicklala_graph::SocketType;
-use rune::{Color, El, LineCap, Path, Phase, Shape, TextStyle, canvas, col, el, row, text};
+use magicklala_graph::{RunStatus, SocketType};
+use rune::{Color, El, Phase, Shape, TextStyle, canvas, col, el, row, text};
 
+use crate::brew::BrewPlan;
+use crate::cauldron::{Toss, TossHook, cauldron_workbench_view};
+use crate::hearth::{
+    CauldronMood, HearthPalette, WireStyle, brand_cauldron_mark, category_tone, fill_circle, fill_star4, grimoire_wire_shape, hex, mini_vial_icon,
+    potion_bottle_shape, with_alpha,
+};
 use crate::model::{CARD_HEADER, SOCKET_ROW};
-use crate::{CanvasState, DragState, ExecutionStatus, NodeCardModel, SocketModel, SocketRef};
+use crate::{CanvasState, DragState, ExecutionStatus, NodeCardModel, SocketModel, SocketRef, WorkbenchMode};
 
-const SOCKET_SIZE: f32 = 12.0;
-const DOT_SPACING: f32 = 24.0;
-
-fn rgba(r: f32, g: f32, b: f32, a: f32) -> Color {
-    Color { r, g, b, a }
-}
-
-fn with_alpha(color: Color, a: f32) -> Color {
-    Color { a, ..color }
-}
+const FLOW_KNOT_SIZE: f32 = 11.5;
+const DATA_PIN_SIZE: f32 = 8.5;
+const DOT_SPACING: f32 = 26.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CanvasPalette {
     pub surface: Color,
     pub dot: Color,
     pub card: Color,
+    pub card_header: Color,
     pub card_border: Color,
+    pub card_border_idle: Color,
     pub ink: Color,
     pub muted: Color,
     pub ring: Color,
     pub header_ink: Color,
+    pub thread: Color,
+    pub knot: Color,
+    pub rule: Color,
+    pub rule_2: Color,
+    pub offset_shadow: Color,
+    pub offset_card: Color,
 }
 
 impl CanvasPalette {
     pub fn for_theme(light: bool) -> Self {
-        if light {
-            Self {
-                surface: rgba(0.955, 0.957, 0.965, 1.0),
-                dot: rgba(0.0, 0.0, 0.0, 0.14),
-                card: rgba(1.0, 1.0, 1.0, 1.0),
-                card_border: rgba(0.0, 0.0, 0.0, 0.12),
-                ink: rgba(0.1, 0.11, 0.13, 1.0),
-                muted: rgba(0.4, 0.42, 0.47, 1.0),
-                ring: rgba(0.36, 0.42, 0.98, 1.0),
-                header_ink: rgba(1.0, 1.0, 1.0, 1.0),
-            }
-        } else {
-            Self {
-                surface: rgba(0.058, 0.062, 0.075, 1.0),
-                dot: rgba(1.0, 1.0, 1.0, 0.075),
-                card: rgba(0.115, 0.122, 0.145, 1.0),
-                card_border: rgba(1.0, 1.0, 1.0, 0.08),
-                ink: rgba(0.92, 0.93, 0.95, 1.0),
-                muted: rgba(0.55, 0.58, 0.64, 1.0),
-                ring: rgba(0.52, 0.58, 1.0, 1.0),
-                header_ink: rgba(1.0, 1.0, 1.0, 1.0),
-            }
+        let p = HearthPalette::for_theme(light);
+        Self {
+            surface: p.paper,
+            dot: p.canvas_dot,
+            card: p.card,
+            card_header: p.wash_2,
+            card_border: p.ink,
+            card_border_idle: p.rule_2,
+            ink: p.ink,
+            muted: p.mute,
+            ring: p.broth_mid,
+            header_ink: p.ink,
+            thread: p.broth_mid,
+            knot: p.broth_deep,
+            rule: p.rule,
+            rule_2: p.rule_2,
+            offset_shadow: p.shadow_soft,
+            offset_card: p.shadow_card,
         }
     }
 }
 
 pub fn socket_color(ty: SocketType) -> Color {
-    let (r, g, b) = match ty {
-        SocketType::Flow => (0.95, 0.95, 0.97),
-        SocketType::String => (0.35, 0.78, 0.5),
-        SocketType::Int | SocketType::Float => (0.38, 0.62, 1.0),
-        SocketType::Bool => (0.95, 0.42, 0.42),
-        SocketType::Json | SocketType::Array => (0.96, 0.68, 0.3),
-        SocketType::Embedding => (0.86, 0.48, 0.96),
-        SocketType::Event => (1.0, 0.84, 0.34),
-        SocketType::Any => (0.6, 0.62, 0.68),
-    };
-    Color { r, g, b, a: 1.0 }
-}
-
-fn flow_wire_color(ty: SocketType, light: bool) -> Color {
-    if ty == SocketType::Flow && light { rgba(0.3, 0.32, 0.38, 1.0) } else { socket_color(ty) }
-}
-
-pub fn category_accent(category: &str) -> Color {
-    match category.to_ascii_lowercase().as_str() {
-        "events" | "event" => rgba(0.93, 0.56, 0.13, 1.0),
-        "flow" => rgba(0.45, 0.52, 0.64, 1.0),
-        "ai" => rgba(0.55, 0.4, 0.98, 1.0),
-        "memory" => rgba(0.08, 0.68, 0.64, 1.0),
-        "knowledge" => rgba(0.2, 0.5, 0.95, 1.0),
-        "io" => rgba(0.26, 0.74, 0.38, 1.0),
-        "code" | "script" => rgba(0.9, 0.3, 0.58, 1.0),
-        "variables" => rgba(0.96, 0.78, 0.2, 1.0),
-        "text" => rgba(0.62, 0.8, 0.22, 1.0),
-        "logic" => rgba(0.94, 0.38, 0.3, 1.0),
-        "json" | "data" => rgba(0.12, 0.78, 0.9, 1.0),
-        "network" => rgba(0.36, 0.34, 0.86, 1.0),
-        "time" => rgba(0.78, 0.5, 0.3, 1.0),
-        _ => rgba(0.4, 0.43, 0.5, 1.0),
+    let p = HearthPalette::for_theme(true);
+    match ty {
+        SocketType::Flow => p.broth_mid,
+        _ => p.ink,
     }
 }
 
+pub fn category_accent(category: &str) -> Color {
+    category_tone(category, true).liquid
+}
+
 pub fn status_color(status: ExecutionStatus) -> Color {
+    let p = HearthPalette::for_theme(true);
     match status {
-        ExecutionStatus::Idle => rgba(0.55, 0.58, 0.64, 1.0),
-        ExecutionStatus::Running => rgba(0.98, 0.78, 0.25, 1.0),
-        ExecutionStatus::Succeeded => rgba(0.3, 0.82, 0.5, 1.0),
-        ExecutionStatus::Failed => rgba(0.95, 0.36, 0.36, 1.0),
+        ExecutionStatus::Idle => p.mute,
+        ExecutionStatus::Running => p.running_mark(),
+        ExecutionStatus::Succeeded => p.broth_mid,
+        ExecutionStatus::Failed => p.hex,
     }
 }
 
 pub fn canvas_view(state: &CanvasState, size: (f32, f32)) -> El {
-    interactive_canvas_view::<CanvasState>(state, size, |state| state)
+    interactive_canvas_view::<CanvasState>(state, size, |state| state, |state, toss| state.apply_toss(&toss))
 }
 
-pub fn interactive_canvas_view<S: 'static>(state: &CanvasState, size: (f32, f32), lens: fn(&mut S) -> &mut CanvasState) -> El {
+pub fn interactive_canvas_view<S: 'static>(state: &CanvasState, size: (f32, f32), lens: fn(&mut S) -> &mut CanvasState, toss: TossHook<S>) -> El {
+    match state.mode {
+        WorkbenchMode::Cauldron => cauldron_workbench_view(state, size, lens, toss),
+        WorkbenchMode::Grimoire => grimoire_graph_view(state, size, lens),
+    }
+}
+
+pub fn cauldron_mood(state: &CanvasState) -> CauldronMood {
+    if state.nodes.iter().all(|card| state.is_shelved(&card.id)) {
+        return CauldronMood::Empty;
+    }
+    if state.running_brew {
+        return CauldronMood::Simmering;
+    }
+    if state.invalid_brew || state.nodes.iter().any(|card| card.status == ExecutionStatus::Failed) {
+        return CauldronMood::Hexed;
+    }
+    match state.last_brew {
+        Some(RunStatus::Succeeded) => return CauldronMood::Brewed,
+        Some(RunStatus::Failed | RunStatus::TimedOut) => return CauldronMood::Hexed,
+        Some(RunStatus::Cancelled) => return CauldronMood::Ready,
+        None => {}
+    }
+    if state.nodes.iter().any(|card| card.status == ExecutionStatus::Running) {
+        return CauldronMood::Simmering;
+    }
+    if state.has_run() || state.nodes.iter().any(|card| card.status == ExecutionStatus::Succeeded) {
+        return CauldronMood::Brewed;
+    }
+    CauldronMood::Ready
+}
+
+pub(crate) fn mode_switcher<S: 'static>(state: &CanvasState, p: &HearthPalette, lens: fn(&mut S) -> &mut CanvasState, size: (f32, f32)) -> El {
+    let is_cauldron = state.mode == WorkbenchMode::Cauldron;
+    let pill = |key: &str, caption: &str, active: bool, target: WorkbenchMode| {
+        row()
+            .key(key)
+            .h(26.0)
+            .px(10.0)
+            .gap(5.0)
+            .radius(9.0)
+            .continuous_corners()
+            .items_center()
+            .fill(if active { p.primary_bg } else { Color::TRANSPARENT })
+            .child(text(caption).font(TextStyle::new(11.5, if active { 700.0 } else { 550.0 })).color(if active { p.primary_ink } else { p.mute }))
+            .on_press(move |s: &mut S| {
+                let c = lens(s);
+                c.mode = target;
+                c.context_menu = None;
+                if target == WorkbenchMode::Grimoire && !c.grimoire_fitted {
+                    c.fit(size);
+                    c.grimoire_fitted = true;
+                }
+            })
+    };
+    row()
+        .key("workbench-mode-switch")
+        .padding(3.0)
+        .gap(2.0)
+        .radius(12.0)
+        .continuous_corners()
+        .fill(p.card)
+        .border(1.0, p.rule_2)
+        .shadow(3.0, 10.0, p.shadow_card)
+        .absolute(14.0, 12.0)
+        .child(pill("mode-cauldron", "Cauldron", is_cauldron, WorkbenchMode::Cauldron))
+        .child(pill("mode-grimoire", "Grimoire", !is_cauldron, WorkbenchMode::Grimoire))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) const LEGIBLE_PX: f32 = 10.5;
+
+fn twin_title(title: &str, style: TextStyle, ink: Color, room: f32) -> El {
+    let fits = title.chars().count() as f32 * 0.6 * style.size <= room;
+    match title.rsplit_once(" · ").filter(|_| !fits) {
+        Some((name, number)) => row()
+            .w_full()
+            .min_w(0.0)
+            .items_center()
+            .child(text(name).font(style).color(ink).truncate())
+            .child(text(format!("\u{a0}·\u{a0}{number}")).font(style).color(ink)),
+        None => row().w_full().min_w(0.0).child(text(title).font(style).color(ink).truncate()),
+    }
+}
+
+pub(crate) fn legible_size(size: f32, scale: f32) -> f32 {
+    size.max(LEGIBLE_PX / scale.max(0.05))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ingredient_vial_card<S: 'static>(
+    state: &CanvasState,
+    card: &NodeCardModel,
+    step_num: Option<usize>,
+    pos: [f32; 2],
+    dims: [f32; 2],
+    aside: bool,
+    mirrored: bool,
+    p: &HearthPalette,
+    lens: fn(&mut S) -> &mut CanvasState,
+    toss: TossHook<S>,
+    plan: BrewPlan,
+) -> El {
+    let tone = category_tone(&card.category, state.light);
+    let hexed = card.status == ExecutionStatus::Failed || card.inputs.iter().any(|s| s.flagged);
+    let dimmed = state.has_run() && card.status == ExecutionStatus::Idle && !card.selected && !hexed;
+    let untaken_bg = p.untaken_fill();
+    let untaken_border = p.untaken_border();
+    let untaken_title = p.untaken_title();
+    let untaken_sub = p.untaken_sub();
+    let border_col = if hexed {
+        p.hex
+    } else if card.selected {
+        tone.liquid
+    } else if dimmed {
+        untaken_border
+    } else {
+        tone.border
+    };
+    let border_w = if hexed || card.selected { 2.0 } else { 1.3 };
+    let fill_col = if hexed {
+        p.hex_tint
+    } else if card.selected {
+        tone.tint
+    } else if dimmed {
+        untaken_bg
+    } else {
+        p.card
+    };
+    let node_id = card.id.clone();
+    let select_id = card.id.clone();
+
+    let plan_scale = plan.scale;
+    let legible = |size: f32| legible_size(size, plan_scale);
+    let dense = dims[1] < 50.0;
+    let narrow = dims[0] < 170.0;
+    let crammed = legible(13.0) > 13.0;
+    let badge: f32 = if crammed {
+        24.0
+    } else if dense || narrow {
+        30.0
+    } else {
+        38.0
+    };
+    let badge = badge.max(14.5 / 0.76 / plan.scale.max(0.05)).min(dims[1] - 4.0);
+    let vial_badge = el()
+        .key(format!("vial-{}", card.id.0))
+        .size(badge, badge)
+        .radius(badge * 0.5)
+        .fill(if hexed { with_alpha(p.hex, 0.14) } else { tone.tint })
+        .border(1.3, if hexed { p.hex } else { tone.border })
+        .center()
+        .child(canvas(mini_vial_icon(&card.category, state.light, badge * 0.76)).size(badge * 0.76, badge * 0.76).rotate(if aside {
+            0.0
+        } else if mirrored {
+            -0.5
+        } else {
+            0.5
+        }));
+
+    let badge_side = legible(11.0) * 1.8;
+    let step_badge = step_num.map(|num| {
+        let side = badge_side;
+        row()
+            .size(side, side)
+            .radius(side * 0.5)
+            .items_center()
+            .justify_center()
+            .fill(if hexed {
+                p.hex
+            } else if card.status == ExecutionStatus::Succeeded {
+                p.primary_bg
+            } else {
+                p.wash_2
+            })
+            .border(
+                1.0,
+                if hexed {
+                    p.hex
+                } else if card.status == ExecutionStatus::Succeeded {
+                    p.primary_bg
+                } else {
+                    p.rule_2
+                },
+            )
+            .child(
+                text(num.to_string())
+                    .font(TextStyle::new(legible(11.0), 750.0).features("'tnum' 1"))
+                    .color(if hexed || card.status == ExecutionStatus::Succeeded { p.primary_ink } else { p.ink_2 }),
+            )
+    });
+
+    let pill_reason = card.inputs.iter().find(|socket| socket.flagged).map_or_else(
+        || (if card.status == ExecutionStatus::Failed { "Failed" } else { "Hexed" }).to_owned(),
+        |socket| format!("{} \"{}\"", if socket.mistyped { "Wrong type" } else { "Missing" }, socket.name),
+    );
+    let hex_label_for = |pill_room: f32| {
+        let flagged: Vec<&SocketModel> = card.inputs.iter().filter(|s| s.flagged).collect();
+        let more = if flagged.len() > 1 { format!(" +{}", flagged.len() - 1) } else { String::new() };
+        let fits = |label: &String| crate::measure::text_width(label, legible(11.0), 750.0) <= pill_room;
+        match flagged.first() {
+            Some(s) => {
+                let (verb, short) = if s.mistyped { ("Wrong type", "Wrong") } else { ("Missing", "No") };
+                let options = [format!("{verb} \"{}\"{more}", s.name), format!("{short} \"{}\"{more}", s.name)];
+                options.iter().find(|label| fits(label)).cloned().unwrap_or_else(|| options[1].clone())
+            }
+            None => (if card.status == ExecutionStatus::Failed { "Failed" } else { "Hexed" }).to_owned(),
+        }
+    };
+    let slim_pill = hexed.then(|| {
+        let pill_clear = if step_num.is_some() { legible(11.0) * 1.8 + 2.0 } else { 10.0 };
+        let pill_icon = if dense || crammed { 10.0 + badge + 6.0 } else { 10.0 };
+        row()
+            .px(6.0)
+            .radius(7.0)
+            .fill(p.card)
+            .border(1.0, p.hex)
+            .shadow(2.0, 6.0, p.shadow_card)
+            .min_w(0.0)
+            .child(text(hex_label_for(dims[0] - pill_clear - pill_icon - 12.0)).font(TextStyle::new(legible(11.0), 750.0)).color(p.hex).truncate())
+    });
+    let status_pill = if hexed {
+        let pill_clear = if step_num.is_some() { legible(11.0) * 1.8 + 2.0 } else { 10.0 };
+        let pill_icon = if dense || crammed { 10.0 + badge + 6.0 } else { 10.0 };
+        let missing_label = hex_label_for(dims[0] - pill_clear - pill_icon - 12.0);
+        Some(
+            row()
+                .px(6.0)
+                .py(1.5)
+                .radius(7.0)
+                .fill(p.card)
+                .border(1.2, p.hex)
+                .shadow(2.0, 6.0, p.shadow_card)
+                .min_w(0.0)
+                .child(text(missing_label).font(TextStyle::new(legible(11.0), 750.0)).color(p.hex).truncate()),
+        )
+    } else if card.status == ExecutionStatus::Succeeded {
+        let ms_text = match card.duration_ms {
+            Some(0) => "<1ms".to_owned(),
+            Some(ms) => format!("{ms}ms"),
+            None => String::new(),
+        };
+        let ms_text = if dense || crammed { String::new() } else { ms_text };
+        Some(row().px(5.5).py(1.5).radius(7.0).fill(p.card).border(1.0, p.broth_mid).shadow(2.0, 6.0, p.shadow_card).child(
+            row().gap(3.0).items_center().child(crate::hearth::check_mark(if state.light { p.broth_deep } else { p.broth_foam }, 10.0)).child(
+                text(ms_text).font(TextStyle::new(legible(11.0), 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam }),
+            ),
+        ))
+    } else if card.status == ExecutionStatus::Running {
+        Some(
+            row()
+                .px(6.0)
+                .py(1.5)
+                .radius(7.0)
+                .fill(p.card)
+                .border(1.0, p.gold)
+                .child(text("Simmering").font(TextStyle::new(legible(11.0), 750.0)).color(p.simmer_ink())),
+        )
+    } else if state.stopped.contains(&card.id) {
+        Some(
+            row()
+                .px(5.5)
+                .py(1.5)
+                .radius(7.0)
+                .fill(p.untaken_pill_fill())
+                .border(1.0, p.untaken_border())
+                .child(text("Stopped").font(TextStyle::new(legible(11.0), 700.0)).color(p.untaken_pill_ink())),
+        )
+    } else if dimmed && state.brew_completed() {
+        let branch = |socket: &str| !(socket == "out" || socket.starts_with("out_") || socket == "in");
+        let untaken_label = state
+            .wires
+            .iter()
+            .find(|fw| fw.to_node == card.id && fw.ty.is_flow())
+            .or_else(|| {
+                state.wires.iter().find(|w| w.from_node == card.id).and_then(|w| state.wires.iter().find(|fw| fw.to_node == w.to_node && fw.ty.is_flow()))
+            })
+            .filter(|fw| branch(&fw.from_socket))
+            .map_or_else(|| "Untaken".to_owned(), |fw| format!("Untaken · {}", fw.from_socket));
+        Some(
+            row()
+                .px(5.5)
+                .py(1.5)
+                .radius(7.0)
+                .fill(p.untaken_pill_fill())
+                .border(1.0, p.untaken_border())
+                .min_w(0.0)
+                .child(text(untaken_label).font(TextStyle::new(legible(11.0), 700.0)).color(p.untaken_pill_ink()).truncate()),
+        )
+    } else {
+        None
+    };
+
+    let title_size = legible(13.0);
+    let kind_size = legible(11.5);
+    let step_pad = if step_num.is_some() { (badge_side - 4.0).max(15.0) } else { 9.0 };
+    let title_room_est = dims[0] - step_pad - 9.0 - badge - if narrow { 6.0 } else { 9.0 };
+    let one_line = plan
+        .cards
+        .iter()
+        .filter(|placed| placed.role != crate::brew::BrewRole::Bottle)
+        .all(|placed| state.display_title(&placed.id).chars().count() as f32 * 7.6 * title_size / 13.0 <= title_room_est);
+    let title_lines = if one_line || crammed { 1.0 } else { 2.0 };
+    let kinds_fit_across = plan
+        .cards
+        .iter()
+        .filter(|placed| placed.role != crate::brew::BrewRole::Bottle)
+        .filter_map(|placed| state.card(&placed.id))
+        .all(|other| short_line(state.card_line(other)).chars().count() as f32 * 0.62 * kind_size <= title_room_est + badge);
+    let kind_fits = !dense && kinds_fit_across && (title_lines * title_size + kind_size) * 1.25 + 8.0 <= dims[1];
+    let title_room = dims[0] - 24.0 - 6.0 - 30.0;
+    let wraps = narrow && state.display_title(&card.id).chars().count() as f32 * 7.4 * title_size / 13.0 > title_room;
+    let title_ink = if dimmed { untaken_title } else { p.ink };
+    let chip_font = legible(11.0);
+    let stacked_cards: Vec<&crate::brew::BrewCard> = plan.cards.iter().filter(|placed| placed.role == crate::brew::BrewRole::Ingredient).collect();
+    let air_above = plan.card(&card.id).map_or(f32::MAX, |placed| {
+        stacked_cards
+            .iter()
+            .filter(|other| other.id != card.id && other.rect[0] < placed.rect[0] + placed.rect[2] && placed.rect[0] < other.rect[0] + other.rect[2])
+            .map(|other| placed.rect[1] - (other.rect[1] + other.rect[3]))
+            .filter(|gap| *gap >= 0.0)
+            .fold(f32::MAX, f32::min)
+            / plan.scale.max(0.05)
+    });
+    let rows_too_tight_for_chips = stacked_cards.iter().any(|upper| {
+        stacked_cards.iter().any(|lower| {
+            let gap = lower.rect[1] - (upper.rect[1] + upper.rect[3]);
+            let side_by_side = lower.rect[0] < upper.rect[0] + upper.rect[2] && upper.rect[0] < lower.rect[0] + lower.rect[2];
+            side_by_side && gap >= 0.0 && gap < 13.0 * plan.scale
+        })
+    });
+    let early_icon_side = if dense || crammed { 10.0 + badge + 6.0 } else { 10.0 };
+    let early_words_high = title_size * 1.25 * title_lines + if kind_fits { kind_size * 1.25 + 2.0 } else { 0.0 };
+    let early_title_top = ((dims[1] - early_words_high) * 0.5).max(0.0);
+    let early_title_right = step_pad + crate::measure::text_width(&state.display_title(&card.id), title_size, 750.0);
+    let perched_label = status_pill.as_ref().map(|_| hex_label_for(dims[0] - early_icon_side - step_pad - 12.0)).unwrap_or_default();
+    let early_chip_left =
+        dims[0] - early_icon_side - if hexed { crate::measure::text_width(&perched_label, chip_font, 750.0) + 14.0 } else { chip_font + 11.0 };
+    let chip_rides_title = hexed && -12.0 + chip_font * 1.25 + 3.0 > early_title_top && (mirrored || early_title_right > early_chip_left);
+    let title_el = if crammed {
+        twin_title(&state.display_title(&card.id), TextStyle::new(title_size, 750.0), title_ink, title_room_est)
+    } else {
+        text(state.display_title(&card.id).replace(" · ", "\u{a0}·\u{a0}")).font(TextStyle::new(title_size, 750.0)).color(title_ink).wrap()
+    };
+    let top_row = col().w_full().min_w(0.0).child(title_el);
+
+    let sub_color = if hexed {
+        p.hex
+    } else if dimmed {
+        untaken_sub
+    } else {
+        p.mute
+    };
+
+    let noted = state.notes.contains_key(&card.id);
+    let kind_style = if noted { TextStyle::new(kind_size, 600.0) } else { TextStyle::new(kind_size, 500.0).mono() };
+    let full_line = state.card_line(card);
+    let whole_fits = full_line.chars().count() as f32 * 0.62 * kind_size <= title_room_est + badge;
+    let shown_line = if whole_fits { full_line } else { short_line(full_line) };
+    let line_color = if noted && full_line.contains(" · ") && !hexed && !dimmed { if state.light { p.broth_deep } else { p.broth_foam } } else { sub_color };
+    let kind_line = kind_fits.then(|| text(shown_line).font(kind_style).color(line_color).truncate());
+    let side_by_side = |words: El, vial: El, gap: f32| {
+        let pair = row().grow(1.0).min_w(0.0).gap(gap).items_center();
+        if mirrored { pair.child(vial).child(words) } else { pair.child(words).child(vial) }
+    };
+    let (card_body, hung_vial) = if crammed && plan.lanes.is_some() {
+        (side_by_side(col().grow(1.0).min_w(0.0).gap(1.0).child(top_row).children(kind_line), vial_badge, 9.0), None)
+    } else if crammed {
+        let hang = [if mirrored { -badge * 0.5 } else { dims[0] - badge * 0.5 }, (dims[1] - badge) * 0.5];
+        (col().grow(1.0).min_w(0.0).gap(1.0).child(top_row).children(kind_line), Some(el().absolute(hang[0], hang[1]).child(vial_badge)))
+    } else if dense {
+        (side_by_side(col().grow(1.0).min_w(0.0).child(top_row), vial_badge, 9.0), None)
+    } else if narrow {
+        let words = col().grow(1.0).min_w(0.0).child(top_row);
+        let pair = row().w_full().gap(6.0).items_center();
+        let pair = if mirrored { pair.child(vial_badge).child(words) } else { pair.child(words).child(vial_badge) };
+        (col().grow(1.0).min_w(0.0).gap(if wraps { 0.0 } else { 2.0 }).child(pair).children(kind_line), None)
+    } else {
+        (side_by_side(col().grow(1.0).min_w(0.0).gap(2.0).child(top_row).children(kind_line), vial_badge, 9.0), None)
+    };
+    let hung = hung_vial.is_some();
+
+    let content = row()
+        .key(format!("node-{}-header", card.id.0))
+        .size(dims[0], dims[1])
+        .pl(if step_num.is_some() && !mirrored {
+            (badge_side - 4.0).max(15.0)
+        } else if hung_vial.is_some() && mirrored {
+            badge * 0.5 + 5.0
+        } else {
+            9.0
+        })
+        .pr(if step_num.is_some() && mirrored {
+            (badge_side - 4.0).max(15.0)
+        } else if hung_vial.is_some() && !mirrored {
+            badge * 0.5 + 5.0
+        } else {
+            9.0
+        })
+        .gap(9.0)
+        .radius(24.0)
+        .continuous_corners()
+        .items_center()
+        .fill(fill_col)
+        .border(border_w, border_col)
+        .shadow(if card.selected { 5.0 } else { 3.0 }, if card.selected { 14.0 } else { 9.0 }, if dimmed { Color::TRANSPARENT } else { p.shadow_card })
+        .child(card_body)
+        .children(hung_vial)
+        .on_press(move |s: &mut S| lens(s).select(Some(select_id.clone())))
+        .on_drag(move |s: &mut S, drag, tx| {
+            tx.instant();
+            if lens(s).running_brew {
+                return;
+            }
+            match drag.phase {
+                Phase::Down => {
+                    let canvas = lens(s);
+                    canvas.select(Some(node_id.clone()));
+                    canvas.drag = DragState::LiftingVial { node: node_id.clone(), offset: [0.0, 0.0] };
+                }
+                Phase::Move => {
+                    let canvas = lens(s);
+                    if matches!(&canvas.drag, DragState::LiftingVial { node, .. } if node == &node_id) {
+                        canvas.drag = DragState::LiftingVial { node: node_id.clone(), offset: [drag.dx, drag.dy] };
+                    }
+                }
+                Phase::Up => {
+                    let canvas = lens(s);
+                    let lifted = matches!(&canvas.drag, DragState::LiftingVial { node, .. } if node == &node_id);
+                    canvas.drag = DragState::Idle;
+                    if !lifted || drag.cancelled() || drag.dx.hypot(drag.dy) < 6.0 {
+                        return;
+                    }
+                    let Some(placed) = plan.card(&node_id) else { return };
+                    let dropped_at = [placed.rect[0] + placed.rect[2] * 0.5 + drag.dx, placed.rect[1] + placed.rect[3] * 0.5 + drag.dy];
+                    if aside && plan.is_over_pot(dropped_at) {
+                        toss(s, Toss::IntoPot(node_id.clone()));
+                    } else if !aside && plan.is_in_aside_zone(dropped_at) {
+                        toss(s, Toss::Aside(node_id.clone()));
+                    }
+                }
+            }
+        });
+
+    let ring = (card.selected && hexed).then(|| {
+        el().key(format!("selection-ring-{}", card.id.0))
+            .absolute(-5.0, -5.0)
+            .size(dims[0] + 10.0, dims[1] + 10.0)
+            .radius(29.0)
+            .continuous_corners()
+            .border(2.4, p.selection_ring())
+    });
+    let mut shell = el().key(format!("node-{}", card.id.0)).size(dims[0], dims[1]).absolute(pos[0], pos[1]).children(ring).child(content);
+    if let Some(badge) = step_badge {
+        shell = shell.child(el().key(format!("step-badge-{}", card.id.0)).absolute(if mirrored { dims[0] - 11.0 } else { -9.0 }, -9.0).child(badge));
+    }
+    let clear = if step_num.is_some() { badge_side + 2.0 } else { 10.0 };
+    let icon_side = if dense || crammed { 10.0 + badge + 6.0 } else { 10.0 };
+    let chip_bottom = -12.0 + chip_font * 1.25 + 3.0;
+    let words_high = title_size * 1.25 * title_lines + if kind_fits { kind_size * 1.25 + 2.0 } else { 0.0 };
+    let title_top = ((dims[1] - words_high) * 0.5).max(0.0);
+    let title_right = step_pad + crate::measure::text_width(&state.display_title(&card.id), title_size, 750.0);
+    let chip_left = dims[0] - icon_side - (chip_font + 11.0);
+    let chip_on_name = (dense || crammed) && card.status == ExecutionStatus::Succeeded && chip_bottom > title_top && (mirrored || title_right > chip_left);
+    let chip_on_card_above = rows_too_tight_for_chips && card.status == ExecutionStatus::Succeeded;
+    let lifted_rides = (title_top - 1.0 - (chip_font * 1.25 + 4.0)).min(-12.0);
+    let told_in_recipe = hexed && card.selected;
+    let title_w = crate::measure::text_width(&state.display_title(&card.id), title_size, 750.0);
+    let title_start = if !mirrored {
+        step_pad
+    } else if hung {
+        badge * 0.5 + 5.0
+    } else {
+        18.0 + badge
+    };
+    let inline_hex = {
+        let mark_w = 12.0 + crate::measure::text_width("!", chip_font, 800.0);
+        let mark_h = chip_font * 1.25 + 5.4;
+        let named_h = legible_size(11.0, plan_scale) * 1.25 + 5.4;
+        let after_title = title_start + title_w + 4.0;
+        let right_bound = if mirrored {
+            dims[0] - step_pad
+        } else if hung {
+            dims[0] - badge * 0.5 - 3.0
+        } else {
+            dims[0] - 12.0 - badge
+        };
+        let centred = |height: f32| if kind_fits { title_top + (title_size * 1.25 - height) * 0.5 } else { (dims[1] - height) * 0.5 };
+        let tag_size = legible_size(11.0, plan_scale);
+        let flagged: Vec<&SocketModel> = card.inputs.iter().filter(|socket| socket.flagged).collect();
+        let more = if flagged.len() > 1 { format!(" +{}", flagged.len() - 1) } else { String::new() };
+        let words = flagged.first().map(|socket| {
+            let (verb, short) = if socket.mistyped { ("Wrong type", "Wrong") } else { ("Missing", "No") };
+            (format!("{verb} \"{}\"{more}", socket.name), format!("{short} \"{}\"{more}", socket.name))
+        });
+        let tag_w = |label: &String| crate::measure::text_width(label, tag_size, 750.0) + 12.0;
+        let label = words.as_ref().and_then(|(long, short)| [long, short].into_iter().find(|label| tag_w(label) <= right_bound - after_title).cloned());
+        let (at, mark) = if let Some(label) = label {
+            (
+                [after_title, centred(named_h)],
+                row()
+                    .label(pill_reason.clone())
+                    .px(6.0)
+                    .py(1.5)
+                    .radius(7.0)
+                    .fill(p.card)
+                    .border(1.2, p.hex)
+                    .shadow(2.0, 6.0, p.shadow_card)
+                    .child(text(label).font(TextStyle::new(tag_size, 750.0)).color(p.hex)),
+            )
+        } else if after_title + mark_w <= right_bound {
+            ([after_title, centred(mark_h)], compact_hex_mark(&pill_reason, chip_font, p))
+        } else {
+            ([if mirrored { 3.0 } else { dims[0] - chip_font * 1.4 - 3.0 }, 2.0], compact_hex_mark(&pill_reason, chip_font, p))
+        };
+        el().key(format!("status-pill-{}", card.id.0)).absolute(at[0], at[1]).child(mark)
+    };
+    if !told_in_recipe && chip_rides_title && -lifted_rides > air_above - 2.0 {
+        shell = shell.child(inline_hex);
+    } else if let Some(pill) = status_pill.filter(|_| !told_in_recipe && !chip_on_name && !chip_on_card_above) {
+        let chip_height = chip_font * 1.25 + 4.0;
+        let clearance = 2.2 / plan_scale.max(0.05);
+        let low_perch = (-12.0f32).max(-(air_above - clearance).max(0.0));
+        let pill_w = crate::measure::text_width(&pill_reason, chip_font, 750.0) + 12.0;
+        let pill_left = dims[0] - if mirrored { clear } else { icon_side } - pill_w;
+        let covers_name = low_perch + chip_height > title_top && title_start + title_w > pill_left;
+        let lifted = (title_top - 1.0 - chip_height).min(-12.0);
+        let lift_fits = -lifted <= air_above - 3.0;
+        let slim_perch = -(air_above - clearance).max(0.0);
+        let slim_fits = slim_perch + chip_font * 1.25 + 2.0 <= title_top;
+        let (pill, perch) = match slim_pill {
+            Some(slim) if covers_name && !lift_fits && slim_fits => (slim, slim_perch),
+            _ if covers_name && !lift_fits => return shell.child(inline_hex),
+            _ => (pill, if covers_name { lifted } else { low_perch }),
+        };
+        let lane =
+            row().w(dims[0]).pl(if mirrored { icon_side } else { clear }).pr(if mirrored { clear } else { icon_side }).absolute(0.0, perch).justify_end();
+        let room = dims[0] - clear - icon_side;
+        shell = shell.child(lane.child(el().key(format!("status-pill-{}", card.id.0)).max_w(room).min_w(0.0).child(pill.max_w(room))));
+    }
+    shell
+}
+
+fn selection_ring(inner: El, id: &magicklala_graph::NodeId, radius: f32, p: &HearthPalette) -> El {
+    el().key(format!("selection-ring-{}", id.0))
+        .mx(-4.0)
+        .my(-4.0)
+        .padding(4.0)
+        .radius(radius + 4.0)
+        .continuous_corners()
+        .border(2.4, p.selection_ring())
+        .child(inner)
+}
+
+fn compact_hex_mark(reason: &str, font_size: f32, p: &HearthPalette) -> El {
+    row()
+        .label(reason.to_owned())
+        .px(6.0)
+        .py(1.5)
+        .radius(7.0)
+        .fill(p.hex)
+        .border(1.2, p.hex)
+        .shadow(2.0, 6.0, p.shadow_card)
+        .child(text("!").font(TextStyle::new(font_size, 800.0)).color(p.primary_ink))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn branch_bottle_view<S: 'static>(
+    state: &CanvasState,
+    card: &NodeCardModel,
+    step_num: Option<usize>,
+    frame: [f32; 3],
+    tint: Option<Color>,
+    has_run: bool,
+    terse: bool,
+    scale: f32,
+    p: &HearthPalette,
+    lens: fn(&mut S) -> &mut CanvasState,
+) -> El {
+    let legible = |size: f32| legible_size(size, scale);
+    let [pos_x, pos_y, width] = frame;
+    let taken = card.status == ExecutionStatus::Succeeded;
+    let simmering = card.status == ExecutionStatus::Running;
+    let untaken = has_run && !taken && !simmering && state.brew_completed();
+    let sealed = state.release_badge.is_some() && !has_run;
+    let bottle_mood = branch_bottle_mood(state, card);
+    let bottle_h = 66.0;
+    let route = crate::cauldron::route_label(state, &card.id);
+    let tag_lines = if crate::brew::potion_ends(state).len() <= 3 { 4 } else { 2 };
+    let tag_room = width - if width >= crate::brew::RACK_BOTTLE_SIZE[0] + 1.0 { 18.0 } else { 10.0 };
+    let title = crate::cauldron::fitted_rack_title(state, &card.id, legible(12.5), tag_room, tag_lines);
+    let route_key = route.as_ref().map(|_| format!("route-{}", card.id.0));
+    let hex_pill = bottle_hex_mark(card, scale, p);
+    let hexed = hex_pill.is_some();
+    let bottle_art = canvas(potion_bottle_shape(bottle_mood, state.light, width, bottle_h, sealed && !hexed, tint)).size(width, bottle_h);
+    let pill = if let Some(hex_pill) = hex_pill {
+        hex_pill
+    } else if taken {
+        let ms_text = match card.duration_ms {
+            Some(0) => "<1ms".to_owned(),
+            Some(ms) => format!("{ms}ms"),
+            None => String::new(),
+        };
+        row().px(5.5).py(1.5).radius(7.0).fill(p.card).border(1.0, p.broth_mid).shadow(2.0, 6.0, p.shadow_card).child(
+            row().gap(3.0).items_center().child(crate::hearth::check_mark(if state.light { p.broth_deep } else { p.broth_foam }, 10.0)).child(
+                text(ms_text).font(TextStyle::new(legible(11.0), 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam }),
+            ),
+        )
+    } else if simmering {
+        row()
+            .px(6.0)
+            .py(1.5)
+            .radius(7.0)
+            .fill(p.card)
+            .border(1.0, p.gold)
+            .child(text("Simmering").font(TextStyle::new(legible(11.0), 750.0)).color(p.simmer_ink()))
+    } else if untaken || state.stopped.contains(&card.id) {
+        row()
+            .px(5.5)
+            .py(1.5)
+            .radius(7.0)
+            .fill(p.untaken_pill_fill())
+            .border(1.0, p.untaken_border())
+            .child(text(if untaken { "Untaken" } else { "Stopped" }).font(TextStyle::new(legible(11.0), 700.0)).color(p.untaken_title()))
+    } else if let Some(vintage) = state.release_badge.as_ref().filter(|_| sealed) {
+        row()
+            .px(5.0)
+            .py(1.0)
+            .radius(5.5)
+            .fill(p.primary_bg)
+            .child(text(vintage).font(TextStyle::new(legible(11.0), 700.0).features("'tnum' 1")).color(p.primary_ink))
+    } else {
+        el()
+    };
+    let card_bg = if hexed {
+        p.hex_tint
+    } else if untaken {
+        p.untaken_fill()
+    } else {
+        p.card
+    };
+    let card_border = if hexed {
+        p.hex
+    } else if card.selected || taken {
+        p.broth_mid
+    } else if untaken {
+        p.untaken_border()
+    } else {
+        p.rule_2
+    };
+    let title_col = if untaken { p.untaken_title() } else { p.ink };
+    let sub_col = if untaken { p.untaken_sub() } else { p.mute };
+    let long_tag = crate::brew::potion_ends(state).len() <= 3;
+    let crowded_tag = legible(11.0) > 11.0 * 1.15;
+    let chipless_when_taken = !long_tag || crowded_tag;
+    let side = (legible(9.5) * 1.45).min(bottle_h * 0.45 - 2.0);
+    let step_badge = step_num.map(|num| {
+        el().key(format!("step-badge-{}", card.id.0)).child(
+            row()
+                .min_w(side)
+                .h(side)
+                .px(side * 0.18)
+                .radius(side * 0.5)
+                .items_center()
+                .justify_center()
+                .fill(if hexed { p.hex } else { p.primary_bg })
+                .child(text(num.to_string()).font(TextStyle::new(legible(9.0), 750.0).features("'tnum' 1")).color(p.primary_ink)),
+        )
+    });
+    let perched = hexed || !(chipless_when_taken && taken) && (taken || simmering || untaken || state.stopped.contains(&card.id) || sealed);
+    let tag_inner = col()
+        .key(format!("bottle-tag-{}", card.id.0))
+        .w_full()
+        .px(if width >= crate::brew::RACK_BOTTLE_SIZE[0] + 1.0 { 9.0 } else { 5.0 })
+        .pt(if perched { (legible(11.0) * 0.9).max(9.0) } else { 8.0 })
+        .pb(8.0)
+        .gap(2.0)
+        .radius(12.0)
+        .continuous_corners()
+        .fill(card_bg)
+        .border(if taken || card.selected { 1.6 } else { 1.1 }, card_border)
+        .shadow(2.0, 8.0, if untaken { Color::TRANSPARENT } else { p.shadow_card })
+        .child(
+            row().w_full().min_w(0.0).child(match route_key {
+                Some(key) => col()
+                    .key(key)
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .child(text(title).font(TextStyle::new(legible(12.5), 750.0)).color(title_col).wrap_anywhere().max_lines(if long_tag { 4 } else { 2 })),
+                None => col()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .child(text(title).font(TextStyle::new(legible(12.5), 750.0)).color(title_col).wrap_anywhere().max_lines(if long_tag { 4 } else { 2 })),
+            }),
+        )
+        .children((!terse).then(|| text(&card.kind).font(TextStyle::new(legible(11.0), 500.0).mono()).color(sub_col).truncate()));
+    let tag_wrap = el().w_full().child(tag_inner).children(
+        (!(chipless_when_taken && taken))
+            .then(|| row().w_full().pl(8.0).pr(22.0).justify_end().absolute(0.0, -8.0).child(el().key(format!("bottle-pill-{}", card.id.0)).child(pill))),
+    );
+    let tag = col().w_full().child(if card.selected && (taken || hexed) { selection_ring(tag_wrap, &card.id, 12.0, p) } else { tag_wrap });
+    let select_id = card.id.clone();
+    col()
+        .key(format!("node-{}-header", card.id.0))
+        .w(width)
+        .gap(crate::brew::RACK_TAG_GAP)
+        .items_center()
+        .absolute(pos_x, pos_y)
+        .child(bottle_art)
+        .child(tag)
+        .children(step_badge.map(|badge| row().w(width * 0.5 - 9.0).justify_end().absolute(0.0, 1.0).child(badge)))
+        .on_press(move |s: &mut S| lens(s).select(Some(select_id.clone())))
+}
+
+pub fn branch_bottle_mood(state: &CanvasState, card: &NodeCardModel) -> CauldronMood {
+    let taken = card.status == ExecutionStatus::Succeeded;
+    let simmering = card.status == ExecutionStatus::Running;
+    let hexed = card.status == ExecutionStatus::Failed || card.inputs.iter().any(|socket| socket.flagged);
+    if taken {
+        CauldronMood::Brewed
+    } else if (state.has_run() && !simmering && state.brew_completed()) || hexed || cauldron_mood(state) == CauldronMood::Hexed {
+        CauldronMood::Hexed
+    } else {
+        CauldronMood::Ready
+    }
+}
+
+pub fn solo_bottle_sealed(state: &CanvasState) -> bool {
+    state.release_badge.is_some() && !state.has_run()
+}
+
+pub fn bottle_art_mood(state: &CanvasState, output: &NodeCardModel) -> CauldronMood {
+    match cauldron_mood(state) {
+        CauldronMood::Brewed | CauldronMood::Simmering if !crate::cauldron::bottle_filled(state, output) => CauldronMood::Ready,
+        mood => mood,
+    }
+}
+
+pub fn grimoire_lanes(state: &CanvasState) -> Vec<(magicklala_graph::WireId, i8)> {
+    let mut untaken: Vec<&crate::WireModel> = state.wires.iter().filter(|wire| state.has_run() && !wire.active && wire.ty.is_flow()).collect();
+    untaken.sort_by(|a, b| a.from_node.0.cmp(&b.from_node.0).then(b.from[1].total_cmp(&a.from[1])));
+    let mut lanes = Vec::with_capacity(untaken.len());
+    for (index, wire) in untaken.iter().enumerate() {
+        let rank = untaken[..index].iter().filter(|other| other.from_node == wire.from_node).count();
+        lanes.push((wire.id.clone(), if rank % 2 == 0 { 1 } else { -1 }));
+    }
+    lanes
+}
+
+const PULL_SLOP: f32 = 4.0;
+pub(crate) const DETAIL_ZOOM: f32 = 0.6;
+pub(crate) const LABEL_ZOOM: f32 = 0.42;
+
+pub fn short_line(line: &str) -> &str {
+    line.split_once(" · ").map_or(line, |(value, _)| value)
+}
+
+fn bottle_hex_caption(card: &NodeCardModel) -> Option<String> {
+    match card.inputs.iter().find(|socket| socket.flagged) {
+        Some(socket) if socket.mistyped => Some(format!("Wrong type \"{}\"", socket.name)),
+        Some(socket) => Some(format!("Missing \"{}\"", socket.name)),
+        None if card.status == ExecutionStatus::Failed => Some("Failed".to_owned()),
+        None => None,
+    }
+}
+
+fn bottle_hex_mark(card: &NodeCardModel, scale: f32, p: &HearthPalette) -> Option<El> {
+    let caption = bottle_hex_caption(card)?;
+    let side = legible_size(11.0, scale) * 1.55;
+    Some(
+        row()
+            .key(format!("bottle-hex-{}", card.id.0))
+            .label(caption)
+            .size(side, side)
+            .radius(side * 0.5)
+            .fill(p.hex)
+            .border(1.2, p.card)
+            .items_center()
+            .justify_center()
+            .child(text("!").font(TextStyle::new(legible_size(11.0, scale), 800.0)).color(p.primary_ink)),
+    )
+}
+
+fn bottle_hex_pill(card: &NodeCardModel, scale: f32, p: &HearthPalette) -> Option<El> {
+    let caption = bottle_hex_caption(card)?;
+    Some(
+        row()
+            .key(format!("bottle-hex-{}", card.id.0))
+            .px(6.0)
+            .py(1.5)
+            .radius(7.0)
+            .fill(p.card)
+            .border(1.2, p.hex)
+            .shadow(2.0, 6.0, p.shadow_card)
+            .child(text(caption).font(TextStyle::new(legible_size(11.0, scale), 750.0)).color(p.hex)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn potion_stand_view<S: 'static>(
+    state: &CanvasState,
+    output: &NodeCardModel,
+    step_num: Option<usize>,
+    frame: [f32; 3],
+    tint: Option<Color>,
+    mood: CauldronMood,
+    terse: bool,
+    scale: f32,
+    p: &HearthPalette,
+    lens: fn(&mut S) -> &mut CanvasState,
+) -> El {
+    let legible = |size: f32| legible_size(size, scale);
+    let [pos_x, pos_y, width] = frame;
+    let pos = [pos_x, pos_y];
+    let primary_output = Some(output);
+    let bottled = state.release_badge.is_some();
+    let sealed_vintage = bottled && !matches!(mood, CauldronMood::Simmering | CauldronMood::Hexed | CauldronMood::Empty);
+    let bottle_h = 104.0;
+    let art_mood = bottle_art_mood(state, output);
+    let bottle_art =
+        canvas(potion_bottle_shape(art_mood, state.light, width, bottle_h, solo_bottle_sealed(state), tint)).key("hero-potion-bottle").size(width, bottle_h);
+    let spell_label = if state.spell_name.is_empty() { "Potion" } else { state.spell_name.as_str() };
+    let out_title = primary_output.map_or_else(|| "Bottled Potion".to_owned(), |c| state.display_title(&c.id));
+    let out_kind = primary_output.map_or("io/send_message", |c| c.kind.as_str());
+    let selected = primary_output.is_some_and(|c| c.selected);
+    let select_id = primary_output.map(|c| c.id.clone());
+    let hex_pill = bottle_hex_pill(output, scale, p);
+    let hexed = hex_pill.is_some();
+
+    let out_brewed = primary_output.is_some_and(|c| c.status == ExecutionStatus::Succeeded);
+    let skipped = state.has_run()
+        && state.brew_completed()
+        && !hexed
+        && !matches!(output.status, ExecutionStatus::Succeeded | ExecutionStatus::Running | ExecutionStatus::Failed);
+    let stopped = !hexed && state.stopped.contains(&output.id);
+    let mut header_row = row()
+        .w_full()
+        .gap(4.0)
+        .items_start()
+        .justify_between()
+        .child(text(spell_label).font(TextStyle::new(legible(13.0), 750.0)).color(p.ink).wrap_anywhere().max_lines(4).grow(1.0).min_w(0.0));
+    if sealed_vintage && let Some(vintage) = &state.release_badge {
+        header_row = header_row.child(
+            row()
+                .px(5.0)
+                .py(1.0)
+                .radius(5.5)
+                .fill(p.primary_bg)
+                .child(text(vintage).font(TextStyle::new(legible(11.0), 700.0).features("'tnum' 1")).color(p.primary_ink)),
+        );
+    }
+
+    let kind_fits = out_kind.chars().count() as f32 * 6.7 * legible(11.0) / 11.0 <= width - 22.0;
+    let shown_step = step_num.filter(|_| out_brewed || (output.step_order.is_some() && output.status == ExecutionStatus::Failed));
+    let badge_room = if shown_step.is_some() { (legible(11.0) * 1.6 - 2.0).max(10.0) } else { 10.0 };
+    let step_badge = shown_step.map(|num| {
+        let side = legible(11.0) * 1.6;
+        el().key(format!("step-badge-{}", output.id.0)).absolute(-5.0, -7.0).child(
+            row()
+                .size(side, side)
+                .radius(side * 0.5)
+                .items_center()
+                .justify_center()
+                .fill(if output.status == ExecutionStatus::Failed { p.hex } else { p.primary_bg })
+                .child(text(num.to_string()).font(TextStyle::new(legible(11.0), 750.0).features("'tnum' 1")).color(p.primary_ink)),
+        )
+    });
+    let perched = out_brewed || hexed;
+    let mut tag_card = col()
+        .w_full()
+        .pl(badge_room)
+        .pr(10.0)
+        .pt(if perched { (legible(11.0) * 0.9).max(9.0) } else { 9.0 })
+        .pb(9.0)
+        .gap(2.0)
+        .radius(14.0)
+        .continuous_corners()
+        .fill(if hexed { p.hex_tint } else { p.card })
+        .border(
+            if selected || hexed { 2.0 } else { 1.2 },
+            if hexed {
+                p.hex
+            } else if selected {
+                p.broth_mid
+            } else {
+                p.rule_2
+            },
+        )
+        .shadow(3.0, 10.0, p.shadow_card)
+        .child(header_row)
+        .child(text(&out_title).font(TextStyle::new(legible(12.0), 600.0)).color(p.ink_2).wrap_anywhere().max_lines(4))
+        .children((!terse && kind_fits).then(|| text(out_kind).font(TextStyle::new(legible(11.0), 500.0).mono()).color(p.mute)));
+    if out_brewed {
+        let ms_text = match primary_output.and_then(|c| c.duration_ms) {
+            Some(0) => "<1ms".to_owned(),
+            Some(ms) => format!("{ms}ms"),
+            None => String::new(),
+        };
+        let timing_pill = row().px(5.5).py(1.5).radius(7.0).fill(p.card).border(1.0, p.broth_mid).shadow(2.0, 6.0, p.shadow_card).child(
+            row().gap(3.0).items_center().child(crate::hearth::check_mark(if state.light { p.broth_deep } else { p.broth_foam }, 10.0)).child(
+                text(ms_text).font(TextStyle::new(legible(11.0), 700.0).features("'tnum' 1")).color(if state.light { p.broth_deep } else { p.broth_foam }),
+            ),
+        );
+        let wrapped = el().w_full().child(tag_card).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(timing_pill));
+        tag_card = col().w_full().child(wrapped.children(step_badge));
+    } else if let Some(pill) = hex_pill {
+        let clear = if step_badge.is_some() { legible(11.0) * 1.6 } else { 8.0 };
+        tag_card = col()
+            .w_full()
+            .child(el().w_full().child(tag_card).child(row().w_full().pl(clear).pr(8.0).justify_end().absolute(0.0, -12.0).child(pill)).children(step_badge));
+    } else if skipped || stopped {
+        let mark = row()
+            .px(5.5)
+            .py(1.5)
+            .radius(7.0)
+            .fill(p.untaken_pill_fill())
+            .border(1.0, p.untaken_border())
+            .child(text(if stopped { "Stopped" } else { "Untaken" }).font(TextStyle::new(legible(11.0), 700.0)).color(p.untaken_title()));
+        tag_card = col()
+            .w_full()
+            .child(el().w_full().child(tag_card).child(row().w_full().px(8.0).justify_end().absolute(0.0, -12.0).child(mark)).children(step_badge));
+    } else if let Some(badge) = step_badge {
+        tag_card = col().w_full().child(el().w_full().child(tag_card).child(badge));
+    }
+
+    let stand = col().key("potion-stand").w(width).gap(4.0).items_center().absolute(pos[0], pos[1]);
+    let tag_card = tag_card.key("potion-tag");
+    let tag_card = match primary_output.filter(|_| selected && hexed) {
+        Some(output) => col().w_full().child(selection_ring(tag_card, &output.id, 14.0, p)),
+        None => tag_card,
+    };
+    let mut stand = stand.child(bottle_art).child(tag_card);
+
+    if let Some(id) = select_id {
+        stand = stand.key(format!("node-{}-header", id.0)).on_press(move |s: &mut S| lens(s).select(Some(id.clone())));
+    }
+    stand
+}
+
+pub(crate) fn apothecary_dots(state: &CanvasState, size: (f32, f32), p: &HearthPalette, center: [f32; 2], circle_r: f32) -> Shape {
+    let spacing = DOT_SPACING;
+    let columns = (size.0 / spacing).ceil() as usize + 1;
+    let rows = (size.1 / spacing).ceil() as usize + 1;
+    let mut shape = Shape::new();
+    for r in 0..rows {
+        for c in 0..columns {
+            let x = 13.0 + c as f32 * spacing;
+            let y = 13.0 + r as f32 * spacing;
+            if (r * 7 + c * 13) % 89 == 0 {
+                shape = fill_star4(shape, x, y, 2.3, 0.75, with_alpha(p.gold, if state.light { 0.28 } else { 0.30 }));
+            } else {
+                shape = fill_circle(shape, x, y, 1.0, p.canvas_dot);
+            }
+        }
+    }
+    let outer_segs = 56;
+    for i in (0..outer_segs).step_by(2) {
+        let a0 = (i as f32 / outer_segs as f32) * std::f32::consts::TAU;
+        let a1 = ((i as f32 + 1.1) / outer_segs as f32) * std::f32::consts::TAU;
+        shape = shape.line(
+            [center[0] + a0.cos() * circle_r, center[1] + a0.sin() * circle_r],
+            [center[0] + a1.cos() * circle_r, center[1] + a1.sin() * circle_r],
+            1.1,
+            rune::LineCap::Round,
+            p.chalk,
+        );
+    }
+    let inner = circle_r * 0.72;
+    for i in 0..44 {
+        let a = (i as f32 / 44.0) * std::f32::consts::TAU;
+        shape = fill_circle(shape, center[0] + a.cos() * inner, center[1] + a.sin() * inner, 1.0, with_alpha(p.chalk, 0.72));
+    }
+    for k in 0..4 {
+        let a = (k as f32 / 4.0) * std::f32::consts::TAU + std::f32::consts::FRAC_PI_4;
+        let r = circle_r + 10.0;
+        shape = fill_star4(shape, center[0] + a.cos() * r, center[1] + a.sin() * r, 3.8, 1.15, with_alpha(p.gold, if state.light { 0.42 } else { 0.50 }));
+    }
+    shape
+}
+
+fn grimoire_graph_view<S: 'static>(state: &CanvasState, size: (f32, f32), lens: fn(&mut S) -> &mut CanvasState) -> El {
+    let p = HearthPalette::for_theme(state.light);
     let palette = CanvasPalette::for_theme(state.light);
-    let backdrop = canvas(dot_matrix(state, size, palette)).key("canvas-dots").size(size.0, size.1).absolute(0.0, 0.0);
-    let wires = canvas(wire_shape(state, palette)).key("canvas-wires").size(size.0, size.1).absolute(0.0, 0.0);
+    let backdrop = canvas(dot_matrix(state, size, &p)).key("canvas-dots").size(size.0, size.1).absolute(0.0, 0.0);
+    let wires = canvas(wire_shape(state)).key("canvas-wires").size(size.0, size.1).absolute(0.0, 0.0);
     let board = el()
         .key("canvas")
         .size(size.0, size.1)
-        .fill(palette.surface)
+        .fill(p.paper)
         .clip_rounded(0.0)
         .on_drag(move |s: &mut S, drag, tx| {
             tx.instant();
@@ -135,17 +1095,46 @@ pub fn interactive_canvas_view<S: 'static>(state: &CanvasState, size: (f32, f32)
             tx.instant();
             let canvas = lens(s);
             let hit = canvas.node_at(canvas.camera.screen_to_world([press.x, press.y]));
+            canvas.context_card = hit.as_ref().and_then(|id| canvas.card(id)).map(|card| {
+                let top_left = canvas.camera.world_to_screen(card.position);
+                let bottom_right = canvas.camera.world_to_screen([card.position[0] + card.size[0], card.position[1] + card.size[1]]);
+                [top_left[0], top_left[1], bottom_right[0] - top_left[0], bottom_right[1] - top_left[1]]
+            });
             canvas.select(hit);
             canvas.context_menu = Some([press.x, press.y]);
         })
         .child(backdrop)
         .child(wires);
-    state.nodes.iter().fold(board, |board, card| board.child(card_view(state, card, palette, lens)))
+
+    let mut board = state.nodes.iter().fold(board, |board, card| board.child(grimoire_card_view(state, card, &p, palette, lens)));
+    if let Some((id, name, output)) = state.hover_socket.clone().filter(|_| state.camera.zoom < LABEL_ZOOM)
+        && let Some((world, _)) = state.card(&id).and_then(|card| card.socket_world(&name, output))
+    {
+        let [sx, sy] = state.camera.world_to_screen(world);
+        let tip = row()
+            .key("socket-tip")
+            .px(6.0)
+            .py(2.0)
+            .radius(6.0)
+            .fill(p.card)
+            .border(1.0, p.rule_2)
+            .shadow(2.0, 6.0, p.shadow_card)
+            .child(text(&name).font(TextStyle::new(11.5, 650.0)).color(p.ink));
+        let room = 220.0;
+        board = board.child(if output || sx < room * 0.5 {
+            el().absolute(sx + 9.0, sy - 10.0).child(tip)
+        } else {
+            row().w(room).justify_end().absolute(sx - 9.0 - room, sy - 10.0).child(tip)
+        });
+    }
+    board = board.child(mode_switcher(state, &p, lens, size));
+
+    board
 }
 
-fn dot_matrix(state: &CanvasState, size: (f32, f32), palette: CanvasPalette) -> Shape {
-    let spacing = DOT_SPACING * state.camera.zoom;
-    let radius = (1.1 * state.camera.zoom).max(0.8);
+fn dot_matrix(state: &CanvasState, size: (f32, f32), p: &HearthPalette) -> Shape {
+    let spacing = (DOT_SPACING * state.camera.zoom).max(14.0);
+    let radius = (1.05 * state.camera.zoom).clamp(0.75, 1.45);
     let start_x = state.camera.pan_x.rem_euclid(spacing);
     let start_y = state.camera.pan_y.rem_euclid(spacing);
     let columns = (size.0 / spacing).ceil() as usize + 1;
@@ -153,92 +1142,240 @@ fn dot_matrix(state: &CanvasState, size: (f32, f32), palette: CanvasPalette) -> 
     (0..rows).flat_map(|row| (0..columns).map(move |column| (row, column))).fold(Shape::new(), |shape, (row, column)| {
         let x = start_x + column as f32 * spacing;
         let y = start_y + row as f32 * spacing;
-        shape.fill(vec![[x - radius, y - radius], [x + radius, y - radius], [x + radius, y + radius], [x - radius, y + radius]], palette.dot)
+        fill_circle(shape, x, y, radius, p.canvas_dot)
     })
 }
 
-fn bezier(from: [f32; 2], to: [f32; 2], zoom: f32) -> Path {
-    let bend = ((to[0] - from[0]).abs() * 0.5).max(70.0 * zoom);
-    Path::new().move_to(from).cubic_to([from[0] + bend, from[1]], [to[0] - bend, to[1]], to)
-}
-
-fn wire_shape(state: &CanvasState, palette: CanvasPalette) -> Shape {
+fn wire_shape(state: &CanvasState) -> Shape {
     let zoom = state.camera.zoom;
-    let shape = state.wires.iter().fold(Shape::new(), |shape, wire| {
-        let path = bezier(state.camera.world_to_screen(wire.from), state.camera.world_to_screen(wire.to), zoom);
-        let color = flow_wire_color(wire.ty, state.light);
-        if wire.active {
-            shape
-                .stroke_path(&path, 12.0 * zoom, LineCap::Round, with_alpha(color, 0.16))
-                .stroke_path(&path, 6.0 * zoom, LineCap::Round, with_alpha(color, 0.32))
-                .stroke_path(&path, 3.0 * zoom, LineCap::Round, color)
-        } else {
-            shape.stroke_path(&path, 2.0 * zoom, LineCap::Round, with_alpha(color, 0.78))
+    let has_run = state.has_run();
+    let mut ordered: Vec<(usize, &crate::WireModel)> = state.wires.iter().enumerate().collect();
+    ordered.sort_by_key(|(_, wire)| {
+        let untaken = has_run && !wire.active;
+        match (untaken, wire.ty.is_flow()) {
+            (true, false) => 0,
+            (true, true) => 1,
+            (false, false) => 2,
+            (false, true) => 3,
         }
+    });
+    let lanes = grimoire_lanes(state);
+    let lifted = match &state.drag {
+        DragState::PullingWire { held, detached: true, .. } => Some(held.id.clone()),
+        _ => None,
+    };
+    let shape = ordered.into_iter().filter(|(_, wire)| Some(&wire.id) != lifted.as_ref()).fold(Shape::new(), |shape, (_, wire)| {
+        let from = state.camera.world_to_screen(wire.from);
+        let to = state.camera.world_to_screen(wire.to);
+        let untaken = has_run && !wire.active;
+        let lane = lanes.iter().find(|(id, _)| id == &wire.id).map_or(0, |(_, lane)| *lane);
+        grimoire_wire_shape(shape, from, to, WireStyle { zoom, is_flow: wire.ty.is_flow(), active: wire.active, untaken, light: state.light, lane })
     });
     match &state.drag {
         DragState::ConnectingWire { ty, anchor, cursor, .. } => {
-            let path = bezier(state.camera.world_to_screen(*anchor), state.camera.world_to_screen(*cursor), zoom);
-            shape.stroke_path(&path, 6.0 * zoom, LineCap::Round, with_alpha(palette.ring, 0.2)).stroke_path(
-                &path,
-                2.5 * zoom,
-                LineCap::Round,
-                socket_color(*ty),
-            )
+            let from = state.camera.world_to_screen(*anchor);
+            let to = state.camera.world_to_screen(*cursor);
+            grimoire_wire_shape(shape, from, to, WireStyle { zoom, is_flow: ty.is_flow(), active: true, untaken: false, light: state.light, lane: 0 })
+        }
+        DragState::PullingWire { held, cursor, detached: true, .. } => {
+            let anchor = state.card(&held.from_node).and_then(|card| card.socket_world(&held.from_socket, true)).map_or(held.from, |(point, _)| point);
+            let from = state.camera.world_to_screen(anchor);
+            let to = state.camera.world_to_screen(*cursor);
+            grimoire_wire_shape(shape, from, to, WireStyle { zoom, is_flow: held.ty.is_flow(), active: true, untaken: false, light: state.light, lane: 0 })
         }
         _ => shape,
     }
 }
 
-fn status_badge(status: ExecutionStatus, zoom: f32) -> El {
-    let color = status_color(status);
-    row()
-        .gap(4.0 * zoom)
-        .items_center()
-        .px(7.0 * zoom)
-        .py(2.0 * zoom)
-        .radius(9.0 * zoom)
-        .fill(rgba(0.0, 0.0, 0.0, 0.28))
-        .child(el().size(6.0 * zoom, 6.0 * zoom).radius(3.0 * zoom).fill(color))
-        .child(text(status.label()).font(TextStyle::new(10.0 * zoom, 600.0)).color(rgba(1.0, 1.0, 1.0, 0.92)))
+fn status_box(status: ExecutionStatus, duration_ms: Option<u64>, p: &HearthPalette, zoom: f32) -> Option<El> {
+    if status == ExecutionStatus::Idle {
+        return None;
+    }
+    let (border, ink) = match status {
+        ExecutionStatus::Failed => (p.hex, p.hex),
+        ExecutionStatus::Running => (p.gold, p.simmer_ink()),
+        ExecutionStatus::Succeeded => (p.broth_mid, if p.light { p.broth_deep } else { p.broth_foam }),
+        ExecutionStatus::Idle => return None,
+    };
+    let text_label = match (status, duration_ms) {
+        (ExecutionStatus::Succeeded, Some(0)) => "<1ms".to_owned(),
+        (ExecutionStatus::Succeeded, Some(ms)) => format!("{ms}ms"),
+        _ => status.display_label().to_owned(),
+    };
+    let tick = (status == ExecutionStatus::Succeeded).then(|| crate::hearth::check_mark(ink, (10.0 * zoom).clamp(9.0, 11.0)));
+    Some(
+        row()
+            .gap(4.0 * zoom)
+            .items_center()
+            .px((6.0 * zoom).max(5.5))
+            .py((1.8 * zoom).max(1.5))
+            .radius((6.5 * zoom).max(6.0))
+            .fill(p.card)
+            .border((1.0 * zoom).max(1.0), border)
+            .shadow(2.0, 5.0, p.shadow_card)
+            .children(tick)
+            .child(text(text_label).font(TextStyle::new((11.2 * zoom).clamp(11.0, 12.2), 750.0).features("'tnum' 1")).color(ink)),
+    )
 }
 
-fn socket_row(card: &NodeCardModel, row_index: usize, palette: CanvasPalette, zoom: f32) -> El {
-    let label =
-        |socket: Option<&SocketModel>| text(socket.map_or("", |socket| socket.name.as_str())).font(TextStyle::new(11.0 * zoom, 450.0)).color(palette.muted);
-    row()
+fn socket_row(card: &NodeCardModel, row_index: usize, dimmed: bool, p: &HearthPalette, zoom: f32) -> El {
+    let label = |socket: Option<&SocketModel>| {
+        let (content, weight, color) = match socket {
+            Some(socket) if socket.flagged => (socket.name.as_str(), 700.0, p.hex),
+            Some(socket) if socket.ty.is_flow() => {
+                (socket.name.as_str(), 650.0, if dimmed { if p.light { hex(0x362E45) } else { hex(0xDED7F2) } } else { p.ink })
+            }
+            Some(socket) => (socket.name.as_str(), 500.0, if dimmed { if p.light { hex(0x463D57) } else { hex(0xCFC7E6) } } else { p.ink_2 }),
+            None => ("", 450.0, p.mute),
+        };
+        let floor = if zoom >= DETAIL_ZOOM { 11.4 } else { 10.0 };
+        text(if zoom >= LABEL_ZOOM { content } else { "" }).font(TextStyle::new((13.0 * zoom).clamp(floor, 13.5), weight)).color(color)
+    };
+    let mut r = row()
         .w_full()
         .h(SOCKET_ROW * zoom)
-        .px(14.0 * zoom)
+        .px((11.0 * zoom).max(9.0))
+        .gap((6.0 * zoom).max(4.0))
         .items_center()
         .justify_between()
-        .child(label(card.inputs.get(row_index)))
-        .child(label(card.outputs.get(row_index)))
+        .child(label(card.inputs.get(row_index)).truncate())
+        .child(label(card.outputs.get(row_index)));
+    if row_index > 0 && zoom >= DETAIL_ZOOM {
+        r = r.border_sides([1.0, 0.0, 0.0, 0.0], with_alpha(p.rule, 0.72));
+    }
+    r
 }
 
-fn card_view<S: 'static>(state: &CanvasState, card: &NodeCardModel, palette: CanvasPalette, lens: fn(&mut S) -> &mut CanvasState) -> El {
+fn grimoire_card_view<S: 'static>(
+    state: &CanvasState,
+    card: &NodeCardModel,
+    p: &HearthPalette,
+    palette: CanvasPalette,
+    lens: fn(&mut S) -> &mut CanvasState,
+) -> El {
     let zoom = state.camera.zoom;
+    let shelved = state.is_shelved(&card.id);
+    let dimmed = (state.has_run() && card.status == ExecutionStatus::Idle && !card.selected) || shelved;
+    let tone = category_tone(&card.category, state.light);
     let [x, y] = state.camera.world_to_screen(card.position);
-    let accent = category_accent(&card.category);
+    let card_w = card.size[0] * zoom;
+    let card_h = card.size[1] * zoom;
     let node_id = card.id.clone();
+    let dimmed_bg = if state.light { hex(0xEBE8F0) } else { hex(0x1D182B) };
+    let dimmed_header = if state.light { hex(0xE0DCE8) } else { hex(0x262038) };
+    let dimmed_border = p.untaken_border();
+    let header_bg = if dimmed { dimmed_header } else { tone.tint };
+    let header_h = CARD_HEADER * zoom;
+    let far = zoom < 0.55;
+    let title_size = (13.6 * zoom).clamp(if far { 11.0 } else { 11.8 }, 15.5);
+    let kind_size = (10.8 * zoom).clamp(11.0, 11.6);
+    let title_color = if dimmed { if state.light { hex(0x362E45) } else { hex(0xDFD8F2) } } else { p.ink };
+    let kind_color = if dimmed { if state.light { hex(0x3F3652) } else { hex(0xD4CCE8) } } else { p.mute };
+    let vial_size = (22.0 * zoom).clamp(17.0, 26.0);
+    let display_title = state.display_title(&card.id);
+    let reach = (19.5 * zoom).clamp(17.5, 21.0);
+    let crowded_above = state.nodes.iter().filter(|other| other.id != card.id).any(|other| {
+        let gap = (card.position[1] - (other.position[1] + other.size[1])) * zoom;
+        let overlaps_x = other.position[0] < card.position[0] + card.size[0] && card.position[0] < other.position[0] + other.size[0];
+        overlaps_x && (0.0..reach + 4.0).contains(&gap)
+    });
+    let badge_words = match card.status {
+        ExecutionStatus::Succeeded | ExecutionStatus::Failed | ExecutionStatus::Running => match card.duration_ms {
+            Some(0) => Some("<1ms".to_owned()),
+            Some(ms) => Some(format!("{ms}ms")),
+            None => Some(String::new()),
+        },
+        _ if shelved => Some("Set aside".to_owned()),
+        _ if dimmed && state.brew_completed() => Some("Untaken".to_owned()),
+        _ => None,
+    };
+    let pad = if far { 5.0 } else { (8.0 * zoom).max(6.0) };
+    let gap = (6.0 * zoom).max(5.0);
+    let badge_pad = (6.0 * zoom).max(5.5);
+    let badge_font = (11.0 * zoom).clamp(11.0, 12.0);
+    let ticked = card.status == ExecutionStatus::Succeeded;
+    let full_w =
+        badge_words.as_ref().map(|words| crate::measure::text_width(words, badge_font, 750.0) + if ticked { 14.0 } else { 0.0 } + 2.0 * badge_pad + 6.0);
+    let compact_w = 2.0 * badge_pad + 14.0;
+    let title_need = crate::measure::text_width(&display_title, title_size, 750.0) + 2.0 * pad + 4.0;
+    let fits = |badge: f32, icon: bool| title_need + badge + if icon { vial_size + gap } else { 0.0 } <= card.size[0] * zoom;
+    let (show_vial, compact_badge, badge_room) = match full_w.filter(|_| crowded_above) {
+        Some(full) if fits(full, true) => (true, false, full),
+        Some(full) if fits(full, false) => (false, false, full),
+        Some(_) if fits(compact_w, true) => (true, true, compact_w),
+        Some(_) => (false, true, compact_w),
+        None => (!far || fits(0.0, true), false, 0.0),
+    };
+    let title_room = card.size[0] * zoom - 2.0 * pad - badge_room - if show_vial { vial_size + gap } else { 0.0 };
+    let header_inner = row()
+        .grow(1.0)
+        .min_w(0.0)
+        .h_full()
+        .pl(pad)
+        .pr(pad + badge_room)
+        .gap((6.0 * zoom).max(5.0))
+        .items_center()
+        .children(show_vial.then(|| canvas(mini_vial_icon(&card.category, state.light, vial_size)).size(vial_size, vial_size)))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .justify_center()
+                .gap((1.0 * zoom).max(0.5))
+                .child(twin_title(&display_title, TextStyle::new(title_size, 750.0), title_color, title_room))
+                .children(
+                    ((title_size + kind_size) * 1.25 + 4.0 <= header_h)
+                        .then(|| text(&card.kind).font(TextStyle::new(kind_size, 500.0).mono()).color(kind_color).truncate()),
+                ),
+        );
+    let compact_tag = |mark: El, words: String, border: Color, fill: Color| {
+        row().label(words).px(badge_pad).py((1.8 * zoom).max(1.5)).radius((6.5 * zoom).max(6.0)).fill(fill).border(1.0, border).items_center().child(mark)
+    };
+    let compact = compact_badge.then(|| match card.status {
+        ExecutionStatus::Succeeded => {
+            let ink = if p.light { p.broth_deep } else { p.broth_foam };
+            Some(compact_tag(
+                crate::hearth::check_mark(ink, (10.0 * zoom).clamp(9.0, 11.0)),
+                format!("Brewed {}", badge_words.clone().unwrap_or_default()),
+                p.broth_mid,
+                p.card,
+            ))
+        }
+        ExecutionStatus::Idle => Some(compact_tag(
+            text("–").font(TextStyle::new(badge_font, 750.0)).color(p.untaken_pill_ink()),
+            badge_words.clone().unwrap_or_default(),
+            dimmed_border,
+            p.untaken_pill_fill(),
+        )),
+        _ => None,
+    });
+    let perched_badge = compact.flatten().or_else(|| status_box(card.status, card.duration_ms, p, zoom)).or_else(|| {
+        (shelved || (dimmed && state.brew_completed())).then(|| {
+            let badge_bg = p.untaken_pill_fill();
+            let badge_ink = p.untaken_pill_ink();
+            row()
+                .px((6.0 * zoom).max(5.5))
+                .py((1.8 * zoom).max(1.5))
+                .radius((6.5 * zoom).max(6.0))
+                .fill(badge_bg)
+                .border(1.0, dimmed_border)
+                .child(text(if shelved { "Set aside" } else { "Untaken" }).font(TextStyle::new((11.0 * zoom).clamp(11.0, 12.0), 650.0)).color(badge_ink))
+        })
+    });
     let header = row()
         .key(format!("node-{}-header", card.id.0))
         .w_full()
-        .h(CARD_HEADER * zoom)
-        .px(12.0 * zoom)
+        .h(header_h)
         .items_center()
-        .justify_between()
-        .fill(accent)
-        .child(
-            col()
-                .gap(1.0 * zoom)
-                .child(text(&card.title).font(TextStyle::new(13.0 * zoom, 650.0)).color(palette.header_ink))
-                .child(text(&card.kind).font(TextStyle::new(10.0 * zoom, 450.0)).color(rgba(1.0, 1.0, 1.0, 0.72))),
-        )
-        .child(status_badge(card.status, zoom))
+        .fill(header_bg)
+        .border_sides([0.0, 0.0, 1.0, 0.0], if dimmed { dimmed_border } else { tone.border })
+        .child(header_inner)
         .on_drag(move |s: &mut S, drag, tx| {
             tx.instant();
             let canvas = lens(s);
+            if canvas.running_brew {
+                return;
+            }
             match drag.phase {
                 Phase::Down => {
                     canvas.select(Some(node_id.clone()));
@@ -262,58 +1399,189 @@ fn card_view<S: 'static>(state: &CanvasState, card: &NodeCardModel, palette: Can
             }
         });
     let rows = card.inputs.len().max(card.outputs.len());
-    let body = col().w_full().py(6.0 * zoom).children((0..rows).map(|row_index| socket_row(card, row_index, palette, zoom)));
+    let body = col().w_full().py(6.0 * zoom).children((0..rows).map(|row_index| socket_row(card, row_index, dimmed, p, zoom)));
     let select_id = card.id.clone();
     let face = col()
         .key(format!("node-{}-face", card.id.0))
         .w_full()
         .h_full()
-        .radius(10.0 * zoom)
-        .clip_rounded(10.0 * zoom)
-        .fill(palette.card)
+        .fill(if dimmed { dimmed_bg } else { p.card })
         .child(header)
         .child(body)
         .on_press(move |s: &mut S| lens(s).select(Some(select_id.clone())));
-    let ring = if card.selected {
-        palette.ring
-    } else if card.status == ExecutionStatus::Running {
-        status_color(card.status)
+    let (border_color, border_width) = if card.status == ExecutionStatus::Failed {
+        (p.hex, 2.0)
+    } else if card.selected {
+        (tone.liquid, 2.2)
+    } else if card.status == ExecutionStatus::Succeeded {
+        (p.broth_mid, 1.8)
+    } else if dimmed {
+        (dimmed_border, 1.2)
     } else {
-        palette.card_border
+        (tone.border, 1.4)
     };
-    let ring_width = if card.selected || card.status == ExecutionStatus::Running { 2.0 } else { 1.0 };
-    let shell = el()
-        .key(format!("node-{}", card.id.0))
-        .size(card.size[0] * zoom, card.size[1] * zoom)
-        .radius(10.0 * zoom)
-        .border(ring_width, ring)
-        .shadow(6.0 * zoom, 18.0 * zoom, rgba(0.0, 0.0, 0.0, if state.light { 0.12 } else { 0.4 }))
-        .absolute(x, y)
+    let corner = (12.0 * zoom).clamp(7.0, 14.0);
+    let card_frame = el()
+        .size(card_w, card_h)
+        .radius(corner)
+        .continuous_corners()
+        .fill(if dimmed { dimmed_bg } else { p.card })
+        .clip_rounded(corner)
+        .shadow(if card.selected { 5.0 } else { 3.0 }, if card.selected { 14.0 } else { 8.0 }, if dimmed { Color::TRANSPARENT } else { p.shadow_card })
+        .absolute(0.0, 0.0)
         .child(face);
-    let inputs = card.inputs.iter().map(|socket| socket_port::<S>(card, socket, false, palette, zoom, lens));
-    let outputs = card.outputs.iter().map(|socket| socket_port::<S>(card, socket, true, palette, zoom, lens));
-    inputs.chain(outputs).fold(shell, |shell, port| shell.child(port))
+    let border_overlay = el().size(card_w, card_h).radius(corner).continuous_corners().border(border_width, border_color).absolute(0.0, 0.0);
+    let mut shell = el().key(format!("node-{}", card.id.0)).size(card_w, card_h).absolute(x, y).child(card_frame).child(border_overlay);
+    if card.selected && card.status == ExecutionStatus::Failed {
+        shell = shell.child(
+            el().key(format!("selection-ring-{}", card.id.0))
+                .absolute(-4.0, -4.0)
+                .size(card_w + 8.0, card_h + 8.0)
+                .radius(corner + 4.0)
+                .continuous_corners()
+                .border(2.4, p.selection_ring()),
+        );
+    }
+    let _ = palette;
+    let inputs = card.inputs.iter().map(|socket| socket_port::<S>(state, card, socket, false, dimmed, p, zoom, lens));
+    let outputs = card.outputs.iter().map(|socket| socket_port::<S>(state, card, socket, true, dimmed, p, zoom, lens));
+    shell = inputs.chain(outputs).fold(shell, |shell, port| shell.child(port));
+    if let Some(badge) = perched_badge {
+        let (lift, inset) = if crowded_above { (-(header_h - (header_h * 0.5 + 9.0 * zoom.max(0.8))), 4.0) } else { (reach, (7.0 * zoom).max(5.0)) };
+        shell = shell.child(row().w(card_w).px(inset).justify_end().absolute(0.0, -lift).child(badge.key(format!("perched-{}", card.id.0))));
+    }
+    if let Some(step) = card.step_order {
+        let step_sz = (18.0 * zoom).clamp(16.0, 20.0);
+        let step_badge = row()
+            .size(step_sz, step_sz)
+            .radius(step_sz * 0.5)
+            .items_center()
+            .justify_center()
+            .fill(if card.status == ExecutionStatus::Failed { p.hex } else { p.primary_bg })
+            .child(text(step.to_string()).font(TextStyle::new((10.0 * zoom).clamp(9.4, 11.0), 750.0).features("'tnum' 1")).color(p.primary_ink));
+        shell = shell.child(el().absolute(-6.0 * zoom, -(18.5 * zoom).clamp(16.5, 20.0)).child(step_badge));
+    }
+    shell
 }
 
+#[allow(clippy::too_many_arguments)]
 fn socket_port<S: 'static>(
+    state: &CanvasState,
     card: &NodeCardModel,
     socket: &SocketModel,
     output: bool,
-    palette: CanvasPalette,
+    dimmed: bool,
+    p: &HearthPalette,
     zoom: f32,
     lens: fn(&mut S) -> &mut CanvasState,
 ) -> El {
     let side = if output { "out" } else { "in" };
-    let color = socket_color(socket.ty);
-    let port = el()
+    let is_flow = socket.ty.is_flow();
+    let size = if socket.flagged {
+        11.0
+    } else if is_flow {
+        FLOW_KNOT_SIZE
+    } else {
+        DATA_PIN_SIZE
+    };
+    let wired = state
+        .wires
+        .iter()
+        .any(|w| if output { w.from_node == card.id && w.from_socket == socket.name } else { w.to_node == card.id && w.to_socket == socket.name });
+    let wired_active = state
+        .wires
+        .iter()
+        .any(|w| w.active && if output { w.from_node == card.id && w.from_socket == socket.name } else { w.to_node == card.id && w.to_socket == socket.name });
+    let muted_dot = if p.light { hex(0x766D8A) } else { hex(0x948AB8) };
+    let flow_col = if p.light { hex(0x137B60) } else { p.broth_mid };
+    let has_run = state.has_run();
+    let (fill, border_color, radius) = if socket.flagged {
+        (p.hex, p.card, if is_flow { size * zoom * 0.5 } else { 2.0 * zoom })
+    } else if is_flow {
+        let r = size * zoom * 0.5;
+        if !wired {
+            (p.card, if dimmed { muted_dot } else { flow_col }, r)
+        } else if has_run && !wired_active {
+            (muted_dot, p.card, r)
+        } else if card.status == ExecutionStatus::Running {
+            (p.running_mark(), p.card, r)
+        } else {
+            (flow_col, p.card, r)
+        }
+    } else if !wired {
+        (p.card, if dimmed { muted_dot } else { p.ink }, 2.0 * zoom)
+    } else if wired_active {
+        (if p.light { hex(0x3B2148) } else { hex(0xEEE8FA) }, p.card, 2.0 * zoom)
+    } else if has_run {
+        (muted_dot, p.card, 2.0 * zoom)
+    } else {
+        (p.data_wire, p.card, 2.0 * zoom)
+    };
+    let hovered = (card.id.clone(), socket.name.clone(), output);
+    let mut port = el()
         .key(format!("socket-{}-{side}-{}", card.id.0, socket.name))
-        .size(SOCKET_SIZE * zoom, SOCKET_SIZE * zoom)
-        .radius(if socket.ty.is_flow() { 3.0 * zoom } else { SOCKET_SIZE * zoom / 2.0 })
-        .fill(color)
-        .border(2.0 * zoom, palette.card)
-        .absolute((socket.offset[0] - SOCKET_SIZE / 2.0) * zoom, (socket.offset[1] - SOCKET_SIZE / 2.0) * zoom);
+        .size(size * zoom, size * zoom)
+        .radius(radius)
+        .fill(fill)
+        .border((1.6 * zoom).max(1.0), border_color)
+        .absolute((socket.offset[0] - size / 2.0) * zoom, (socket.offset[1] - size / 2.0) * zoom);
+    if zoom < LABEL_ZOOM {
+        let mine = hovered.clone();
+        port = port.on_hover_change(move |s: &mut S, on, _| {
+            let canvas = lens(s);
+            if on {
+                canvas.hover_socket = Some(mine.clone());
+            } else if canvas.hover_socket.as_ref() == Some(&mine) {
+                canvas.hover_socket = None;
+            }
+        });
+    }
     if !output {
-        return port;
+        if !wired {
+            return port;
+        }
+        let into = SocketRef::new(card.id.clone(), socket.name.clone());
+        return port.on_drag(move |s: &mut S, drag, tx| {
+            tx.instant();
+            let canvas = lens(s);
+            if canvas.running_brew {
+                return;
+            }
+            match drag.phase {
+                Phase::Down => {
+                    let Some(held) = canvas.wires.iter().find(|wire| wire.to_node == into.node && wire.to_socket == into.socket).cloned() else { return };
+                    let base = canvas.card(&into.node).and_then(|card| card.socket_world(&into.socket, false)).map_or(held.to, |(point, _)| point);
+                    canvas.drag = DragState::PullingWire { held, base, cursor: base, detached: false };
+                }
+                Phase::Move => {
+                    let zoom = canvas.camera.zoom;
+                    if let DragState::PullingWire { base, cursor, detached, .. } = &mut canvas.drag {
+                        *cursor = [base[0] + drag.dx / zoom, base[1] + drag.dy / zoom];
+                        *detached |= drag.dx.hypot(drag.dy) >= PULL_SLOP;
+                    }
+                }
+                _ => {
+                    if let DragState::PullingWire { held, cursor, detached: true, .. } = canvas.drag.clone()
+                        && !drag.cancelled()
+                    {
+                        let from = SocketRef::new(held.from_node.clone(), held.from_socket.clone());
+                        match canvas.input_socket_at(cursor) {
+                            Some(target) if target == into => {}
+                            Some(target) => {
+                                let kept = canvas.wires.clone();
+                                canvas.wires.retain(|wire| wire.id != held.id);
+                                if let Err(refused) = canvas.connect_sockets(&from, &target) {
+                                    canvas.wires = kept;
+                                    canvas.last_connect_error = Some(refused);
+                                }
+                            }
+                            None => canvas.wires.retain(|wire| wire.id != held.id),
+                        }
+                    }
+                    canvas.drag = DragState::Idle;
+                }
+            }
+        });
     }
     let from = SocketRef::new(card.id.clone(), socket.name.clone());
     let ty = socket.ty;
@@ -321,6 +1589,9 @@ fn socket_port<S: 'static>(
     port.on_drag(move |s: &mut S, drag, tx| {
         tx.instant();
         let canvas = lens(s);
+        if canvas.running_brew {
+            return;
+        }
         match drag.phase {
             Phase::Down => {
                 let anchor = canvas.card(&from.node).and_then(|card| card.socket_world(&from.socket, true)).map_or(anchor, |(point, _)| point);
@@ -343,4 +1614,8 @@ fn socket_port<S: 'static>(
             }
         }
     })
+}
+
+pub fn brand_mark(light: bool) -> Shape {
+    brand_cauldron_mark(light)
 }

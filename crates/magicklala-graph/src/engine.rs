@@ -602,6 +602,11 @@ impl RunState {
         };
         self.emit(TraceEvent::NodeStarted { run_id: self.run_id(), node_id: node.clone(), at: Utc::now(), subgraph_path: Vec::new() });
         self.shared.executed.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = unset_bound_setting(self, &instance) {
+            stack.pending.remove(&node);
+            self.emit(TraceEvent::NodeFailed { run_id: self.run_id(), node_id: node, at: Utc::now(), error: error.to_string(), subgraph_path: Vec::new() });
+            return Err(stack.fail(Fault::Node(error)));
+        }
         let waiting_on = WaitCell::default();
         let mut context = ExecContext::data(Arc::clone(self), instance, memo.clone(), scope.clone(), Arc::clone(&waiting_on));
         let future: BoxFuture<Result<NodeOutcome, NodeError>> = Box::pin(async move { executor.execute(&mut context).await });
@@ -709,7 +714,7 @@ impl RunState {
         let (fired, outputs) = self.execute_flow_node(&node, &socket, &scope).await?;
         let next_scope = with_outputs(&scope, &node, outputs);
         if self.kind_of(&node) == WHILE_LOOP_KIND && fired.iter().any(|fired_socket| fired_socket == "body") {
-            let max_iterations = self.max_iterations(&node);
+            let max_iterations = self.max_iterations(&node).map_err(|error| self.fail_node(&node, error))?;
             let iterations = iterations + 1;
             if iterations > max_iterations {
                 return Err(self.fail_node(&node, NodeError::Other(format!("while loop exceeded max_iterations {max_iterations}"))));
@@ -723,13 +728,24 @@ impl RunState {
         self.instances.get(node).map_or("", |instance| instance.kind.as_str())
     }
 
-    fn max_iterations(&self, node: &NodeId) -> u64 {
-        self.instances
-            .get(node)
-            .and_then(|instance| instance.config.get("max_iterations"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(DEFAULT_WHILE_LOOP_MAX_ITERATIONS)
-            .max(1)
+    fn max_iterations(&self, node: &NodeId) -> Result<u64, NodeError> {
+        let Some(setting) = self.instances.get(node).and_then(|instance| instance.config.get("max_iterations")) else {
+            return Ok(DEFAULT_WHILE_LOOP_MAX_ITERATIONS);
+        };
+        if setting.is_null() {
+            return Ok(DEFAULT_WHILE_LOOP_MAX_ITERATIONS);
+        }
+        let Some(name) = bound_variable(setting) else {
+            return whole_number(setting)
+                .filter(|limit| *limit >= 1)
+                .ok_or_else(|| NodeError::Other(format!("while loop max_iterations must be a whole number of at least 1, but got {setting}")));
+        };
+        let value = locked(&self.variables).get(name).map(Value::to_json);
+        let whole = value.as_ref().and_then(whole_number);
+        whole.filter(|limit| *limit >= 1).ok_or_else(|| {
+            let shown = value.map_or_else(|| "nothing".to_owned(), |value| value.to_string());
+            NodeError::Other(format!("while loop max_iterations must be a whole number of at least 1, but {{{{{name}}}}} is {shown}"))
+        })
     }
 
     fn fail_node(&self, node: &NodeId, error: NodeError) -> SpellError {
@@ -817,6 +833,9 @@ impl RunState {
         let started = Instant::now();
         self.emit(TraceEvent::NodeStarted { run_id: self.run_id(), node_id: node.clone(), at: Utc::now(), subgraph_path: Vec::new() });
         self.shared.executed.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = unset_bound_setting(self, &instance) {
+            return Err(self.fault_on(node, Fault::Node(error)));
+        }
         let mut context = ExecContext::flow(self.clone(), instance, socket, scope.clone());
         let cancellation = self.shared.cancellation.clone();
         let result = tokio::select! {
@@ -919,12 +938,48 @@ struct ExecContext {
     inputs: Inputs,
 }
 
+pub const UNBOUND_SETTINGS: [&str; 3] = ["template", "prompt", "script"];
+
+pub fn whole_number(value: &serde_json::Value) -> Option<u64> {
+    value.as_u64().or_else(|| value.as_f64().filter(|number| *number >= 0.0 && number.fract() == 0.0 && *number <= u64::MAX as f64).map(|number| number as u64))
+}
+
+pub fn bound_variable(value: &serde_json::Value) -> Option<&str> {
+    value.as_str()?.trim().strip_prefix("{{")?.strip_suffix("}}").map(str::trim).filter(|name| !name.is_empty() && !name.contains(['{', '}']))
+}
+
+fn unset_bound_setting(state: &RunState, node: &NodeInstance) -> Option<NodeError> {
+    let settings = node.config.as_object()?;
+    let spec = state.executors.get(&node.id)?.spec();
+    let variables = locked(&state.variables);
+    settings.iter().filter(|(key, _)| spec.binds_setting(key)).find_map(|(key, value)| {
+        let name = bound_variable(value)?;
+        let empty = variables.get(name).is_none_or(|held| held.to_json().is_null());
+        empty.then(|| NodeError::Other(format!("{key} reads {{{{{name}}}}}, but the variable {name} has no value")))
+    })
+}
+
+fn bound_settings(state: &RunState, mut node: NodeInstance) -> NodeInstance {
+    let Some(executor) = state.executors.get(&node.id).cloned() else { return node };
+    if let Some(settings) = node.config.as_object_mut() {
+        let variables = locked(&state.variables);
+        for (_, value) in settings.iter_mut().filter(|(key, _)| executor.spec().binds_setting(key)) {
+            if let Some(found) = bound_variable(value).and_then(|name| variables.get(name)) {
+                *value = found.to_json();
+            }
+        }
+    }
+    node
+}
+
 impl ExecContext {
     fn flow(state: Arc<RunState>, node: NodeInstance, socket: &str, scope: Scope) -> Self {
+        let node = bound_settings(&state, node);
         Self { state, node, trigger_socket: Some(socket.to_owned()), memo: Memo::default(), scope, inputs: Inputs::Flow { fault: None } }
     }
 
     fn data(state: Arc<RunState>, node: NodeInstance, memo: Memo, scope: Scope, waiting_on: WaitCell) -> Self {
+        let node = bound_settings(&state, node);
         Self { state, node, trigger_socket: None, memo, scope, inputs: Inputs::Data { waiting_on } }
     }
 

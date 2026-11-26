@@ -56,7 +56,7 @@ fn evaluate(
 pub(crate) async fn run_rhai(ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeError> {
     let script =
         config_text(ctx, "script").filter(|script| !script.trim().is_empty()).ok_or_else(|| NodeError::InvalidConfig("script is required".to_owned()))?;
-    let max_operations = config_u64(ctx, "max_operations", DEFAULT_MAX_OPERATIONS).clamp(1, MAX_ALLOWED_OPERATIONS);
+    let max_operations = config_u64(ctx, "max_operations", DEFAULT_MAX_OPERATIONS)?.clamp(1, MAX_ALLOWED_OPERATIONS);
     let mut bindings = Vec::new();
     for name in config_list(ctx, "inputs").unwrap_or_default() {
         let bound = value(ctx, &name).await?.to_json();

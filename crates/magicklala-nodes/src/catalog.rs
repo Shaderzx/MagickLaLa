@@ -166,7 +166,7 @@ fn flow() -> Vec<Arc<dyn NodeExecutor>> {
             .output("out_0", SocketType::Flow)
             .output("out_1", SocketType::Flow)
             .output(DYNAMIC_SOCKET, SocketType::Flow)
-            .field("outputs", FieldKind::Json, Some(json!(["out_0", "out_1"])), false)
+            .field("outputs", FieldKind::Json, Some(json!(["out_0", "out_1"])), true)
             .build(Op::Split),
         Def::new("flow/wait_for_all", "Wait For All", "flow", "Fires once every incoming branch has arrived").flow_in().flow_out().build(Op::WaitForAll),
         Def::new("flow/while_loop", "While Loop", "flow", "Repeats the body while the condition holds")

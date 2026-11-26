@@ -56,6 +56,21 @@ pub struct SpellGraph {
     pub wires: Vec<Wire>,
     #[serde(default)]
     pub subgraphs: Vec<SubgraphRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shelf: Vec<ShelfEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShelfEntry {
+    pub node: NodeId,
+    #[serde(default)]
+    pub parked: Vec<Wire>,
+    #[serde(default)]
+    pub bridges: Vec<Wire>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused: Vec<Wire>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parked_at: Vec<u32>,
 }
 
 impl SpellGraph {
@@ -69,6 +84,7 @@ impl SpellGraph {
             nodes: Vec::new(),
             wires: Vec::new(),
             subgraphs: Vec::new(),
+            shelf: Vec::new(),
         }
     }
 

@@ -2,17 +2,20 @@ use magicklala_graph::{DYNAMIC_SOCKET, NodeId, NodeSpec, RunStatus, SocketSpec, 
 
 use crate::Camera;
 
-pub const CARD_WIDTH: f32 = 200.0;
+pub const CARD_WIDTH: f32 = 218.0;
 pub const CARD_HEADER: f32 = 44.0;
-pub const SOCKET_ROW: f32 = 22.0;
+pub const SOCKET_ROW: f32 = 28.0;
 pub const SOCKET_HIT_RADIUS: f32 = 14.0;
 const BODY_TOP: f32 = 6.0;
+const BREW_SCALE_FLOOR: f32 = 0.6;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SocketModel {
     pub name: String,
     pub ty: SocketType,
     pub offset: [f32; 2],
+    pub flagged: bool,
+    pub mistyped: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -33,6 +36,22 @@ impl ExecutionStatus {
             ExecutionStatus::Failed => "failed",
         }
     }
+
+    pub fn display_label(self) -> &'static str {
+        match self {
+            ExecutionStatus::Idle => "Idle",
+            ExecutionStatus::Running => "Simmering",
+            ExecutionStatus::Succeeded => "Brewed",
+            ExecutionStatus::Failed => "Failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkbenchMode {
+    #[default]
+    Cauldron,
+    Grimoire,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +66,8 @@ pub struct NodeCardModel {
     pub outputs: Vec<SocketModel>,
     pub selected: bool,
     pub status: ExecutionStatus,
+    pub duration_ms: Option<u64>,
+    pub step_order: Option<usize>,
 }
 
 impl NodeCardModel {
@@ -60,6 +81,8 @@ impl NodeCardModel {
                     name: socket.name.clone(),
                     ty: socket.ty,
                     offset: [x, CARD_HEADER + BODY_TOP + SOCKET_ROW * (row as f32 + 0.5)],
+                    flagged: false,
+                    mistyped: false,
                 })
                 .collect()
         };
@@ -76,6 +99,8 @@ impl NodeCardModel {
             outputs,
             selected: false,
             status: ExecutionStatus::Idle,
+            duration_ms: None,
+            step_order: None,
         }
     }
 
@@ -84,8 +109,16 @@ impl NodeCardModel {
         if sockets.iter().any(|socket| socket.name == name) {
             return;
         }
-        let row = sockets.len() as f32;
-        sockets.push(SocketModel { name: name.to_owned(), ty, offset: [x, CARD_HEADER + BODY_TOP + SOCKET_ROW * (row + 0.5)] });
+        let socket = SocketModel { name: name.to_owned(), ty, offset: [x, 0.0], flagged: false, mistyped: false };
+        if output && name != "default" && sockets.last().is_some_and(|last| last.name == "default") {
+            let insert_at = sockets.len() - 1;
+            sockets.insert(insert_at, socket);
+        } else {
+            sockets.push(socket);
+        }
+        for (row, entry) in sockets.iter_mut().enumerate() {
+            entry.offset = [x, CARD_HEADER + BODY_TOP + SOCKET_ROW * (row as f32 + 0.5)];
+        }
         self.size[1] = card_height(self.inputs.len().max(self.outputs.len()));
     }
 
@@ -148,11 +181,21 @@ pub enum DragState {
     Panning {
         origin: [f32; 2],
     },
+    LiftingVial {
+        node: NodeId,
+        offset: [f32; 2],
+    },
     ConnectingWire {
         from: SocketRef,
         ty: SocketType,
         anchor: [f32; 2],
         cursor: [f32; 2],
+    },
+    PullingWire {
+        held: WireModel,
+        base: [f32; 2],
+        cursor: [f32; 2],
+        detached: bool,
     },
 }
 
@@ -192,14 +235,32 @@ pub enum CanvasEvent {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CanvasState {
     pub camera: Camera,
+    pub brew_camera: Camera,
     pub nodes: Vec<NodeCardModel>,
     pub wires: Vec<WireModel>,
     pub selection: Option<NodeId>,
     pub hovered: Option<NodeId>,
     pub drag: DragState,
     pub context_menu: Option<[f32; 2]>,
+    pub context_card: Option<[f32; 4]>,
+    pub grimoire_fitted: bool,
     pub last_connect_error: Option<ConnectError>,
     pub light: bool,
+    pub mode: WorkbenchMode,
+    pub spell_name: String,
+    pub release_badge: Option<String>,
+    pub notes: std::collections::BTreeMap<NodeId, String>,
+    pub brew_summary: Option<String>,
+    pub validated: bool,
+    pub invalid_brew: bool,
+    pub running_brew: bool,
+    pub last_brew: Option<RunStatus>,
+    pub hover_socket: Option<(NodeId, String, bool)>,
+    pub brew_total_ms: Option<u64>,
+    pub toss_count: u32,
+    pub stopped: Vec<NodeId>,
+    pub pot_hover: bool,
+    pub shelved: Vec<NodeId>,
     next_id: u64,
 }
 
@@ -210,18 +271,13 @@ impl CanvasState {
             .iter()
             .map(|node| NodeCardModel::new(node.id.clone(), &node.kind, node.position, specs.iter().find(|spec| spec.kind == node.kind)))
             .collect();
-        let mut state = Self { nodes, ..Self::default() };
-        let spec_of = |id: &NodeId| graph.nodes.iter().find(|node| &node.id == id).and_then(|node| specs.iter().find(|spec| spec.kind == node.kind));
+        let mut state = Self { nodes, light: true, mode: WorkbenchMode::Cauldron, spell_name: graph.name.clone(), ..Self::default() };
         for wire in &graph.wires {
-            let from_ty = resolved_type(spec_of(&wire.from_node), &wire.from_socket, true);
-            let to_ty = resolved_type(spec_of(&wire.to_node), &wire.to_socket, false);
-            let fallback = from_ty.or(to_ty).unwrap_or(SocketType::Any);
-            if let Some(card) = state.card_mut(&wire.from_node) {
-                card.ensure_socket(&wire.from_socket, from_ty.unwrap_or(fallback), true);
-            }
-            if let Some(card) = state.card_mut(&wire.to_node) {
-                card.ensure_socket(&wire.to_socket, to_ty.unwrap_or(fallback), false);
-            }
+            state.adopt_sockets(
+                &SocketRef::new(wire.from_node.clone(), wire.from_socket.clone()),
+                &SocketRef::new(wire.to_node.clone(), wire.to_socket.clone()),
+                specs,
+            );
         }
         state.wires = graph
             .wires
@@ -232,6 +288,27 @@ impl CanvasState {
                 state.wire_model(wire.id.clone(), &from, &to)
             })
             .collect();
+        for node in &graph.nodes {
+            let Some(spec) = specs.iter().find(|spec| spec.kind == node.kind) else { continue };
+            let Some(open) = spec.outputs.iter().find(|socket| socket.name == DYNAMIC_SOCKET) else { continue };
+            let listed = spec.config.iter().filter(|field| field.kind == magicklala_graph::FieldKind::Json).find_map(|field| {
+                node.config
+                    .get(&field.key)
+                    .and_then(|value| value.as_array())
+                    .map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect::<Vec<_>>())
+            });
+            if let Some(names) = listed {
+                let by_default: Vec<&str> =
+                    spec.config.iter().filter_map(|field| field.default.as_ref()?.as_array()).flatten().filter_map(|name| name.as_str()).collect();
+                let fixed: Vec<String> = spec
+                    .outputs
+                    .iter()
+                    .filter(|socket| socket.name != DYNAMIC_SOCKET && !by_default.contains(&socket.name.as_str()))
+                    .map(|socket| socket.name.clone())
+                    .collect();
+                state.list_outputs(&node.id, &names, open.ty, &fixed);
+            }
+        }
         state
     }
 
@@ -251,6 +328,58 @@ impl CanvasState {
         })
     }
 
+    pub fn card_line<'a>(&'a self, card: &'a NodeCardModel) -> &'a str {
+        self.notes.get(&card.id).map_or(card.kind.as_str(), String::as_str)
+    }
+
+    pub fn display_title(&self, id: &NodeId) -> String {
+        let named = self.twin_title(id);
+        let Some(card) = self.card(id) else { return named };
+        let numbered = named.ends_with(&format!(" · {}", self.twin_number(id)));
+        let clashes = self.nodes.iter().any(|other| &other.id != id && other.title == card.title && self.twin_title(&other.id) == named);
+        if numbered && clashes {
+            return named.rsplit_once(" · ").map_or(named.clone(), |(short, number)| format!("{short} #{number}"));
+        }
+        named
+    }
+
+    fn twin_number(&self, id: &NodeId) -> usize {
+        let Some(card) = self.card(id) else { return 0 };
+        self.nodes.iter().filter(|other| other.title == card.title).position(|other| &other.id == id).unwrap_or_default() + 1
+    }
+
+    fn twin_title(&self, id: &NodeId) -> String {
+        let Some(card) = self.card(id) else { return id.0.clone() };
+        let twins: Vec<&NodeId> = self.nodes.iter().filter(|other| other.title == card.title).map(|other| &other.id).collect();
+        if twins.len() < 2 {
+            return card.title.clone();
+        }
+        let short = match card.title.as_str() {
+            "Send Message" => "Send",
+            "Stream Message" => "Stream",
+            whole => whole,
+        };
+        let generic = |socket: &str| socket == "out" || socket.strip_prefix("out_").is_some_and(|rest| rest.chars().all(|c| c.is_ascii_digit()));
+        let route_of = |node: &NodeId| {
+            self.wires
+                .iter()
+                .find(|wire| &wire.to_node == node && wire.ty.is_flow())
+                .filter(|wire| !generic(&wire.from_socket))
+                .map(|wire| (wire.from_node.clone(), wire.from_socket.clone()))
+        };
+        let route = route_of(id);
+        let socket_of = |node: &NodeId| route_of(node).map(|(_, socket)| socket);
+        let same_route: Vec<&&NodeId> =
+            twins.iter().filter(|twin| route.is_some() && socket_of(twin) == route.as_ref().map(|(_, socket)| socket.clone())).collect();
+        match route.map(|(_, socket)| socket) {
+            Some(route) if same_route.len() > 1 => {
+                format!("{short} · {route} {}", same_route.iter().position(|twin| **twin == id).unwrap_or_default() + 1)
+            }
+            Some(route) => format!("{short} · {route}"),
+            None => format!("{short} · {}", twins.iter().position(|twin| *twin == id).unwrap_or_default() + 1),
+        }
+    }
+
     pub fn card(&self, id: &NodeId) -> Option<&NodeCardModel> {
         self.nodes.iter().find(|card| &card.id == id)
     }
@@ -267,6 +396,43 @@ impl CanvasState {
         self.nodes.iter_mut().for_each(|card| card.selected = Some(&card.id) == node.as_ref());
         self.selection = node;
         self.context_menu = None;
+    }
+
+    pub fn free_spot(&self, id: &NodeId, near: [f32; 2]) -> [f32; 2] {
+        let Some(size) = self.card(id).map(|card| card.size) else { return near };
+        let clear = |at: [f32; 2]| {
+            self.nodes.iter().filter(|other| &other.id != id).all(|other| {
+                at[0] + size[0] + 24.0 <= other.position[0]
+                    || other.position[0] + other.size[0] + 24.0 <= at[0]
+                    || at[1] + size[1] + 24.0 <= other.position[1]
+                    || other.position[1] + other.size[1] + 24.0 <= at[1]
+            })
+        };
+        let ring = |step: usize| {
+            let lap = (step / 8 + 1) as f32;
+            let angle = (step % 8) as f32 * std::f32::consts::FRAC_PI_4;
+            [near[0] + angle.cos() * lap * (size[0] + 32.0) * 0.5, near[1] + angle.sin() * lap * (size[1] + 32.0)]
+        };
+        std::iter::once(near).chain((0..48).map(ring)).find(|at| clear(*at)).unwrap_or(near)
+    }
+
+    pub fn list_outputs(&mut self, id: &NodeId, names: &[String], ty: SocketType, fixed: &[String]) -> bool {
+        let wired: Vec<String> = self.wires.iter().filter(|wire| &wire.from_node == id).map(|wire| wire.from_socket.clone()).collect();
+        let Some(card) = self.card_mut(id) else { return false };
+        let before: Vec<String> = card.outputs.iter().map(|socket| socket.name.clone()).collect();
+        card.outputs.retain(|socket| names.contains(&socket.name) || fixed.contains(&socket.name) || wired.contains(&socket.name));
+        for name in names {
+            card.ensure_socket(name, ty, true);
+        }
+        card.outputs.sort_by_key(|socket| names.iter().position(|name| name == &socket.name).unwrap_or(names.len()));
+        for (row, socket) in card.outputs.iter_mut().enumerate() {
+            socket.offset = [CARD_WIDTH, CARD_HEADER + BODY_TOP + SOCKET_ROW * (row as f32 + 0.5)];
+        }
+        card.size[1] = card_height(card.inputs.len().max(card.outputs.len()));
+        let changed = card.outputs.iter().map(|socket| &socket.name).ne(before.iter());
+        let position = card.position;
+        self.move_node(id, position);
+        changed
     }
 
     pub fn move_node(&mut self, id: &NodeId, position: [f32; 2]) -> bool {
@@ -311,7 +477,24 @@ impl CanvasState {
         let id = self.selection.take()?;
         let index = self.nodes.iter().position(|card| card.id == id)?;
         self.wires.retain(|wire| wire.from_node != id && wire.to_node != id);
+        self.unshelve(&id);
         Some(self.nodes.remove(index))
+    }
+
+    pub fn restore_node(&mut self, card: NodeCardModel, wires: Vec<WireModel>, at: usize) {
+        let id = card.id.clone();
+        if !self.nodes.iter().any(|existing| existing.id == id) {
+            self.nodes.insert(at.min(self.nodes.len()), card);
+        }
+        for wire in wires {
+            if self.card(&wire.from_node).is_some() && self.card(&wire.to_node).is_some() && !self.wires.iter().any(|existing| existing.id == wire.id) {
+                if !wire.ty.is_flow() {
+                    self.wires.retain(|existing| existing.ty.is_flow() || existing.to_node != wire.to_node || existing.to_socket != wire.to_socket);
+                }
+                self.wires.push(wire);
+            }
+        }
+        self.select(Some(id));
     }
 
     pub fn connect_sockets(&mut self, from: &SocketRef, to: &SocketRef) -> Result<WireId, ConnectError> {
@@ -334,6 +517,8 @@ impl CanvasState {
         if exists {
             return Err(ConnectError::Duplicate);
         }
+        self.unshelve(&from.node);
+        self.unshelve(&to.node);
         if !to_ty.is_flow() {
             self.wires.retain(|wire| !(wire.to_node == to.node && wire.to_socket == to.socket));
         }
@@ -359,7 +544,12 @@ impl CanvasState {
     }
 
     pub fn reset_execution(&mut self) {
-        self.nodes.iter_mut().for_each(|card| card.status = ExecutionStatus::Idle);
+        self.stopped.clear();
+        self.nodes.iter_mut().for_each(|card| {
+            card.status = ExecutionStatus::Idle;
+            card.duration_ms = None;
+            card.step_order = None;
+        });
         self.wires.iter_mut().for_each(|wire| wire.active = false);
     }
 
@@ -368,15 +558,39 @@ impl CanvasState {
             return;
         }
         match event {
-            TraceEvent::RunStarted { .. } => self.reset_execution(),
-            TraceEvent::NodeStarted { node_id, .. } => self.set_status(node_id, ExecutionStatus::Running),
-            TraceEvent::NodeFinished { node_id, .. } => self.set_status(node_id, ExecutionStatus::Succeeded),
-            TraceEvent::NodeFailed { node_id, .. } => self.set_status(node_id, ExecutionStatus::Failed),
-            TraceEvent::WireActivated { wire_id, .. } => self.wires.iter_mut().filter(|wire| &wire.id == wire_id).for_each(|wire| wire.active = true),
-            TraceEvent::RunFinished { summary, .. } if summary.status != RunStatus::Succeeded => {
-                self.nodes.iter_mut().filter(|card| card.status == ExecutionStatus::Running).for_each(|card| card.status = ExecutionStatus::Failed);
+            TraceEvent::RunStarted { .. } => {
+                self.last_brew = None;
+                self.reset_execution();
             }
-            TraceEvent::RunFinished { .. } | TraceEvent::StreamChunk { .. } | TraceEvent::VariableSet { .. } => {}
+            TraceEvent::NodeStarted { node_id, .. } => self.set_status(node_id, ExecutionStatus::Running),
+            TraceEvent::NodeFinished { node_id, duration_ms, .. } => {
+                self.number_step(node_id);
+                if let Some(card) = self.card_mut(node_id) {
+                    card.status = ExecutionStatus::Succeeded;
+                    card.duration_ms = Some(*duration_ms);
+                }
+            }
+            TraceEvent::NodeFailed { node_id, .. } => {
+                self.number_step(node_id);
+                self.set_status(node_id, ExecutionStatus::Failed);
+            }
+            TraceEvent::WireActivated { wire_id, .. } => self.wires.iter_mut().filter(|wire| &wire.id == wire_id).for_each(|wire| wire.active = true),
+            TraceEvent::RunFinished { summary, .. } if summary.status == RunStatus::Succeeded => self.last_brew = Some(RunStatus::Succeeded),
+            TraceEvent::RunFinished { summary, .. } => {
+                self.last_brew = Some(summary.status);
+                for card in self.nodes.iter_mut().filter(|card| card.status == ExecutionStatus::Running) {
+                    card.status = ExecutionStatus::Idle;
+                    self.stopped.push(card.id.clone());
+                }
+            }
+            TraceEvent::StreamChunk { .. } | TraceEvent::VariableSet { .. } => {}
+        }
+    }
+
+    fn number_step(&mut self, id: &NodeId) {
+        let next_step = self.nodes.iter().filter_map(|card| card.step_order).max().unwrap_or(0) + 1;
+        if let Some(card) = self.card_mut(id).filter(|card| card.step_order.is_none()) {
+            card.step_order = Some(next_step);
         }
     }
 
@@ -386,7 +600,96 @@ impl CanvasState {
         }
     }
 
+    pub fn adopt_sockets(&mut self, from: &SocketRef, to: &SocketRef, specs: &[NodeSpec]) {
+        let spec_of = |state: &Self, id: &NodeId| state.card(id).and_then(|card| specs.iter().find(|spec| spec.kind == card.kind));
+        let from_ty = resolved_type(spec_of(self, &from.node), &from.socket, true);
+        let to_ty = resolved_type(spec_of(self, &to.node), &to.socket, false);
+        let fallback = from_ty.or(to_ty).unwrap_or(SocketType::Any);
+        if let Some(card) = self.card_mut(&from.node) {
+            card.ensure_socket(&from.socket, from_ty.unwrap_or(fallback), true);
+        }
+        if let Some(card) = self.card_mut(&to.node) {
+            card.ensure_socket(&to.socket, to_ty.unwrap_or(fallback), false);
+        }
+    }
+
+    pub fn is_shelved(&self, id: &NodeId) -> bool {
+        self.shelved.contains(id)
+    }
+
+    pub fn shelve(&mut self, id: &NodeId) {
+        if !self.shelved.contains(id) {
+            self.shelved.push(id.clone());
+        }
+    }
+
+    pub fn unshelve(&mut self, id: &NodeId) {
+        self.shelved.retain(|other| other != id);
+    }
+
+    pub fn set_aside(&mut self, id: &NodeId) -> usize {
+        self.shelve(id);
+        let before = self.wires.len();
+        self.wires.retain(|wire| &wire.from_node != id && &wire.to_node != id);
+        before - self.wires.len()
+    }
+
+    pub fn apply_toss(&mut self, toss: &crate::Toss) {
+        if let crate::Toss::Aside(id) = toss {
+            self.set_aside(id);
+        }
+    }
+
+    pub fn active_camera(&self) -> &Camera {
+        match self.mode {
+            WorkbenchMode::Cauldron => &self.brew_camera,
+            WorkbenchMode::Grimoire => &self.camera,
+        }
+    }
+
+    pub fn zoom_active(&mut self, factor: f32, pivot: [f32; 2], viewport: (f32, f32)) {
+        match self.mode {
+            WorkbenchMode::Cauldron => {
+                let fit = crate::brew::brew_plan(self, viewport).scale / self.brew_camera.zoom.max(0.01);
+                self.brew_camera.zoom_about_origin_above(factor, (BREW_SCALE_FLOOR / fit.max(0.01)).min(1.0));
+            }
+            WorkbenchMode::Grimoire => self.camera.zoom_by(factor, pivot),
+        }
+    }
+
+    pub fn clear_run_marks(&mut self) {
+        self.stopped.clear();
+        self.wires.iter_mut().for_each(|wire| wire.active = false);
+        for card in &mut self.nodes {
+            card.status = ExecutionStatus::Idle;
+            card.duration_ms = None;
+            card.step_order = None;
+            for socket in &mut card.inputs {
+                socket.flagged = false;
+                socket.mistyped = false;
+            }
+        }
+        self.brew_summary = None;
+        self.last_brew = None;
+        self.running_brew = false;
+    }
+
+    pub fn brew_completed(&self) -> bool {
+        self.has_run()
+            && !self.running_brew
+            && self.last_brew == Some(RunStatus::Succeeded)
+            && !self.nodes.iter().any(|card| card.status == ExecutionStatus::Failed)
+    }
+
+    pub fn has_run(&self) -> bool {
+        self.wires.iter().any(|wire| wire.active) || (self.wires.is_empty() && self.nodes.iter().any(|card| card.status != ExecutionStatus::Idle))
+    }
+
     pub fn fit(&mut self, viewport: (f32, f32)) {
+        if self.mode == WorkbenchMode::Cauldron {
+            self.brew_camera.reset();
+            return;
+        }
         if self.nodes.is_empty() {
             self.camera.reset();
             return;
@@ -395,7 +698,7 @@ impl CanvasState {
         let min_y = self.nodes.iter().map(|card| card.position[1]).fold(f32::MAX, f32::min);
         let max_x = self.nodes.iter().map(|card| card.position[0] + card.size[0]).fold(f32::MIN, f32::max);
         let max_y = self.nodes.iter().map(|card| card.position[1] + card.size[1]).fold(f32::MIN, f32::max);
-        let margin = 40.0;
+        let margin = 16.0;
         let zoom = ((viewport.0 - margin * 2.0) / (max_x - min_x).max(1.0))
             .min((viewport.1 - margin * 2.0) / (max_y - min_y).max(1.0))
             .clamp(Camera::MIN_ZOOM, Camera::MAX_ZOOM);

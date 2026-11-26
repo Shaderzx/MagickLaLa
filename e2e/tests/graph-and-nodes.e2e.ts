@@ -339,6 +339,43 @@ test('a while_loop stops at its own max_iterations and fails the run with the co
   });
 });
 
+test('a while_loop limit bound to a variable stops at the variable value, and a bound limit that is not a whole number of at least 1 fails the loop instead of running to the default', async () => {
+  const nodes = [
+    spellNode('start', 'event/on_start'),
+    spellNode('always', 'logic/regex_match', { text: 'go', pattern: 'go' }),
+    spellNode('loop', 'flow/while_loop', { max_iterations: '{{limit}}' }),
+    spellNode('tick', 'var/set', { name: 'ticks', value: 1 }),
+  ];
+  const wires = [spellWire('w_start', 'start', 'out', 'loop', 'in'), spellWire('w_condition', 'always', 'matched', 'loop', 'condition'), spellWire('w_body', 'loop', 'body', 'tick', 'in')];
+  const ticks = (run: SpellRun) => run.events.filter((event) => event.event === 'node_finished' && event.node_id === 'tick').length;
+  await withSpellFile(nodes, wires, async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(1);
+    expect(ticks(run)).toBe(1);
+    expect(failureOf(run, 'loop')).toContain('while loop exceeded max_iterations 1');
+  }, { variables: [{ name: 'limit', ty: 'int', default: { type: 'int', value: 1 } }] });
+  await withSpellFile(nodes, wires, async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(1);
+    expect(ticks(run)).toBe(0);
+    expect(failureOf(run, 'loop')).toContain('max_iterations must be a whole number of at least 1');
+  }, { variables: [{ name: 'limit', ty: 'string', default: { type: 'string', value: 'lots' } }] });
+});
+test('a while_loop limit bound to a Float variable holding a whole 2.0 stops after two passes like the integer 2', async () => {
+  const ticks = (run: SpellRun) => run.events.filter((event) => event.event === 'node_finished' && event.node_id === 'tick').length;
+  const build = (limit: unknown) => [
+    spellNode('start', 'event/on_start'),
+    spellNode('always', 'logic/regex_match', { text: 'go', pattern: 'go' }),
+    spellNode('loop', 'flow/while_loop', { max_iterations: limit }),
+    spellNode('tick', 'var/set', { name: 'ticks', value: 1 }),
+  ];
+  const wires = [spellWire('w_start', 'start', 'out', 'loop', 'in'), spellWire('w_condition', 'always', 'matched', 'loop', 'condition'), spellWire('w_body', 'loop', 'body', 'tick', 'in')];
+  await withSpellFile(build('{{limit}}'), wires, async (path) => {
+    const run = await runSpell([path], {});
+    expect(ticks(run)).toBe(2);
+    expect(failureOf(run, 'loop')).toContain('while loop exceeded max_iterations 2');
+  }, { variables: [{ name: 'limit', ty: 'float', default: { type: 'float', value: 2 } }] });
+});
 test('a stream that closes before the [DONE] marker fails the run instead of returning a truncated answer', async () => {
   const truncated = await startRecordingServer((response) => {
     response.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -1174,4 +1211,102 @@ test('distinct pinned releases of one spell are distinct snapshots, so A@2 -> B 
     expect(run.stderr).not.toContain('levels');
     expect(run.events).toEqual([]);
   }
+});
+
+test('a setting bound to a variable that holds no value fails its step with the variable named instead of running on the default, and the same step runs once a Set gives the variable a value', async () => {
+  const unset = [spellNode('start', 'event/on_start'), spellNode('wait', 'time/delay', { ms: '{{ms}}' })];
+  const finished = (run: SpellRun, node: string) => run.events.some((event) => event.event === 'node_finished' && event.node_id === node);
+  await withSpellFile(unset, [spellWire('w1', 'start', 'out', 'wait', 'in')], async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(1);
+    expect(finished(run, 'wait')).toBe(false);
+    expect(failureOf(run, 'wait')).toContain('the variable ms has no value');
+  }, { variables: [{ name: 'ms', ty: 'int' }] });
+  const set = [...unset, spellNode('set', 'var/set', { name: 'ms', value: 5 })];
+  await withSpellFile(set, [spellWire('w1', 'start', 'out', 'set', 'in'), spellWire('w2', 'set', 'out', 'wait', 'in')], async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(0);
+    expect(finished(run, 'wait')).toBe(true);
+  }, { variables: [{ name: 'ms', ty: 'int' }] });
+});
+
+test('a value step whose setting reads a variable with no value is itself marked failed with the variable named, not only the steps that waited on it', async () => {
+  const nodes = [
+    spellNode('start', 'event/on_start'),
+    spellNode('check', 'logic/validate', { pattern: '{{pat}}' }),
+    spellNode('text', 'json/stringify'),
+    spellNode('reply', 'io/send_message'),
+  ];
+  const wires = [
+    spellWire('w1', 'start', 'out', 'reply', 'in'),
+    spellWire('w2', 'check', 'errors', 'text', 'value'),
+    spellWire('w3', 'text', 'text', 'reply', 'content'),
+  ];
+  await withSpellFile(nodes, wires, async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(1);
+    expect(failureOf(run, 'check')).toContain('the variable pat has no value');
+  }, { variables: [{ name: 'pat', ty: 'string' }] });
+});
+
+test('a bound setting whose variable holds a value the setting cannot take fails its step by name instead of falling back to the default', async () => {
+  const nodes = [
+    spellNode('start', 'event/on_start'),
+    spellNode('set', 'var/set', { name: 'ms', value: 'not a number' }),
+    spellNode('wait', 'time/delay', { ms: '{{ms}}' }),
+    spellNode('reply', 'io/send_message', { content: 'Ready' }),
+  ];
+  const wires = [spellWire('w1', 'start', 'out', 'set', 'in'), spellWire('w2', 'set', 'out', 'wait', 'in'), spellWire('w3', 'wait', 'out', 'reply', 'in')];
+  await withSpellFile(nodes, wires, async (path) => {
+    const started = Date.now();
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(1);
+    expect(failureOf(run, 'wait')).toContain('ms');
+    expect(failureOf(run, 'wait')).toContain('not a number');
+    expect(run.events.some((event) => event.event === 'node_finished' && event.node_id === 'reply')).toBe(false);
+    expect(Date.now() - started).toBeLessThan(15_000);
+  }, { variables: [{ name: 'ms', ty: 'any' }] });
+});
+
+test('typed braces in a Send Message content are sent as typed even when a variable of that name exists without a value', async () => {
+  const nodes = [spellNode('start', 'event/on_start'), spellNode('reply', 'io/send_message', { content: '{{note}}' })];
+  await withSpellFile(nodes, [spellWire('w1', 'start', 'out', 'reply', 'in')], async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(0);
+    expect(summaryOf(run)?.replies).toEqual(['{{note}}']);
+  }, { variables: [{ name: 'note', ty: 'string' }] });
+});
+
+test('a typed while_loop limit that is not a whole number of at least 1 fails the loop by name instead of running to the default', async () => {
+  for (const limit of ['abc', -3]) {
+    const nodes = [
+      spellNode('start', 'event/on_start'),
+      spellNode('always', 'logic/regex_match', { text: 'go', pattern: 'go' }),
+      spellNode('loop', 'flow/while_loop', { max_iterations: limit }),
+      spellNode('tick', 'var/set', { name: 'ticks', value: 1 }),
+    ];
+    const wires = [spellWire('w_start', 'start', 'out', 'loop', 'in'), spellWire('w_condition', 'always', 'matched', 'loop', 'condition'), spellWire('w_body', 'loop', 'body', 'tick', 'in')];
+    await withSpellFile(nodes, wires, async (path) => {
+      const run = await runSpell([path], {});
+      expect(run.code).toBe(1);
+      expect(run.events.filter((event) => event.event === 'node_finished' && event.node_id === 'tick').length).toBe(0);
+      expect(failureOf(run, 'loop')).toContain('max_iterations must be a whole number of at least 1');
+    });
+  }
+});
+
+test('a negative wait wired into Delay fails the Delay by name instead of waiting no time', async () => {
+  const nodes = [
+    spellNode('start', 'event/on_start'),
+    spellNode('read', 'var/get', { name: 'ms' }),
+    spellNode('wait', 'time/delay'),
+    spellNode('reply', 'io/send_message', { content: 'Ready' }),
+  ];
+  const wires = [spellWire('w1', 'start', 'out', 'wait', 'in'), spellWire('w2', 'read', 'value', 'wait', 'ms'), spellWire('w3', 'wait', 'out', 'reply', 'in')];
+  await withSpellFile(nodes, wires, async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(1);
+    expect(failureOf(run, 'wait')).toContain('ms needs a whole number of at least 0, but got -5');
+    expect(run.events.some((event) => event.event === 'node_finished' && event.node_id === 'reply')).toBe(false);
+  }, { variables: [{ name: 'ms', ty: 'int', default: { type: 'int', value: -5 } }] });
 });

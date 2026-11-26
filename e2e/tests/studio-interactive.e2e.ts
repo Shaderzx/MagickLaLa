@@ -1,4 +1,5 @@
 import { test, expect } from 'e2e';
+import { studioProbe } from '../support/studio-probe.ts';
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -40,6 +41,7 @@ type ProbeReport = {
     insideCanvas: boolean;
     items: string[];
     add: { clicked: boolean; before: number; after: number; kind: string | null; closed: boolean; spellNodes: number };
+    onCard: { items: string[]; duplicateClicked: boolean; duplicated: string[]; closed: boolean };
     delete: { selected: string | null; clicked: boolean; before: number; after: number; searchRemains: boolean; spellNodes: number };
     fit: { clicked: boolean; zoomBefore: number; zoomAfter: number; expectedZoom: number };
     dismiss: { reopened: boolean; clicked: boolean; dismissed: boolean };
@@ -98,7 +100,7 @@ function pngFacts(bytes: Buffer) {
   return { width, height, distinctColors: colors.size, entropy };
 }
 
-test('studio probe keeps example configs and dynamic wires, runs spells and chat through the real engine, publishes releases that survive a reopen, and drives palette, drag, context menu, 960px toolbar and dark and light PNGs headlessly', { timeout: 900_000 }, async () => {
+test('studio probe keeps example configs and dynamic wires, runs spells and chat through the real engine, publishes releases that survive a reopen, and drives palette, drag, a context menu that adds on empty canvas and duplicates or removes the card it was opened on, 960px toolbar and dark and light PNGs headlessly', { timeout: 900_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-probe-'));
   const desktop = join(dir, 'studio-desktop.png');
   const compact = join(dir, 'studio-compact.png');
@@ -193,7 +195,7 @@ test('studio probe keeps example configs and dynamic wires, runs spells and chat
       expect(layout.card.bottom - layout.card.top).toBe(layout.editorHeight);
     }
 
-    expect(report.theme).toEqual({ before: 'dark', after: 'light' });
+    expect(report.theme).toEqual({ before: 'light', after: 'dark' });
 
     const expectedSizes = new Map([[desktop, [1280, 800]], [compact, [960, 640]]]);
     const canonicalKinds = report.registry.kinds.filter((kind) => !kind.startsWith('core/'));
@@ -201,7 +203,7 @@ test('studio probe keeps example configs and dynamic wires, runs spells and chat
     expect([...report.registry.paletteKinds].sort()).toEqual([...canonicalKinds].sort());
     expect(report.registry.paletteKinds).toEqual(expect.arrayContaining(report.defaultSpell.kinds));
 
-    expect(report.toolbar.map((layout) => [layout.width, layout.theme])).toEqual([[960, 'dark'], [960, 'light'], [1280, 'dark'], [1280, 'light']]);
+    expect(report.toolbar.map((layout) => [layout.width, layout.theme])).toEqual([[960, 'light'], [960, 'dark'], [1280, 'light'], [1280, 'dark']]);
     for (const layout of report.toolbar) {
       expect(layout.items.map((item) => item.key)).toEqual(['toolbar-left', 'validation-pill', 'validate', 'run-spell', 'save', 'publish', 'theme-toggle', 'zoom-out', 'zoom-readout', 'zoom-in', 'zoom-fit']);
       const placed = layout.items.filter((item): item is { key: string; left: number; right: number; top: number; bottom: number } => item.left !== null && item.right !== null && item.top !== null && item.bottom !== null);
@@ -211,7 +213,7 @@ test('studio probe keeps example configs and dynamic wires, runs spells and chat
       expect(Math.min(...placed.map((item) => item.left))).toBeGreaterThanOrEqual(0);
       for (const item of placed) {
         expect(item.top).toBeGreaterThanOrEqual(0);
-        expect(item.bottom).toBeLessThanOrEqual(48);
+        expect(item.bottom).toBeLessThanOrEqual(52);
       }
       const byLeft = [...placed].sort((a, b) => a.left - b.left);
       for (let index = 1; index < byLeft.length; index += 1) expect(byLeft[index].left).toBeGreaterThanOrEqual(byLeft[index - 1].right);
@@ -220,9 +222,10 @@ test('studio probe keeps example configs and dynamic wires, runs spells and chat
     const menu = report.contextMenu;
     expect(menu.opened).toBe(true);
     expect(menu.insideCanvas).toBe(true);
-    expect(menu.items).toEqual(['context-add-ai-generate_text', 'context-delete-node', 'context-fit-view', 'context-dismiss']);
+    expect(menu.items).toEqual(['context-add-ai-generate_text', 'context-fit-view', 'context-dismiss']);
     expect(menu.add).toEqual({ clicked: true, before: report.defaultSpell.nodes, after: report.defaultSpell.nodes + 1, kind: 'ai/generate_text', closed: true, spellNodes: report.defaultSpell.nodes + 1 });
-    expect(menu.delete).toEqual({ selected: 'search', clicked: true, before: report.defaultSpell.nodes + 1, after: report.defaultSpell.nodes, searchRemains: false, spellNodes: report.defaultSpell.nodes });
+    expect(menu.onCard).toEqual({ items: ['context-duplicate-node', 'context-delete-node', 'context-dismiss'], duplicateClicked: true, duplicated: ['knowledge/search'], closed: true });
+    expect(menu.delete).toEqual({ selected: 'search', clicked: true, before: report.defaultSpell.nodes + 2, after: report.defaultSpell.nodes + 1, searchRemains: false, spellNodes: report.defaultSpell.nodes + 1 });
     expect(menu.fit.clicked).toBe(true);
     expect(menu.fit.zoomAfter).not.toBeCloseTo(menu.fit.zoomBefore, 3);
     expect(menu.fit.zoomAfter).toBeCloseTo(menu.fit.expectedZoom, 4);
@@ -244,11 +247,6 @@ test('studio probe keeps example configs and dynamic wires, runs spells and chat
     await rm(dir, { recursive: true, force: true });
   }
 });
-async function studioProbe(args: string[]): Promise<any> {
-  const env = { ...process.env, DISPLAY: '', WAYLAND_DISPLAY: '', MAGICKLALA_LLM_BASE_URL: unreachableLlm, MAGICKLALA_LLM_API_KEY: '', OPENAI_API_KEY: '' };
-  const { stdout } = await run('cargo', ['run', '-q', '-p', 'magicklala-studio', '--example', 'studio_probe', '--', ...args], { cwd: repoRoot, env, timeout: 900_000, maxBuffer: 64 * 1024 * 1024 });
-  return JSON.parse(stdout.trim().split('\n').at(-1) ?? '');
-}
 
 test('Run and chat start in the background, stream live trace events, and Cancel or the run deadline stop a slow delay spell at once', { timeout: 900_000 }, async () => {
   const delayMs = 30_000;
@@ -330,7 +328,7 @@ test('a child spell published and then saved with the Save button in Studio keep
     expect(report.childSave).toEqual({ published: published[0].version, saveButton: true, status: 'Draft saved', releases: [published[0].version], storeError: null });
     const said = (template: string) => template.replace('{{topic}}', report.content);
 
-    expect(report.placed).toEqual({ kind: 'flow/subgraph', editor: true, caption: 'SPELL ID', versionField: true, versionCaption: 'RELEASE VERSION' });
+    expect(report.placed).toEqual({ kind: 'flow/subgraph', editor: true, caption: 'Spell ID', versionField: true, versionCaption: 'Release version' });
     expect(report.pointed.subgraphs).toEqual([{ node_id: report.callNode, spell_id: report.childSpellId, release_version: null }]);
     expect(report.pointed.config).toMatchObject({ spell_id: report.childSpellId });
     expect(report.pointed.validation).toBe('valid');
@@ -472,8 +470,8 @@ test('Studio without --db refuses Save and Publish with a message naming --db in
     const report = await studioProbe(['save-guards', dbPath]);
 
     expect(report.noDb.status).toBeNull();
-    expect(report.noDb.saveError).toContain('pass --db <file.sqlite> to save drafts on disk');
-    expect(report.noDb.publishError).toContain('pass --db <file.sqlite> to publish releases on disk');
+    expect(report.noDb.saveError).toContain('Pass --db <file.sqlite> to save drafts on disk');
+    expect(report.noDb.publishError).toContain('Pass --db <file.sqlite> to publish releases on disk');
     expect(report.noDb.releases).toEqual([]);
 
     const db = new DatabaseSync(dbPath, { readOnly: true });
@@ -525,8 +523,8 @@ test('Studio treats --db :memory: and every in-memory SQLite form as not on disk
   for (const form of report.forms) {
     expect(form.persistent).toBe(false);
     expect(form.status).toBeNull();
-    expect(form.saveError).toBe('pass --db <file.sqlite> to save drafts on disk');
-    expect(form.publishError).toBe('pass --db <file.sqlite> to publish releases on disk');
+    expect(form.saveError).toBe('Pass --db <file.sqlite> to save drafts on disk');
+    expect(form.publishError).toBe('Pass --db <file.sqlite> to publish releases on disk');
     expect(form.releases).toEqual([]);
   }
 });
@@ -545,7 +543,7 @@ test('Save and Publish show their outcome in the TRACE strip on the default Node
     expect(drafts).toHaveLength(1);
 
     expect(report.noDb.leftTab).toBe('Palette');
-    expect(report.noDb.storeError).toBe('pass --db <file.sqlite> to save drafts on disk');
+    expect(report.noDb.storeError).toBe('Pass --db <file.sqlite> to save drafts on disk');
     expect(report.noDb.shown).toEqual({ text: report.noDb.storeError, insideTrace: true, onScreen: true });
 
     expect(report.saved.leftTab).toBe('Palette');
@@ -557,6 +555,8 @@ test('Save and Publish show their outcome in the TRACE strip on the default Node
     expect(report.published.shown).toEqual({ text: `Published v${releases[0].version}`, insideTrace: true, onScreen: true });
 
     expect(report.resaved.shown).toEqual({ text: 'Draft saved', insideTrace: true, onScreen: true });
+    expect(report.resaved.live).toBe(releases[0].version);
+    expect(report.resaved.releasesAfterPublish).toEqual([releases[0].version]);
     expect(report.edited.status).toBeNull();
     expect(report.edited.shown).toBeNull();
   } finally {
@@ -573,10 +573,10 @@ test('Studio launched with a --db it cannot open keeps that open error on Save a
     const report = await studioProbe(['unopenable-db', dbPath]);
 
     expect(report.persistent).toBeNull();
-    expect(report.saveError).toContain('the database passed with --db could not be opened: ');
-    expect(report.saveError).not.toContain('pass --db');
-    expect(report.publishError).toContain('the database passed with --db could not be opened: ');
-    expect(report.publishError).not.toContain('pass --db');
+    expect(report.saveError).toContain('The database passed with --db could not be opened: ');
+    expect(report.saveError).not.toContain('Pass --db');
+    expect(report.publishError).toContain('The database passed with --db could not be opened: ');
+    expect(report.publishError).not.toContain('Pass --db');
     expect(report.status).toBeNull();
     expect(report.shown).toEqual({ text: report.publishError, insideTrace: true, onScreen: true });
   } finally {
@@ -644,8 +644,8 @@ test('Studio asks SQLite whether a percent-encoded in-memory URI like file:memte
     for (const form of report.forms) {
       expect(form.persistent).toBe(false);
       expect(form.status).toBeNull();
-      expect(form.saveError).toBe('pass --db <file.sqlite> to save drafts on disk');
-      expect(form.publishError).toBe('pass --db <file.sqlite> to publish releases on disk');
+      expect(form.saveError).toBe('Pass --db <file.sqlite> to save drafts on disk');
+      expect(form.publishError).toBe('Pass --db <file.sqlite> to publish releases on disk');
       expect(form.releases).toEqual([]);
     }
     expect(await readdir(dir)).toEqual([]);
@@ -708,7 +708,7 @@ test('Studio opened on an empty database refuses to validate or publish a flow/s
     expect(report.validation.errors.join('\n')).toContain(report.childRecordId);
     expect(report.published.version).toBeNull();
     expect(report.published.releases).toEqual([]);
-    expect(report.published.storeError).toContain('cannot publish an invalid spell: ');
+    expect(report.published.storeError).toContain('Cannot publish an invalid potion: ');
     expect(report.published.storeError).toContain(report.childRecordId);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -724,12 +724,12 @@ test('Editing the spell clears a one-off Publish or Save error from the TRACE st
     await writeFile(blocker, 'a plain file where a folder should be');
     const report = await studioProbe(['edit-clears-store-error', dbPath, unopenable]);
 
-    expect(report.refused.storeError).toContain('cannot publish an invalid spell: ');
+    expect(report.refused.storeError).toContain('Cannot publish an invalid potion: ');
     expect(report.refused.shown).toEqual({ text: report.refused.storeError, insideTrace: true, onScreen: true });
     expect(report.refusedEdited.storeError).toBeNull();
     expect(report.refusedEdited.shown).toBeNull();
 
-    expect(report.unopenable.storeError).toContain('the database passed with --db could not be opened: ');
+    expect(report.unopenable.storeError).toContain('The database passed with --db could not be opened: ');
     expect(report.unopenable.shown).toEqual({ text: report.unopenable.storeError, insideTrace: true, onScreen: true });
     expect(report.unopenableEdited.storeError).toBeNull();
     expect(report.unopenableEdited.shown).toBeNull();
@@ -802,4 +802,876 @@ test('Studio saves, publishes and reopens SQLite files whose names end in a spac
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('Check pins a hex on the exact ingredient and input that are broken: a missing query wire flags only that socket and names it on the cauldron, and reply_support missing content never flags its look-alike reply', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['hex-pinpoint']);
+
+  const missing = report.missingQuery;
+  expect(missing.report.validation).toBe('invalid');
+  expect(missing.report.flagged).toEqual([{ node: missing.removed.node, sockets: [missing.removed.socket] }]);
+  expect(missing.report.plaque).toBe(`Hexed · missing "${missing.removed.socket}"`);
+  expect(missing.report.log).toEqual([`${missing.removed.title}: missing required input "${missing.removed.socket}"`]);
+
+  const twins = report.twinIds;
+  expect(twins.report.validation).toBe('invalid');
+  expect(twins.report.flagged).toEqual([{ node: twins.twin, sockets: ['content'] }]);
+  expect(twins.report.flagged.map((entry: { node: string }) => entry.node)).not.toContain(twins.lookalike);
+  expect(twins.report.plaque).toBe('Hexed · missing "content"');
+});
+
+test('The hex fix button on a node missing a required input pours the matching upstream output back into that input, so the spell checks valid with exactly that one wire restored', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['hex-pinpoint']);
+  const { removed, mend } = report.missingQuery;
+
+  expect(mend.added).toEqual([{ from_node: removed.from_node, from_socket: removed.from_socket, to_node: removed.node, to_socket: removed.socket }]);
+  expect(mend.validation).toBe('valid');
+});
+
+test('The cauldron shows every ingredient and bottle of the support, webhook router, parallel research and twelve-step spells at 1280x800 and 960x640 with the pantry open or closed, with no two cards overlapping, every card label at least 11px tall when opened, and zooming all the way out and in never crashes', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['pot-layout']);
+  const parallel = JSON.parse(await readFile(join(repoRoot, 'examples', 'parallel_research.json'), 'utf8')) as ExampleSpell;
+
+  expect(report.cases.map((entry: { spell: string }) => entry.spell)).toEqual(expect.arrayContaining(['support_agent', 'webhook_router', 'parallel_research', 'dozen_ingredients']));
+  expect(report.cases.find((entry: { spell: string }) => entry.spell === 'parallel_research').nodes).toEqual(parallel.nodes.map((node) => node.id));
+  for (const entry of report.cases) {
+    const where = `${entry.spell} at ${entry.size.join('x')} pantry ${entry.pantryOpen ? 'open' : 'closed'}`;
+    expect(entry.opened.missing, where).toEqual([]);
+    expect(entry.opened.outside, where).toEqual([]);
+    expect(entry.opened.smallestLine, where).toBeGreaterThanOrEqual(11);
+    for (const shot of entry.zooms) {
+      expect(shot.panicked, `${where} zoom ${shot.zoom}`).toBe(false);
+      expect(shot.overlaps, `${where} zoom ${shot.zoom}`).toEqual([]);
+    }
+  }
+});
+
+type SocketInfo = { name: string; ty: string; required: boolean };
+type KindSockets = { inputs: SocketInfo[]; outputs: SocketInfo[] };
+
+test('Tossing On Message, Generate Text and Send Message into an empty cauldron from the pantry brews a recipe that checks valid: flow runs trigger to model to reply and each required text input is fed by the step before it', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['toss']);
+  const { ids, specs, wires, validation } = report.built;
+  const [trigger, model, reply] = ids as string[];
+  const flowOut = (kind: string) => (specs[kind] as KindSockets).outputs.find((socket) => socket.ty === 'Flow')!.name;
+  const flowIn = (kind: string) => (specs[kind] as KindSockets).inputs.find((socket) => socket.ty === 'Flow')!.name;
+  const requiredText = (kind: string) => (specs[kind] as KindSockets).inputs.filter((socket) => socket.required && socket.ty === 'String').map((socket) => socket.name);
+  const textOut = (kind: string) => (specs[kind] as KindSockets).outputs.find((socket) => socket.ty === 'String')!.name;
+
+  expect(ids.every((id: string | null) => typeof id === 'string')).toBe(true);
+  const expected = [
+    [trigger, flowOut('event/on_message'), model, flowIn('ai/generate_text')],
+    ...requiredText('ai/generate_text').map((input) => [trigger, textOut('event/on_message'), model, input]),
+    [model, flowOut('ai/generate_text'), reply, flowIn('io/send_message')],
+    ...requiredText('io/send_message').map((input) => [model, textOut('ai/generate_text'), reply, input]),
+  ];
+  expect([...wires].sort()).toEqual([...expected].sort());
+  expect(validation).toBe('valid');
+});
+
+test('Dragging Generate Text from the pantry onto a full support cauldron pours it in just before the reply bottle: the old model now flows into it, it flows into the reply, and its prompt is fed by the old model text', { timeout: 900_000 }, async () => {
+  const { pantryDrop } = await studioProbe(['toss']);
+  const fresh = pantryDrop.id as string;
+  const wires = pantryDrop.wiresAfter as string[][];
+  const has = (wire: string[]) => wires.some((candidate) => candidate.join('|') === wire.join('|'));
+
+  expect(pantryDrop.nodesAfter).toBe(pantryDrop.nodesBefore + 1);
+  expect(fresh).toEqual(expect.any(String));
+  expect(pantryDrop.role).toBe('Ingredient');
+  expect(has(['llm', 'out', fresh, 'in'])).toBe(true);
+  expect(has([fresh, 'out', 'reply', 'in'])).toBe(true);
+  expect(has(['llm', 'out', 'reply', 'in'])).toBe(false);
+  expect(has(['llm', 'text', fresh, 'prompt'])).toBe(true);
+  expect(has([fresh, 'text', 'reply', 'content'])).toBe(true);
+  expect(has(['llm', 'text', 'reply', 'content'])).toBe(false);
+  expect(pantryDrop.ghostDuringDrag).toBe(false);
+});
+
+test('Dragging a Get Variable onto a cauldron whose every input is already fed adds it set aside and leaves every existing wire untouched', { timeout: 900_000 }, async () => {
+  const { pantryFull } = await studioProbe(['toss']);
+
+  expect(pantryFull.nodesAfter).toBe(pantryFull.nodesBefore + 1);
+  expect(pantryFull.role).toBe('Aside');
+  expect([...pantryFull.wiresAfter].sort()).toEqual([...pantryFull.wiresBefore].sort());
+});
+
+test('Dragging a vial off the cauldron sets it aside with every wire removed, dragging it back pours it in again, and no cauldron drag ever moves a node in the Grimoire', { timeout: 900_000 }, async () => {
+  const { setAside } = await studioProbe(['toss']);
+
+  expect(setAside.wiresBefore).toBeGreaterThan(0);
+  expect(setAside.wiresAside).toBe(0);
+  expect(setAside.roleAside).toBe('Aside');
+  expect(setAside.wiresBack).toBeGreaterThan(0);
+  expect(setAside.roleBack).toBe('Ingredient');
+  expect(setAside.positionsAfter).toEqual(setAside.positionsBefore);
+});
+
+test('Every Studio panel names things in plain words: pantry shelves are Events, Flow, AI, Memory, Knowledge, Outputs and so on, the right tabs read Recipe, Trace, Variables, Tasting, counts say variables, and no hint line anywhere (empty pot, hexed spell, nothing picked, releases) tells the user what to click, drag or fix', { timeout: 900_000 }, async () => {
+  const { texts } = await studioProbe(['plain-words']);
+  const shown = new Set(texts as string[]);
+
+  for (const heading of ['Events', 'Flow', 'AI', 'Memory', 'Knowledge', 'Outputs', 'Code', 'Recipe', 'Trace', 'Variables', 'Tasting']) expect(shown.has(heading)).toBe(true);
+  for (const flourish of ['Sparks & Events', 'Whisk & Flow', 'Arcane AI', 'Memory Jars', 'Herb Lore', 'Potion Bottles', 'Rhai Runes', 'Essences', 'Pours in', 'Distills out', 'Prompt · Incantation', 'Potion spices', 'Spices']) {
+    expect(shown.has(flourish)).toBe(false);
+  }
+  const hints = /\b(click|press|tap|drag|drop|select an?|start with|fix the|to add|to edit|send a prompt|herb|incantation|essence|spices?|vintages?|taste this potion)\b/i;
+  expect((texts as string[]).filter((line) => line !== 'Add On Message' && hints.test(line))).toEqual([]);
+});
+
+test('The toolbar pill and the cauldron plaque tell the truth about a brew: Brewing while it runs, Brewed only when the run succeeded, Failed when a step failed with the card, log and summary saying Failed too and never Hexed, Cancelled when it was stopped and Timed out when it ran too long in the log too, and the pot stops simmering the moment a run ends', { timeout: 900_000 }, async () => {
+  const { succeeded, failed, running, cancelled, timedWords } = await studioProbe(['brew-truth']);
+
+  expect(running.pill).toBe('Brewing');
+  expect(running.runningBrew).toBe(true);
+  expect(succeeded.outcome).toBe('Succeeded');
+  expect(succeeded.pill).toBe('Brewed');
+  expect(succeeded.plaque).toMatch(/^Brewed · /);
+  expect(failed.outcome).toBe('Failed');
+  expect(failed.pill).toBe('Failed');
+  expect(failed.plaque).not.toMatch(/^Brewed/);
+  expect(failed.hexedWords).toEqual([]);
+  expect(failed.failedWords).toBeGreaterThan(1);
+  expect(cancelled.outcome).toBe('Cancelled');
+  expect(cancelled.pill).toBe('Cancelled');
+  expect(cancelled.plaque).not.toMatch(/^Brewed/);
+  for (const ended of [succeeded, failed, cancelled]) expect(ended.runningBrew).toBe(false);
+  expect(cancelled.logWords).not.toContain('Quenched');
+  expect(cancelled.logWords).toContain('Cancelled');
+  expect(timedWords).toContain('Timed out');
+  expect(timedWords).not.toContain('Boiled over');
+});
+
+test('Opening another potion while one is still brewing stops the old brew: the new potion shows no running brew, no old chat, no old trace, no lit wires, and the old reply never arrives in it', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['switch-mid-brew']);
+
+  expect(report.runningBefore).toBe(true);
+  expect(report.spell).toBe('Research Agent');
+  expect(report.running).toBe(false);
+  expect(report.runningBrew).toBe(false);
+  expect(report.chat).toEqual([]);
+  expect(report.trace).toBe(0);
+  expect(report.lastRun).toBeNull();
+  expect(report.lastBrew).toBeNull();
+  expect(report.busyCards).toBe(0);
+  expect(report.activeWires).toBe(0);
+  expect(report.backgroundStopped).toBe(true);
+});
+
+test('Opening a spell and looking at its Variables never rewrites them: an unset text default stays unset, an empty one stays empty, a JSON default stays JSON, nothing is marked edited, and typing new JSON saves JSON', { timeout: 900_000 }, async () => {
+  const { original, opened, dirtyAfterOpen, edited } = await studioProbe(['variable-defaults']);
+
+  expect(opened).toEqual(original);
+  expect(dirtyAfterOpen).toBe(false);
+  expect(edited[2].default).toEqual({ type: 'json', value: { tone: 'brisk' } });
+  expect(edited.filter((_: unknown, index: number) => index !== 2)).toEqual(original.filter((_: unknown, index: number) => index !== 2));
+});
+
+test('After a publish the cauldron plaque moves on: it says Published, then follows the brew, then says Draft once the recipe is edited, and the edit clears the lit streams and step marks of the old brew', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-plaque-'));
+  try {
+    const { published, brewed, edited } = await studioProbe(['publish-plaque', join(dir, 'studio.sqlite')]);
+
+    expect(published).toMatch(/^Published v1 · /);
+    expect(brewed.pill).toBe('Draft brewed');
+    expect(brewed.plaque).toMatch(/^Brewed · /);
+    expect(edited.plaque).toMatch(/^Draft · /);
+    expect(edited.pill).toBe('Draft');
+    expect(edited.litWires).toBe(0);
+    expect(edited.markedCards).toBe(0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Cauldron vials are safe to handle: a small nudge keeps every wire, setting one aside can be undone with its wires back, set-aside wires never follow you into another potion, right-clicking empty space after picking a card offers the empty-space menu, the card menu never covers its card, and nothing can be tossed while a brew is running', { timeout: 900_000 }, async () => {
+  const { nudge, undo, leak, menu, whileRunning } = await studioProbe(['toss-safety']);
+
+  expect(nudge.after).toBe(nudge.before);
+  expect(nudge.role).toBe('Ingredient');
+  expect(undo.asideWires).toBe(0);
+  expect(undo.asideRole).toBe('Aside');
+  expect(undo.undoShown).toBe(true);
+  expect(undo.restoredWires).toBe(nudge.before);
+  expect(undo.restoredRole).toBe('Ingredient');
+  expect(leak.stashedBefore).toBe(1);
+  expect(leak.stashedAfterSwitch).toBe(0);
+  expect(menu.emptyItems).toEqual(['context-add-ai-generate_text', 'context-fit-view', 'context-dismiss']);
+  expect(menu.cardItems).toEqual(['context-duplicate-node', 'context-delete-node', 'context-dismiss']);
+  expect(menu.coversCard).toBe(false);
+  expect(whileRunning.running).toBe(true);
+  expect(whileRunning.after).toBe(whileRunning.before);
+});
+
+test('The cauldron keeps the recipe honest: a tossed Add Memory is fed only from ingredients in the pot and never takes over the reply, the Research Agent sample passes Check, a list wired into a text prompt reads Wrong type, the first lone vial waits by the pot, a spell that ends in Add Memory bottles it instead of a ghost, and disabled buttons and the ghost bottle stay readable in both themes', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['recipe-honesty']);
+
+  expect(report.memory.feeders.some((wire: string) => wire.startsWith('recall.'))).toBe(false);
+  expect(report.memory.feeders).toContain('llm.text->content');
+  expect(report.memory.replyFeeders).toEqual(expect.arrayContaining(['llm.text->content']));
+  expect(report.memory.replyFeeders.filter((wire: string) => wire.endsWith('->content'))).toEqual(['llm.text->content']);
+  expect(report.memory.replyFeeders).toContain(report.memory.id + '.out->in');
+  expect(report.researchCheck).toBe('valid');
+  expect(report.mistyped.card).toContain('Wrong type "prompt"');
+  expect(report.mistyped.plaque).toBe('Hexed · wrong type "prompt"');
+  expect(report.loneFirst).toBe('Ingredient');
+  expect(report.sideEffect).toEqual({ role: 'Bottle', ghost: false });
+  for (const shade of report.shades) {
+    expect(shade.disabledText).toBeGreaterThanOrEqual(4.5);
+    expect(shade.ghostOutline).toBeGreaterThanOrEqual(3);
+  }
+});
+
+test('A brewed potion takes the colour of the last ingredient poured in, so the template tasting spell and the switch-routed webhook spell brew different potions', { timeout: 900_000 }, async () => {
+  const { tasting, webhook } = await studioProbe(['potion-colours']);
+
+  expect(tasting.lastPoured[0]).toBe('Template');
+  expect(tasting.potion).toBe(tasting.lastPoured[1]);
+  expect(webhook.lastPoured[0]).toBe('Switch');
+  expect(webhook.potion).toBe(webhook.lastPoured[1]);
+  expect(tasting.potion).not.toBe(webhook.potion);
+});
+
+test('Opening the Grimoire for the first time on a 960 by 640 window with the pantry pinned shows every node on screen, a Generate Text tossed in the cauldron sits after the old model without covering any node, and every branch route label sits inside its own bottle card', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['grimoire-place']);
+
+  expect(report.offscreen).toEqual([]);
+  expect(report.overlaps).toEqual([]);
+  expect(report.freshX).toBeGreaterThan(report.llmX);
+  expect(report.routes).toHaveLength(report.bottles);
+  for (const route of report.routes) expect(route.insideCard, route.bottle).toBe(true);
+});
+
+test('The cauldron is the biggest thing on the support canvas and every ingredient vial sits on the pot side of its card, ready to pour', { timeout: 900_000 }, async () => {
+  const { pot, cards } = await studioProbe(['pour-shape']);
+
+  expect(cards).toHaveLength(4);
+  for (const entry of cards) {
+    expect(pot[2]).toBeGreaterThan(entry.card[2] * 1.4);
+    expect(entry.vial, entry.id).not.toBeNull();
+    const vialCentre = entry.vial[0] + entry.vial[2] / 2;
+    expect(vialCentre, entry.id).toBeGreaterThan(entry.card[0] + entry.card[2] * 0.7);
+  }
+});
+
+test('The cauldron reads cleanly at any size: no ingredient name is cut off, no pour line runs over another card, the idle broth already shows the last ingredient colour, steps number in feeding order, a Send that carries on is still a bottle, set-aside cards sit on a visible shelf, the pot grows on a roomy 1600 by 1000 window, branch bottles have distinct names, and Grimoire text stays 11px or taller', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['reads-cleanly']);
+
+  expect(report.cut).toEqual([]);
+  expect(report.crossings).toEqual([]);
+  expect(report.readyBroth).toBe(report.lastLiquid);
+  expect(report.chainSteps).toEqual([1, 2, 3, 4, 5]);
+  expect(report.relayRoles).toEqual({ trigger: 'Ingredient', send: 'Bottle', keep: 'Ingredient' });
+  expect(report.asideShelf).toEqual({ shelf: true, holdsCard: true });
+  expect(report.potWidth).toBeGreaterThanOrEqual(340);
+  expect(new Set(report.bottleTitles).size).toBe(report.bottleTitles.length);
+  expect(report.bottleTitles).toHaveLength(3);
+  expect(report.grimoireSmallest).toBeGreaterThanOrEqual(11);
+});
+
+test('Setting aside or deleting the middle step of a recipe joins the steps around it, so the spell still checks valid and the reply still brews, and a brew whose bottle never fills says so on the plaque', { timeout: 900_000 }, async () => {
+  const { setAside, deleted, emptyBottle } = await studioProbe(['pull-middle']);
+
+  for (const pulled of [setAside, deleted]) {
+    expect(pulled.flowIntoReply).toBe(true);
+    expect(pulled.check).toBe('valid');
+    expect(pulled.outcome).toBe('Succeeded');
+    expect(pulled.reply).toBe('done');
+    expect(pulled.plaque).toMatch(/^Brewed · /);
+    expect(pulled.bottleFull).toBe(true);
+  }
+  expect(emptyBottle.reply).not.toBe('done');
+  expect(emptyBottle.bottleFull).toBe(false);
+  expect(emptyBottle.plaque).toMatch(/bottle empty/);
+});
+
+test('Studio tells the truth in the corners: a tossed Replace really shapes the reply in either order, a spare trigger never hijacks the brew, nothing is added mid-brew, the Trace panel says Brewing then marks an edited result as the last brew, a wired prompt shows its source with a way to type it instead, a long name never pushes toolbar buttons off a 960 window, re-publishing an unchanged potion makes no new release, saved potions stay in the picker, and checkmarks are drawn rather than font glyphs', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-corners-'));
+  try {
+    const report = await studioProbe(['corner-truths', join(dir, 'studio.sqlite')]);
+
+    for (const shaped of [report.tossed, report.spliced]) {
+      expect(shaped.role).toBe('Ingredient');
+      expect(shaped.replaceFeeders).toEqual(expect.arrayContaining([expect.stringMatching(/^on-message-\d+\.content->text$/)]));
+      expect(shaped.replyFeeders).toContain(shaped.replace + '.text->content');
+    }
+    expect(report.twinReply).toBe('done');
+    expect(report.traceRunning).toMatch(/Brewing/);
+    expect(report.traceRunning).not.toMatch(/Brewed/);
+    expect(report.addedMidBrew).toBe(0);
+    expect(report.traceAfterEdit).toMatch(/Last brew/);
+    expect(report.promptField).toMatch(/On Message · content/);
+    expect(report.unplugShown).toBe(true);
+    expect(report.promptAfter).toEqual({ wired: false, editor: true });
+    expect(report.clipped).toEqual([]);
+    expect(report.releases).toBe(1);
+    expect(report.listed).toBe(true);
+    expect(report.reopened).toBe('Tasting Agent');
+    expect(report.checkGlyphs).toEqual([]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Dropping a pantry ingredient on the set-aside tray adds it set aside with no wires instead of stirring it in', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['tray-drop']);
+
+  expect(report).toEqual({ added: 1, role: 'Aside', wires: 0 });
+});
+
+test('Every step keeps one name and every card keeps its words: ingredient titles never run under their vial at 960 by 640 or 1280 by 800, the cauldron, Grimoire and Cauldron Log name each branch bottle by its route, look-alike bottles without routes are numbered, the log icon sits clear of the first step, and the empty pot offers its triggers in one place only', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['one-name']);
+
+  expect(report.titleMisfits).toEqual([]);
+  const routed = { order_reply: 'Send · orders', support_reply: 'Send · support', ignored_reply: 'Send · default' };
+  expect(report.cauldronNames).toEqual(routed);
+  expect(report.grimoireNames).toEqual(routed);
+  expect(report.traceNames).toEqual({ order_reply: 'Send · orders' });
+  expect(report.twinNames).toEqual({ first_reply: 'Send · 1', second_reply: 'Send · 2' });
+  expect(report.logGap).toBeGreaterThanOrEqual(4);
+  expect(report.logIcons).toEqual([[34, 28], [34, 28]]);
+  expect(report.empty.secondAdd).toBe(false);
+});
+test('Studio fits and counts honestly at 960 by 640: variable names keep their own line, the hex card keeps its buttons inside, the opened pantry can be folded away again, the Grimoire draws its checkmarks and chevrons instead of font glyphs, the recipe panel uses the same bottle name as the cauldron, the plaque counts ingredients and set-aside cards the way the pot does, and a Check before any brew never reads Brew #0', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['compact-fit']);
+
+  expect(report.varLabelWidths.length).toBeGreaterThan(0);
+  for (const width of report.varLabelWidths) expect(width).toBeGreaterThanOrEqual(150);
+  expect(report.errorSpill).toEqual([]);
+  expect(report.rail).toEqual({ opened: true, collapsed: true });
+  expect(report.grimoireGlyphs).toEqual([]);
+  expect(report.recipeTitle).toBe('Send · orders');
+  expect(report.stats).toEqual({ aside: 'Draft · 3 ingredients · 1 aside', relay: 'Draft · 2 ingredients' });
+  expect(report.checkHeader).toMatch(/^Check/);
+  expect(report.singularPlurals).toEqual([]);
+});
+
+test('Studio mends and guards the recipe around every step: pulling the model out keeps the reply fed, setting aside a Replace gives the reply its words back, a tossed Template is wired between the message and the reply, a bottle missing its words says so on the bottle, a single bottle has the potion colour, twelve ingredients pour down twelve separate strands that never cross the pour from pot to bottle, nothing changes mid-brew, and the card menu can set an ingredient aside and pour it back in', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['recipe-mending']);
+
+  for (const pulled of [report.pullModel.aside, report.pullModel.deleted]) {
+    expect(pulled).toEqual({ check: 'valid', contentFed: true });
+  }
+  expect(report.replaceAside.check).toBe('valid');
+  expect(report.replaceAside.replyFeeders).toEqual(expect.arrayContaining([expect.stringMatching(/^on-message-\d+\.content->content$/)]));
+  expect(report.templateToss.check).toBe('valid');
+  expect(report.templateToss.role).toBe('Ingredient');
+  expect(report.templateToss.templateFed).toBe(true);
+  expect(report.templateToss.replyFeeders).toContain(report.templateToss.template + '.text->content');
+  expect(report.bottlePill).toBe('Missing "content"');
+  expect(report.tints.bottle).toBe(report.tints.potion);
+  expect(report.midBrew).toEqual({ nodes: 0, vars: 0, stillSimmering: true });
+  expect(report.dozenLanes).toEqual({ crossing: [], strands: 12, pours: 12 });
+  expect(report.menu).toEqual({ setAside: true, afterAside: 'Aside', pourIn: true, afterPour: 'Ingredient' });
+});
+
+test('What Studio shows, brews and publishes is the same recipe: a spare reply stays on the shelf and out of the release while the draft keeps it, a reopened potion keeps its live release, new potions get their own names, setting aside a Switch never opens every route, undo brings back every wire, a wired Delay sits in the pot, a trigger dropped on the shelf never brews, and mid-brew the bottle stays empty and Publish waits', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-one-recipe-'));
+  try {
+    const report = await studioProbe(['one-recipe', join(dir, 'studio.sqlite')]);
+
+    expect(report.spare).toEqual({ check: 'valid', role: 'Aside', releaseValid: true, releaseHasSpare: false, draftKeepsSpare: true });
+    expect(report.reopened).toEqual({ name: 'Spare Agent', live: 1, releases: 1 });
+    expect(report.newNames[0].saved).toBe(true);
+    expect(report.newNames[1].saved).toBe(true);
+    expect(report.newNames[0].name).not.toBe(report.newNames[1].name);
+    expect(report.routeBridges).toBe(0);
+    expect(report.join.after).toBe(report.join.before);
+    expect(report.shelf).toEqual({ wiredDelay: 'Ingredient', looseSend: 'Aside' });
+    expect(report.tray).toEqual({ role: 'Aside', brews: 0 });
+    expect(report.midBrew.bottle).toBe('Ready');
+    expect(report.midBrew.publish).toMatch(/until the brew ends/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Studio reads as one finished product: strands clear every card at 960, the empty ring sits below the mode switch, card lines show whole at 960, the log has one idle line, Publish is off mid-brew, messages are sentences about potions, Potions and release rows say each thing once, the theme button names the current theme, the card menu clears the plaque, and untaken Grimoire drops never cross', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-finish-'));
+  try {
+    const report = await studioProbe(['fit-and-wording', join(dir, 'studio.sqlite')]);
+
+    expect(report.strandClearance).toBeGreaterThanOrEqual(6);
+    for (const gap of report.ringBelowSwitch) expect(gap).toBeGreaterThanOrEqual(8);
+    expect(report.formulasMissingAt960).toEqual([]);
+    expect(report.formulasCutAt960).toEqual([]);
+    expect(report.logs.empty).toContain('Not brewed yet');
+    expect(report.logs.support).toContain('Not brewed yet');
+    expect(report.logs.empty).not.toMatch(/Idle/);
+    expect(report.midBrewPublishError).toBeNull();
+    expect(report.noDbPublishError).toBe('Pass --db <file.sqlite> to publish releases on disk');
+    expect(report.shelf).toMatch(/Potions/);
+    expect(report.shelf).not.toMatch(/Spells/);
+    expect(report.shelf).not.toMatch(/Published brew/);
+    expect(report.shelf).toMatch(/v1 2 ingredients/);
+    expect(report.theme).toBe('Sunlit');
+    expect(report.menuCoversPlaque).toBe(false);
+    expect(report.untakenLanes).toEqual({ 'default->ignored_reply': 1, 'support->support_reply': -1 });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('The shelf is kept and respected: a set-aside step survives save and reopen and pours back wired, publishing without saving keeps spares, a saved copy of a sample opens with its releases, adding a step never pulls a shelved trigger back, a shelved sub-spell passes Check, an unreachable reply is no bottle, pulling the model passes the message straight through, and a second trigger pours back connected', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-shelf-'));
+  try {
+    const report = await studioProbe(['shelf-keeps', join(dir, 'studio.sqlite')]);
+
+    expect(report.asideReply).toBe('hi there');
+    expect(report.reopenedRole).toBe('Aside');
+    expect(report.poured.check).toBe('valid');
+    expect(report.poured.echoWires).toBeGreaterThanOrEqual(2);
+    expect(report.reopenedTrigger).toBe('Aside');
+    expect(report.shelvedTriggerBrews).toBe(0);
+    expect(report.publishedOnly).toEqual({ listed: true, spare: true, live: 1 });
+    expect(report.sampleCopy).toEqual({ releases: 1, live: 1 });
+    expect(report.triggerAfterAdd).toBe('Aside');
+    expect(report.shelvedSubgraph).toBe('valid');
+    expect(report.unreachableRole).toBe('Aside');
+    expect(report.modelPulledReply).toBe('what is brewing');
+    expect(report.secondRestored).toBe(true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Set-aside steps come back exactly as they left: the shelf survives a restart and a reopen from Potions, pouring back drops the bypass so one message gets one reply, a template keeps its own named input, pouring one step leaves its shelved neighbour on the shelf, a shelved sub-spell with a bad version never blocks Check, a reply no flow reaches is no bottle, and the more-issues chip lists every Check finding with rows that open the ingredient', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-shelf-exact-'));
+  try {
+    const report = await studioProbe(['shelf-exact', join(dir, 'studio.sqlite')]);
+
+    const back = { reply: ['fill.text->content', 'once.out->in'], fill: ['trigger.content->person'], said: 'Hi Ada' };
+    expect(report.restart).toEqual({ once: 'Aside', fill: 'Aside', pouredBack: back });
+    expect(report.fromPotions).toEqual({ once: 'Aside', pouredBack: back });
+    expect(report.pairSecond).toBe('Aside');
+    expect(report.shelvedBadVersion).toBe('valid');
+    expect(report.muteReply).toBe('Aside');
+    expect(report.moreIssues.chip).toBe(true);
+    expect(report.moreIssues.total).toBeGreaterThan(2);
+    expect(report.moreIssues.rows).toBe(report.moreIssues.total);
+    expect(report.moreIssues.opensIngredient).toBe(true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+test('The cauldron draws only what is true: potions leave through the tap, ribbons never cross cards or turn sharply, the plaque shows the brew total, zooming out stops while text stays readable, a routed brew reads 1 bottle filled, no legend chips, the shelf is a captionless plank, the plaque clears cards and shelf, a dozen keep both shelves after Check and Brew, Brew is disabled without a recipe trigger, an all-shelved pot goes cold, and the stand has no Test pill', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['cauldron-truths']);
+
+  expect(report.offTap).toEqual([]);
+  expect(report.sharpTurns).toEqual([]);
+  for (const brew of report.plaqueTime) expect(brew.plaque).toContain(brew.total);
+  expect(report.farScale).toBeGreaterThanOrEqual(0.6);
+  expect(report.routedPlaque).toContain('1 bottle filled');
+  expect(report.throughCards).toEqual([]);
+  expect(report.legends).toEqual([false, false, false]);
+  expect(report.shelfWords).toEqual([]);
+  expect(report.plank).toBe(true);
+  expect(report.plaqueHits).toEqual([]);
+  expect(report.flankAfter).toEqual([true, true]);
+  expect(report.brewDisabled).toBe(true);
+  expect(report.emptyMood).toBe('Empty');
+  expect(report.standHasTest).toBe(false);
+});
+test('Quiet corners tell the truth: saved potions count ingredients, a brew locks drags, menus, restores and Check, copy says variable and Script, undo puts a deleted shelved step back on the shelf, bad typed defaults are flagged, Json is a type, only unshelved and var steps claim a variable, drips stay on their stream, twin names reach the undo banner, moving a card keeps the brew lit, the Grimoire menu offers the Cauldron, Stream Text has a model, the Tasting divider fits at 960, an empty pot offers triggers', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-quiet-'));
+  try {
+    const report = await studioProbe(['quiet-corners', join(dir, 'studio.sqlite')]);
+
+    expect(report.potionRow).toContain('3 ingredients · 1 aside');
+    expect(report.potionRow.some((line: string) => line.endsWith('steps'))).toBe(false);
+    expect(report.midBrew).toEqual({ running: true, modelMenu: false, typeMenu: null, restore: null, pantryDrag: false, tray: false, checkUnchanged: true, checkDisabled: true });
+    expect(report.banner).toMatch(/^Removed variable /);
+    expect(report.runeCaption).toBe(false);
+    expect(report.undo.role).toBe('Aside');
+    expect(report.undo.parked).toBeGreaterThan(0);
+    expect(report.undo.wiresAfterPour).toBeGreaterThan(0);
+    expect(report.variables).toEqual({ flagged: true, json: true, shelvedHint: false, getterHint: true });
+    expect(report.dripDrift).toBeLessThanOrEqual(2);
+    expect(report.twinBanner).toBe('Removed Template · 1');
+    expect(report.litAfterMove).toBe(true);
+    expect(report.grimoireMenu).toContain('Show in Cauldron');
+    expect(report.grimoireMenu).not.toContain('Inspect in Grimoire');
+    expect(report.streamModel).toBe(true);
+    expect(report.divider.width).toBeLessThanOrEqual(report.divider.panel - 28);
+    expect(report.starter).toEqual({ clicked: true, nodes: ['event/on_message'] });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+test('Studio state stays honest: two shelved neighbours poured back in either order after a reopen give one reply, a reply no trigger flow reaches is no bottle, a bad typed variable fails Check and blocks Save and Publish while Json resets to no value, undo and parked sub-spells keep a potion live, mending a hex clears it, wiring a shelved step in the Grimoire drops its bypass and the Grimoire marks shelved steps, and the 960 prompt editor fits after Check', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-honest-'));
+  try {
+    const report = await studioProbe(['honest-state', join(dir, 'studio.sqlite')]);
+
+    expect(report.shelvedReply).toBe('solo');
+    for (const poured of report.orders) {
+      expect(poured.flowIntoReply).toEqual(['second.out->in']);
+      expect(poured.said).toBe('once');
+    }
+    expect(report.cutReply).toBe('Aside');
+    expect(report.badDefault).toEqual({ check: 'invalid', save: null, published: 0, json: null });
+    expect(report.live).toEqual({ afterUndo: 1, afterParkedSub: 1, duplicate: 0 });
+    expect(report.mended).toEqual({ before: 'invalid', after: 'unchecked', flagged: 0 });
+    expect(report.grimoire.reply).toEqual(['once.out->in']);
+    expect(report.grimoire.badge).toBe(true);
+    expect(report.editor.bottom).toBeLessThanOrEqual(report.editor.panel);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+test('Every drawn line keeps to itself: crowded lanes never share a run, ribbons leave the tap level and skip their own bottle tag, no pour runs through another card on any sample at either size, status pills on mirrored cards clear the step badge, untaken and hexed outlines pass 3 to 1, split twins are numbered instead of showing socket ids, and a plain Brew of the webhook router brews', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['drawn-truths']);
+
+  expect(report.sharedRuns).toEqual([]);
+  expect(report.ownTag).toEqual([]);
+  expect(report.spigot).toEqual([]);
+  expect(report.pourCrossings).toEqual([]);
+  expect(report.pills.found).toBeGreaterThan(0);
+  expect(report.pills.hits).toEqual([]);
+  for (const ratio of report.borders) expect(ratio).toBeGreaterThanOrEqual(3);
+  expect(report.twinNames.some((title: string) => /out_\d/.test(title))).toBe(false);
+  expect(report.twinNames.length).toBeGreaterThan(0);
+  expect(report.hookBrew).toBe('Some(Succeeded)');
+});
+test('One voice for status: a published potion set aside and poured back still reads Published v1 in the header, plaque and bottle, a moved and saved potion reopens live and refuses a duplicate release, the Cauldron tells its counts only on the plaque while the Grimoire keeps its chip, and no bottle ribbon climbs far above its mouth', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-voice-'));
+  try {
+    const report = await studioProbe(['one-voice', join(dir, 'studio.sqlite')]);
+
+    expect(report.roundTrip.header).toContain('Published v1');
+    expect(report.roundTrip.plaque).toContain('Published v1');
+    expect(report.roundTrip.bottle).toContain('v1');
+    expect(report.liveAfterReopen).toBe(1);
+    expect(report.releasesAfterReopen).toEqual([1]);
+    expect(report.counts).toEqual({ toolbar: false, pantry: false, grimoire: true });
+    expect(report.peaks).toEqual([]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+test('Studio keeps its promises: a prompt typed over a shelf shortcut stays typed after reopen, a sub-spell caller publishes once and reopens live, a chat route replies beside a webhook route, a mended number unlocks Brew and a bad one drops the seal, twin or blank variable names fail Check, a lone trigger stays while an unfed reply is set aside, restoring the live release keeps it live, and hand-drawn Grimoire wires drop the shortcut and say why one was refused', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-promises-'));
+  try {
+    const report = await studioProbe(['kept-promises', join(dir, 'studio.sqlite')]);
+
+    expect(report.typed).toEqual({ bridged: true, wired: false, prompt: 'typed words' });
+    expect(report.subSpell).toEqual({ releases: [1], liveAfterReopen: 1 });
+    expect(JSON.stringify(report.twoDoors.replies)).toContain(report.twoDoors.sent);
+    expect(report.number.liveBefore).toBe(1);
+    expect(report.number.whileBad).toEqual({ live: null, dirty: true, badge: null });
+    expect(report.number.hexed).toBe('invalid');
+    expect(report.number.after).toBe('unchecked');
+    expect(report.number.brewLocked).toBe(false);
+    expect(report.names.duplicate).toBe('invalid');
+    expect(report.names.blank).toBe('invalid');
+    expect(report.names.typeKeys).toBe(report.names.rows);
+    expect(report.lone).toEqual({ trigger: 'Ingredient', reply: 'Aside', check: 'valid' });
+    expect(report.restored).toEqual({ live: 1, badge: 'v1' });
+    expect(report.liveDrag).toEqual({ flowIntoReply: ['once.out->in'], refusalShown: true });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});test('Everything stays in plain sight: bottle ribbons never run on top of each other, the log keeps a short result in view and scrolls its full events, a failed step keeps Type it instead above the fold at 960, step names in the brew summary are never cut, the Recipe tab does not repeat the Trace, a failed brew marks nothing Untaken and no pill names a socket, every ingredient outline passes 3 to 1, crowded vials keep their words inside, and an empty pot cannot be sent a message', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['plain-sight']);
+
+  expect(report.ribbonShares).toEqual([]);
+  for (const log of report.logs) {
+    expect(log.resultVisible).toBe(true);
+    expect(log.clipped).toEqual([]);
+  }
+  expect(report.failedInspector.typeInsteadInView).toBe(true);
+  expect(report.summary).toEqual({ cut: [], recipeRepeatsTrace: false });
+  expect(report.untakenAfterFail).toEqual([]);
+  expect(report.socketSuffixes).toEqual([]);
+  expect(report.pillOverlaps).toEqual([]);
+  expect(report.weakBorders).toEqual([]);
+  for (const ratio of report.broth) expect(ratio).toBeGreaterThanOrEqual(3);
+  expect(report.spilling).toEqual([]);
+  expect(report.chatOnEmpty).toBe(0);
+  expect(report.menuHeaderClash).toBe(false);
+});test('Close quarters stay readable: the 960 prompt source shows its whole name, bottle ribbons keep a stream width clear of their own tag and badge, a crowded pot keeps equal room above and below, a setting typed as 5.0 no longer matches a release saved as 5 because steps read whole and decimal numbers differently, and the card menu stays tied to the card it opened from', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-quarters-'));
+  try {
+    const report = await studioProbe(['close-quarters', join(dir, 'studio.sqlite')]);
+
+    expect(report.promptSource).toEqual({ text: 'From On Message · content', whole: true, inside: true });
+    expect(report.ribbonCrowding).toEqual([]);
+    expect(Math.abs(report.balance.above - report.balance.below)).toBeLessThanOrEqual(8);
+    expect(report.sameNumber).toEqual({ live: null, unchanged: false });
+    expect(report.menuAttached).toBe(true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});test('What you see is what runs: a bottle added to the router stays out of routes it cannot feed, a child potion with a spare reply set aside passes its caller Check, undoing a deleted trigger keeps its place, undo keeps a refused shortcut refused, Check keeps a failed brew until an edit, Tasting never fires a webhook, a reply with no trigger waits aside, an unpinned sub-spell caller stays live after Save, undo never doubles a socket, and timer and variable triggers brew with sample words', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-runs-'));
+  try {
+    const report = await studioProbe(['true-runs', join(dir, 'studio.sqlite')]);
+
+    expect(report.addedBottle.failed).toEqual([]);
+    expect(report.addedBottle.status).toBe('Succeeded');
+    expect(report.spareChild).toBe('valid');
+    expect(report.undoTrigger).toEqual({ sameOrder: true, live: 1 });
+    expect(report.undoRefusalWired).toBe(false);
+    expect(report.checkAfter.staleLogSaysBrewed).toBe(false);
+    expect(report.checkAfter.staleLogSaysHexed).toBe(true);
+    expect(report.checkAfter.failedPill).toContain('Failed');
+    expect(report.checkAfter.failedPlaque).toContain('Failed');
+    expect(report.hookChat).toBe(0);
+    expect(report.loneReply).toBe('Aside');
+    expect(report.unpinnedSeal).toEqual({ afterSave: 1, releases: [1, 2] });
+    expect(report.replyContentWires).toBe(1);
+    expect(report.samples).toEqual({ tickEmpty: false, changeEmpty: false });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});test('Every signal is clear: a failed step names its real cause while finished pours stay lit, 960 model tiles never slice, the 960 Grimoire keeps the potion name, a wrong-type wire says so, bad variable names are marked on rows and plaque, stacked ribbons never cross and dim on a hex, long route names stay inside, Structured JSON shows its model, temperature changes one step, the ladle never touches a pour yet stays in an everyday pot, and a wire can be pulled off an input', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['clear-signals']);
+
+  expect(report.failure).toEqual({ headlineHasCause: true, traceHasCause: true, dimmedFinishedPours: [] });
+  expect(report.tileWhole).toBe(true);
+  expect(report.grimoireTitleWhole).toBe(true);
+  expect(report.wrongHeadline).not.toContain('needs "content"');
+  expect(report.wrongHeadline).toContain('Int');
+  expect(report.nameErrors).toEqual(['Duplicate name', 'Needs a name']);
+  expect(report.namePlaque).not.toBe('Hexed');
+  expect(report.stackedCrossings).toEqual([]);
+  expect(report.stackedLanes).toEqual([]);
+  expect(report.branchMoods).toEqual(['Hexed', 'Hexed']);
+  expect(report.longSpilled).toEqual([]);
+  expect(report.longResultInside).toBe(true);
+  expect(report.structuredModel).toBe(true);
+  expect(report.temperature).toEqual({ second: 0.4, variable: 'Float(0.4)' });
+  expect(report.ladleCrossed).toBe(false);
+  expect(report.ladleBrushes).toBe(false);
+  expect(report.everydayLadle).toBe(true);
+  expect(report.pulledWires).toBe(0);
+});test('Every dial tells the truth: a step with no temperature reads Auto and the first press writes one, the model tile names its provider properly, only real variable links are shown and a changed default changes the brew, the 960 Grimoire names every socket at fit or on hover, step badges match the log after a brew, lane pours turn on wide curves, the first log chip keeps its name, the header counts bottles, big whole numbers keep their meaning, and a missing AI gateway says where to set one', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-dials-'));
+  try {
+    const report = await studioProbe(['honest-dials', join(dir, 'studio.sqlite')]);
+
+    expect(report.temperature).toEqual({ shown: 'Auto', written: 0.8, providerShown: true });
+    expect(report.bindings.invented).toEqual([]);
+    expect(report.bindings.greetingLinked).toBe(true);
+    expect(report.bindings.first).toEqual(['hi friend']);
+    expect(report.bindings.second).toEqual(['hey friend']);
+    if (report.compactGrimoire.zoom < 0.42) expect(report.compactGrimoire.hoverTip).toBe('body');
+    else expect(report.compactGrimoire.socketNames).toBeGreaterThan(0);
+    expect(report.badgesSeen).toBeGreaterThanOrEqual(4);
+    expect(report.badgeMismatch).toEqual([]);
+    expect(report.laneRadius).toBeGreaterThanOrEqual(16);
+    expect(report.firstChipNamed).toBe(true);
+    expect(report.headerSaysBottles).toBe(true);
+    expect(report.bigNumbersLive).toBeNull();
+
+    const env: NodeJS.ProcessEnv = { ...process.env, DISPLAY: '', WAYLAND_DISPLAY: '' };
+    delete env.MAGICKLALA_LLM_BASE_URL;
+    delete env.MAGICKLALA_LLM_API_KEY;
+    delete env.OPENAI_API_KEY;
+    const { stdout } = await run('cargo', ['run', '-q', '-p', 'magicklala-studio', '--example', 'studio_probe', '--', 'gateway-hint'], { cwd: repoRoot, env, timeout: 900_000, maxBuffer: 64 * 1024 * 1024 });
+    const hint = JSON.parse(stdout.trim().split('\n').at(-1) ?? '');
+    expect(hint.error).toContain('MAGICKLALA_LLM_BASE_URL');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});test('A brew locks the recipe and the bottles tell the truth: typing, saving, adding, dragging cards and drawing wires all wait until the brew ends and the lit result survives, branch bottles show no step numbers before a brew, a running bottle simmers without a check, a published branch potion shows its sealed version on the bottle, and thirteen-step and thirty-eight-step brews and a many-issue Check keep every log chip and the result inside the log at 960 and 1280', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-locks-'));
+  try {
+    const report = await studioProbe(['brew-locks', join(dir, 'studio.sqlite')]);
+
+    expect(report.midBrew).toEqual({ promptUnchanged: true, saveError: null, added: 0, moved: false, wiresAdded: 0, litAfterBrew: true });
+    expect(report.idleBadges).toEqual([]);
+    expect(report.runningBottle).toContain('Simmering');
+    expect(report.runningBottle.some((line: string) => /ms$/.test(line))).toBe(false);
+    expect(report.sealedBottle).toContain('v1');
+    expect(report.logs.map((log: { steps: number }) => log.steps)).toEqual(expect.arrayContaining([38]));
+    for (const log of report.logs) {
+      expect(log.resultVisible).toBe(true);
+      expect(log.clipped).toEqual([]);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Every pour, name and count reads true: twelve ingredients land on twelve rim spots with no crossings, low vials pour over the rim, bottle ribbons arc clear of the pot, running sockets pass 3 to 1, compact tabs keep their words, step badges never cover names, twin steps carry numbered full names everywhere, set-aside steps lose their pantry mark, potion and release rows count real ingredients, a lone trigger reads Brewed, and Grimoire cards at half zoom never cut titles or stack labels', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-polish-'));
+  try {
+    const report = await studioProbe(['geometry-and-polish', join(dir, 'studio.sqlite')]);
+
+    expect(report.dozen).toEqual({ landings: 12, pours: 12, ribbonCrossings: 0, pourCrossings: 0, lanes: false });
+    expect(report.throughBelly).toEqual([]);
+    expect(report.ribbonThroughPot).toBe(0);
+    for (const ratio of report.runningContrast) expect(ratio).toBeGreaterThanOrEqual(3);
+    for (const ratio of report.sunContrast) expect(ratio).toBeGreaterThanOrEqual(3);
+    for (const ratio of report.markerContrast) expect(ratio).toBeGreaterThanOrEqual(3);
+    expect(report.summaryContrast).toBeGreaterThanOrEqual(4.5);
+    expect(report.tabs.gap).toBeGreaterThanOrEqual(6);
+    expect(report.tabs.wordsFit).toBe(true);
+    expect(report.badges.found).toBeGreaterThan(0);
+    expect(report.badges.overlaps).toEqual([]);
+    expect(report.names).toEqual({ vials: ['Delay · 1', 'Delay · 2'], triggers: ['On Message · 1', 'On Message · 2'], menu: 'Delay · 2' });
+    expect(report.pantryMarksAside).toBe(false);
+    expect(report.pantryMarksInPot).toBe(true);
+    expect(report.potionRow).toMatch(/3 ingredients · 1 aside/);
+    expect(report.releaseRows).toMatch(/v1 4 ingredients/);
+    expect(report.loneChip).toMatch(/Brewed/);
+    expect(report.grimoireAtHalf).toEqual([]);
+    expect(report.grimoireNamesAt64).toEqual([]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+test('The workbench tells the truth: undo shows after a brew and for a lone card, the demo has no ignored settings, variable steps pick their variable and Check flags a blank one, a new Rhai step brews, clicking a Grimoire input keeps its wire and a pulled shortcut stays pulled after reopen, embeddings ask for Text and a blank prompt fails Check, a mend only offers a source on the same route, a bottle beside a word loop feeds from the trigger, and changing the recipe clears old Brewed and Checked marks', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-truths-'));
+  try {
+    const report = await studioProbe(['workbench-truths', join(dir, 'studio.sqlite')]);
+
+    expect(report.undo).toEqual({ afterBrewShown: true, restored: true, unwiredAsideUndoable: true });
+    expect(report.deadKeys).toEqual([]);
+    expect(report.variables).toEqual({ seeded: true, nameField: true, blankCheck: 'invalid' });
+    expect(report.rhai.status).toBe('Succeeded');
+    expect(report.rhai.failed).toEqual([]);
+    expect(report.pull).toEqual({ clickKeepsWire: true, pulledStaysPulled: true });
+    expect(report.fields).toEqual({ embedCaption: true, blankPromptCheck: 'invalid' });
+    expect(report.mendOffer).toBe('chat');
+    expect(report.loopBottle).toEqual({ role: 'Bottle', wordsFrom: 'trigger' });
+    expect(report.staleMarks.shelvedLogSaysBrewed).toBe(false);
+    expect(report.staleMarks.logSaysChecked).toBe(false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+test('Hands on the workbench: Escape clears a pick and closes a menu, Delete removes a picked step and Cmd or Ctrl Z brings it back, Add is greyed while a brew runs, a duplicate of a set aside card stays aside and keeps its extra sockets, a bottle can be set aside from its menu, the menu says Duplicate without the long name, and no card menu covers the pot at 1280 or 960', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['hands-on']);
+
+  expect(report.keyboard).toEqual({ escapeClears: true, escapeClosesMenu: true, deleteRemoves: true, commandZRestores: true });
+  expect(report.addDuringBrew).toEqual({ running: true, disabled: true });
+  expect(report.duplicate).toEqual({ asideCopyStaysAside: true, copyHasContent: true });
+  expect(report.bottle).toEqual({ caption: ['Duplicate'], offered: true, aside: true });
+  expect(report.menuCoversPot).toEqual([]);
+});
+test('Crowded shelves stay untangled and readable: valid potions with four, eight, or twelve steps and fourteen bottles, at 1280 and at 960 with the Pantry open, pour through one shared outlet that splits in clear gaps, no ribbon crosses another or runs through a card, and every card label stays at least 12px tall inside its card', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['crowded-bottles']);
+
+  expect(report.map((shelf: { case: string }) => shelf.case)).toEqual(['4@1280', '4@960', '8@1280', '8@960', 'kitchen@1280', 'kitchen@960']);
+  for (const shelf of report) {
+    expect({ case: shelf.case, check: shelf.check, crossings: shelf.crossings, through: shelf.through, outlets: shelf.outlets, spills: shelf.spills }).toEqual({ case: shelf.case, check: 'valid', crossings: [], through: [], outlets: 1, spills: [] });
+    expect(shelf.smallestLabel).toBeGreaterThanOrEqual(12);
+  }
+});
+test('Every edit agrees with Check: pulling a Grimoire wire off or onto a refused socket ends the pull and keeps or drops the wire honestly, Publish refuses a recipe Check would reject, undoing a deleted sub-spell call keeps its link and brews, adding a variable drops the old seal and brew marks, the Grimoire names every socket at 45% without stacking, and every potion row shows a bottle', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-agreed-'));
+  try {
+    const report = await studioProbe(['agreed-edits', join(dir, 'studio.sqlite')]);
+
+    expect(report.pulledOff).toEqual({ before: 'trigger.content', after: null, dragIdle: true });
+    expect(report.refusedDrop).toEqual({ after: 'trigger.content', dragIdle: true });
+    expect(report.blankPublish).toEqual({ published: false, releases: [] });
+    expect(report.undoLink).toEqual({ before: 'Succeeded', link: { child: true, version: 1 }, after: 'Succeeded' });
+    expect(report.variableMarks).toEqual({ liveBefore: 1, liveAfter: null, badge: null, lastBrew: null });
+    expect(report.grimoire45.shown).toBe(report.grimoire45.expected);
+    expect(report.grimoire45.stacked).toEqual([]);
+    expect(report.unbottledPotions).toEqual([]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+test('Steady hands: a card menu opens beside its card clear of the pot and other cards, its thread meets the facing edges at 1280, 960 and from the shelf, Escape closes the open menu first, Delete only acts on the workbench tabs, typing keeps its keys, Check lists every problem at once, a cleared variable name drops its old link, and twin titles never strand their number', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['steady-hands']);
+
+  expect(report.menus.wide).toEqual({ coversPot: false, hides: [], attached: true });
+  expect(report.menus.aside).toEqual({ coversPot: false, hides: [], attached: true });
+  expect(report.menus.compact.coversPot).toBe(false);
+  expect(report.menus.compact.hides).toEqual([]);
+  expect(report.keys).toEqual({ escapeClosesModelMenu: true, escapeClosesTypeMenu: true, deleteOnVariablesKeepsStep: true, typingKeepsStep: true });
+  expect(report.findings).toEqual({ variableNamed: true, replyFlagged: true });
+  expect(report.hintBefore).toBe('→ Get Variable');
+  expect(report.staleHint).toBe(false);
+  expect(report.orphans).toEqual([]);
+});
+test('Fair shelves: a short recipe with four or eight bottles keeps the pot centred instead of stacking, bottle ribbons turn on wide curves, the zoomed-out socket tip floats above every card inside the canvas, bottles show their kind the same way at 960, hex pills stay inside right-hand cards, and prompts never seed words nothing fills while a literal word in an AI prompt gets a note instead of a hex', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['fair-shelves']);
+
+  expect(report.layouts).toEqual([{ case: '4', stacked: false }, { case: '8', stacked: false }]);
+  expect(report.bends).toEqual([]);
+  expect(report.tooltip).toEqual({ shown: true, inside: true, onTop: true });
+  expect(report.bottleKinds.dozen).toBe(report.bottleKinds.support);
+  expect(report.pillInside).toBe(true);
+  expect(report.prompts).toEqual({ seededTokens: 0, unfilledCheck: 'valid', namesWord: true, filledCheck: 'valid' });
+});
+test('The last mile: a refused Publish lists every problem Check lists, adding a variable can be undone, Cmd or Ctrl Z waits out a brew, and an empty pot offers its triggers on the shelf beside it instead of repeating the Pantry in the Recipe panel', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-last-mile-'));
+  try {
+    const report = await studioProbe(['last-mile', join(dir, 'studio.sqlite')]);
+
+    expect(report.publish).toEqual({ published: false, publishCount: 2, same: true, checkCount: 2 });
+    expect(report.variableUndo).toEqual({ added: 1, afterUndo: 0 });
+    expect(report.undoDuringBrewKept).toBe(true);
+    expect(report.emptyPot).toEqual({ inPot: 6, inPanel: 0, starterOnShelf: true });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+test('Honest edits: a second bottle on a Branch takes the free way, a cut shortcut stays cut, the layout follows a resized window, a refused wire drop changes nothing, a refused Publish marks the steps Check marks, setting aside the last step clears old brew marks, a variable type change is undoable and unseals Check, the Research sample checks clean, each potion shows its own mood, Tasting explains a hexed brew, Cmd or Ctrl Z works on the Variables tab, and Check names an undeclared variable', { timeout: 900_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'magicklala-studio-honest-edits-'));
+  try {
+    const report = await studioProbe(['honest-edits', join(dir, 'studio.sqlite')]);
+
+    expect(report.branchOuts).toEqual(['false', 'true']);
+    expect(report.cut).toEqual({ bridged: true, cameBack: false });
+    expect(report.resize).toEqual({ size: [960, 640], compact: true });
+    expect(report.refusedDrop.sameOrder).toBe(true);
+    expect(report.refusedDrop.dirtyAfter).toBe(report.refusedDrop.dirtyBefore);
+    expect(report.refusedDrop.brewKept).toBe(true);
+    expect(report.refusedDrop.storeError).toBeNull();
+    expect(report.refusedDrop.wireError).toBe(true);
+    expect(report.refusedDrop.wireErrorShown).toBe(true);
+    expect(report.publishMarks).toEqual({ failed: ['echo'], sameAsCheck: true, rejected: 1, debugIds: false });
+    expect(report.loneAside).toEqual({ brewed: true, marksAfterAside: false });
+    expect(report.variableType).toEqual({ checked: 'valid', afterType: 'unchecked', type: 'Int', undone: 'String' });
+    expect(report.research.validation).toBe('valid');
+    expect(report.moods).toEqual({ hexed: 'Hexed', other: 'Ready' });
+    expect(report.tastingReason).toBe(true);
+    expect(report.undoOnVariables).toBe(1);
+    expect(report.undeclaredNamed).toBe(true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+test('Legible shelves: in crowded, brewed, eight-bottle, compact and zoomed-out cauldrons every word on the canvas stays at 10.5px or larger, every ingredient keeps its vial, and the pot never shrinks below 140px', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['legible-shelves']);
+
+  expect(report.reference).toBe(15);
+  for (const [scene, measured] of Object.entries<any>(report.cases)) {
+    expect({ scene, tooSmall: measured.tooSmall }).toEqual({ scene, tooSmall: [] });
+    expect({ scene, vialless: measured.vialless }).toEqual({ scene, vialless: 0 });
+    expect(measured.potWidth, scene).toBeGreaterThanOrEqual(140);
+  }
+});
+test('Clear sight: the card menu at 960 by 640 parks in open canvas instead of burying the other ingredients, docks in the Recipe pane with working actions when no open spot exists, and Grimoire card headers keep every word inside from 60% to 100% zoom', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['clear-sight']);
+
+  expect(report.menuCovers).toEqual([]);
+  expect(report.headerSpills).toEqual([]);
+  expect(report.docked).toEqual({ inRecipePane: true, hiddenByMenu: [], duplicateWorks: true });
+});
+test('Mixed shelves: six or eight ingredients with two to six bottles never hide a card behind another in a back row, and no pour, free or in a lane between columns, runs behind a card or its step number on its way to the rim', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['mixed-shelves']);
+
+  expect(report.length).toBe(16);
+  for (const shelf of report) {
+    expect({ case: shelf.case, shape: shelf.shape === 'back-row ring' ? shelf.shape : 'ok' }).toEqual({ case: shelf.case, shape: 'ok' });
+    expect({ case: shelf.case, through: shelf.through }).toEqual({ case: shelf.case, through: [] });
+  }
+});
+test('Undo keeps time in order and reaches every edit: Cmd or Ctrl Z first takes back a new wire and then the older removed step, a typed prompt undoes as one step before the variable added earlier, a Switch case list undoes to its old outputs, and undo right after a removal still brings the step back', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['undo-order']);
+
+  expect(report.removed).toBe(true);
+  expect(report.wireUndone).toBe(true);
+  expect(report.stepKeptAfterFirst).toBe(true);
+  expect(report.stepBackAfterSecond).toBe(true);
+  expect(report.undoAfterTracked).toBe(true);
+  expect(report.typed).toEqual({ promptAfterOne: 'You asked: {{content}}', variablesAfterOne: 1, variablesAfterTwo: 0 });
+  expect(report.listed).toEqual({ before: ['refund', 'billing', 'default'], after: ['default'] });
 });
