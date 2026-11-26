@@ -590,13 +590,25 @@ pub fn potion_tint(state: &CanvasState, plan: &BrewPlan) -> Option<Color> {
     brew_tint(&liquids)
 }
 
+fn upstream_of(state: &CanvasState, bottle: &NodeId) -> std::collections::HashSet<NodeId> {
+    let mut found = std::collections::HashSet::new();
+    let mut frontier = vec![bottle.clone()];
+    while let Some(at) = frontier.pop() {
+        for wire in state.wires.iter().filter(|wire| wire.to_node == at) {
+            if found.insert(wire.from_node.clone()) {
+                frontier.push(wire.from_node.clone());
+            }
+        }
+    }
+    found
+}
+
 pub fn bottle_tint(state: &CanvasState, plan: &BrewPlan, bottle: &NodeId) -> Option<Color> {
     if state.has_run() {
-        let ran = || pouring_cards(state, plan).filter(|(_, card)| card.step_order.is_some());
-        if let Some((_, last)) = ran()
-            .filter(|(placed, _)| placed.feeds_only.as_ref() == Some(bottle))
+        let upstream = upstream_of(state, bottle);
+        if let Some((_, last)) = pouring_cards(state, plan)
+            .filter(|(placed, card)| card.step_order.is_some() && upstream.contains(&placed.id))
             .max_by_key(|(_, card)| card.step_order)
-            .or_else(|| ran().max_by_key(|(_, card)| card.step_order))
         {
             return Some(category_tone(&last.category, state.light).liquid);
         }
