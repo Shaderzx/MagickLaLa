@@ -1266,33 +1266,90 @@ fn grimoire_card_view<S: 'static>(
     let dimmed_border = p.untaken_border();
     let header_bg = if dimmed { dimmed_header } else { tone.tint };
     let header_h = CARD_HEADER * zoom;
-    let title_size = (13.6 * zoom).clamp(11.8, 15.5);
+    let far = zoom < 0.55;
+    let title_size = (13.6 * zoom).clamp(if far { 11.0 } else { 11.8 }, 15.5);
     let kind_size = (10.8 * zoom).clamp(11.0, 11.6);
     let title_color = if dimmed { if state.light { hex(0x362E45) } else { hex(0xDFD8F2) } } else { p.ink };
     let kind_color = if dimmed { if state.light { hex(0x3F3652) } else { hex(0xD4CCE8) } } else { p.mute };
     let vial_size = (22.0 * zoom).clamp(17.0, 26.0);
     let display_title = state.display_title(&card.id);
+    let reach = (19.5 * zoom).clamp(17.5, 21.0);
+    let crowded_above = state.nodes.iter().filter(|other| other.id != card.id).any(|other| {
+        let gap = (card.position[1] - (other.position[1] + other.size[1])) * zoom;
+        let overlaps_x = other.position[0] < card.position[0] + card.size[0] && card.position[0] < other.position[0] + other.size[0];
+        overlaps_x && (0.0..reach + 4.0).contains(&gap)
+    });
+    let badge_words = match card.status {
+        ExecutionStatus::Succeeded | ExecutionStatus::Failed | ExecutionStatus::Running => match card.duration_ms {
+            Some(0) => Some("<1ms".to_owned()),
+            Some(ms) => Some(format!("{ms}ms")),
+            None => Some(String::new()),
+        },
+        _ if shelved => Some("Set aside".to_owned()),
+        _ if dimmed && state.brew_completed() => Some("Untaken".to_owned()),
+        _ => None,
+    };
+    let pad = if far { 5.0 } else { (8.0 * zoom).max(6.0) };
+    let gap = (6.0 * zoom).max(5.0);
+    let badge_pad = (6.0 * zoom).max(5.5);
+    let badge_font = (11.0 * zoom).clamp(11.0, 12.0);
+    let ticked = card.status == ExecutionStatus::Succeeded;
+    let full_w =
+        badge_words.as_ref().map(|words| crate::measure::text_width(words, badge_font, 750.0) + if ticked { 14.0 } else { 0.0 } + 2.0 * badge_pad + 6.0);
+    let compact_w = 2.0 * badge_pad + 14.0;
+    let title_need = crate::measure::text_width(&display_title, title_size, 750.0) + 2.0 * pad + 4.0;
+    let fits = |badge: f32, icon: bool| title_need + badge + if icon { vial_size + gap } else { 0.0 } <= card.size[0] * zoom;
+    let (show_vial, compact_badge, badge_room) = match full_w.filter(|_| crowded_above) {
+        Some(full) if fits(full, true) => (true, false, full),
+        Some(full) if fits(full, false) => (false, false, full),
+        Some(_) if fits(compact_w, true) => (true, true, compact_w),
+        Some(_) => (false, true, compact_w),
+        None => (!far || fits(0.0, true), false, 0.0),
+    };
+    let title_room = card.size[0] * zoom - 2.0 * pad - badge_room - if show_vial { vial_size + gap } else { 0.0 };
     let header_inner = row()
         .grow(1.0)
         .min_w(0.0)
         .h_full()
-        .px((8.0 * zoom).max(6.0))
+        .pl(pad)
+        .pr(pad + badge_room)
         .gap((6.0 * zoom).max(5.0))
         .items_center()
-        .child(canvas(mini_vial_icon(&card.category, state.light, vial_size)).size(vial_size, vial_size))
+        .children(show_vial.then(|| canvas(mini_vial_icon(&card.category, state.light, vial_size)).size(vial_size, vial_size)))
         .child(
             col()
                 .grow(1.0)
                 .min_w(0.0)
                 .justify_center()
                 .gap((1.0 * zoom).max(0.5))
-                .child(twin_title(&display_title, TextStyle::new(title_size, 750.0), title_color, crate::CARD_WIDTH * zoom - vial_size - 36.0 * zoom.max(0.6)))
+                .child(twin_title(&display_title, TextStyle::new(title_size, 750.0), title_color, title_room))
                 .children(
                     ((title_size + kind_size) * 1.25 + 4.0 <= header_h)
                         .then(|| text(&card.kind).font(TextStyle::new(kind_size, 500.0).mono()).color(kind_color).truncate()),
                 ),
         );
-    let perched_badge = status_box(card.status, card.duration_ms, p, zoom).or_else(|| {
+    let compact_tag = |mark: El, words: String, border: Color, fill: Color| {
+        row().label(words).px(badge_pad).py((1.8 * zoom).max(1.5)).radius((6.5 * zoom).max(6.0)).fill(fill).border(1.0, border).items_center().child(mark)
+    };
+    let compact = compact_badge.then(|| match card.status {
+        ExecutionStatus::Succeeded => {
+            let ink = if p.light { p.broth_deep } else { p.broth_foam };
+            Some(compact_tag(
+                crate::hearth::check_mark(ink, (10.0 * zoom).clamp(9.0, 11.0)),
+                format!("Brewed {}", badge_words.clone().unwrap_or_default()),
+                p.broth_mid,
+                p.card,
+            ))
+        }
+        ExecutionStatus::Idle => Some(compact_tag(
+            text("–").font(TextStyle::new(badge_font, 750.0)).color(p.untaken_pill_ink()),
+            badge_words.clone().unwrap_or_default(),
+            dimmed_border,
+            p.untaken_pill_fill(),
+        )),
+        _ => None,
+    });
+    let perched_badge = compact.flatten().or_else(|| status_box(card.status, card.duration_ms, p, zoom)).or_else(|| {
         (shelved || (dimmed && state.brew_completed())).then(|| {
             let badge_bg = p.untaken_pill_fill();
             let badge_ink = p.untaken_pill_ink();
@@ -1390,14 +1447,8 @@ fn grimoire_card_view<S: 'static>(
     let outputs = card.outputs.iter().map(|socket| socket_port::<S>(state, card, socket, true, dimmed, p, zoom, lens));
     shell = inputs.chain(outputs).fold(shell, |shell, port| shell.child(port));
     if let Some(badge) = perched_badge {
-        let reach = (19.5 * zoom).clamp(17.5, 21.0);
-        let crowded_above = state.nodes.iter().filter(|other| other.id != card.id).any(|other| {
-            let gap = (card.position[1] - (other.position[1] + other.size[1])) * zoom;
-            let overlaps_x = other.position[0] < card.position[0] + card.size[0] && card.position[0] < other.position[0] + other.size[0];
-            overlaps_x && (0.0..reach + 4.0).contains(&gap)
-        });
-        let lift = if crowded_above { (8.5 * zoom).clamp(8.0, 10.0) } else { reach };
-        shell = shell.child(row().w(card_w).px((7.0 * zoom).max(5.0)).justify_end().absolute(0.0, -lift).child(badge.key(format!("perched-{}", card.id.0))));
+        let (lift, inset) = if crowded_above { (-(header_h - (header_h * 0.5 + 9.0 * zoom.max(0.8))), 4.0) } else { (reach, (7.0 * zoom).max(5.0)) };
+        shell = shell.child(row().w(card_w).px(inset).justify_end().absolute(0.0, -lift).child(badge.key(format!("perched-{}", card.id.0))));
     }
     if let Some(step) = card.step_order {
         let step_sz = (18.0 * zoom).clamp(16.0, 20.0);
