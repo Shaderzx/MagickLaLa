@@ -4935,6 +4935,16 @@ fn braided_pours() -> Result<serde_json::Value, String> {
     });
     Ok(json!({ "lanes": plan.lanes.is_some(), "pairs": crossings.len(), "leastCrossings": crossings.iter().min(), "startAtMouths": ends.clone().all(|ok| ok) }))
 }
+fn rack_glow() -> Result<serde_json::Value, String> {
+    let stacked = |light: bool, ribbons: usize| {
+        let alpha = magicklala_canvas::hearth::ribbon_halo_alpha(light, ribbons);
+        1.0 - (1.0 - alpha).powi(ribbons as i32)
+    };
+    Ok(json!({
+        "dark": { "one": stacked(false, 1), "fourteen": stacked(false, 14), "eight": stacked(false, 8) },
+        "light": { "one": stacked(true, 1), "fourteen": stacked(true, 14), "eight": stacked(true, 8) },
+    }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11717,6 +11727,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("plug-voices") => plug_voices(),
         Some("chip-outputs") => chip_outputs(),
         Some("braided-pours") => braided_pours(),
+        Some("rack-glow") => rack_glow(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

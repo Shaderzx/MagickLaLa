@@ -921,3 +921,13 @@ test('A crowded kitchen braids its pours: in lane mode every two streams that sh
   expect(report.leastCrossings).toBeGreaterThanOrEqual(2);
   expect(report.startAtMouths).toBe(true);
 });
+
+test('A big rack glows no louder than one bottle: when 8 or 14 ribbons share a rack pipe, their stacked halo stays within the glow of a single ribbon in both themes', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['rack-glow']);
+
+  for (const theme of [report.dark, report.light]) {
+    expect(theme.one).toBeGreaterThan(0.2);
+    expect(theme.eight).toBeLessThanOrEqual(theme.one);
+    expect(theme.fourteen).toBeLessThanOrEqual(theme.one);
+  }
+});
