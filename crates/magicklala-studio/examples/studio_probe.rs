@@ -4901,39 +4901,34 @@ fn chip_outputs() -> Result<serde_json::Value, String> {
     read(&aside, "1280-aside", &["prompt", "system"]);
     Ok(json!({ "chips": chips }))
 }
-fn braided_pours() -> Result<serde_json::Value, String> {
+fn rippling_pours() -> Result<serde_json::Value, String> {
     let rt = headless(StudioApp::with_spell(crowded_kitchen(), registry_specs()));
     let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
     let paths = magicklala_canvas::cauldron::pour_paths(&rt.state.canvas, &plan);
-    let column_of = |id: &NodeId| plan.card(id).map(|card| (card.rect[0] / 4.0).round() as i64);
-    let mut crossings = Vec::new();
-    for (a_index, (a_id, a)) in paths.iter().enumerate() {
-        for (b_id, b) in paths.iter().skip(a_index + 1) {
-            if column_of(a_id) != column_of(b_id) || a.len() != b.len() {
+    let sways = |points: &[[f32; 2]]| {
+        let mut flips = 0;
+        let mut last = [0.0f32, 0.0f32];
+        for pair in points.windows(2) {
+            let (dx, dy) = (pair[1][0] - pair[0][0], pair[1][1] - pair[0][1]);
+            let across = if dy.abs() > dx.abs() { (0, dx) } else { (1, dy) };
+            if across.1.abs() < 0.02 {
                 continue;
             }
-            let mut sign = 0.0f32;
-            let mut swaps = 0;
-            for (pa, pb) in a.iter().zip(b) {
-                if (pa[1] - pb[1]).abs() > 40.0 {
-                    continue;
-                }
-                let now = (pa[0] - pb[0]).signum();
-                if now != 0.0 && sign != 0.0 && now != sign {
-                    swaps += 1;
-                }
-                if now != 0.0 {
-                    sign = now;
-                }
+            let sign = across.1.signum();
+            if last[across.0] != 0.0 && last[across.0] != sign {
+                flips += 1;
             }
-            crossings.push(swaps);
+            last[across.0] = sign;
         }
-    }
-    let ends = paths.iter().map(|(id, points)| {
-        let placed = plan.card(id).map(|card| magicklala_canvas::cauldron::vial_mouth_of(card, &plan));
-        placed.is_some_and(|mouth| (mouth[0] - points[0][0]).abs() < 0.5 && (mouth[1] - points[0][1]).abs() < 0.5)
+        flips
+    };
+    let rippling = paths.iter().filter(|(_, points)| sways(points) >= 4).count();
+    let starts = paths.iter().all(|(id, points)| {
+        plan.card(id)
+            .map(|card| magicklala_canvas::cauldron::vial_mouth_of(card, &plan))
+            .is_some_and(|mouth| (mouth[0] - points[0][0]).abs() < 0.5 && (mouth[1] - points[0][1]).abs() < 0.5)
     });
-    Ok(json!({ "lanes": plan.lanes.is_some(), "pairs": crossings.len(), "leastCrossings": crossings.iter().min(), "startAtMouths": ends.clone().all(|ok| ok) }))
+    Ok(json!({ "lanes": plan.lanes.is_some(), "pours": paths.len(), "rippling": rippling, "startAtMouths": starts }))
 }
 fn rack_glow() -> Result<serde_json::Value, String> {
     let stacked = |light: bool, ribbons: usize| {
@@ -11726,7 +11721,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("grimoire-tags") => grimoire_tags(),
         Some("plug-voices") => plug_voices(),
         Some("chip-outputs") => chip_outputs(),
-        Some("braided-pours") => braided_pours(),
+        Some("rippling-pours") => rippling_pours(),
         Some("rack-glow") => rack_glow(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),

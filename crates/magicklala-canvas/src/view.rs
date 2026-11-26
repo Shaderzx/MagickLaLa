@@ -627,7 +627,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     shell
 }
 
-fn selection_ring(inner: El, id: &magicklala_graph::NodeId, radius: f32, state: &CanvasState, p: &HearthPalette) -> El {
+fn selection_ring(inner: El, id: &magicklala_graph::NodeId, radius: f32, p: &HearthPalette) -> El {
     el().key(format!("selection-ring-{}", id.0))
         .mx(-4.0)
         .my(-4.0)
@@ -784,7 +784,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
         (!(chipless_when_taken && taken))
             .then(|| row().w_full().pl(8.0).pr(22.0).justify_end().absolute(0.0, -8.0).child(el().key(format!("bottle-pill-{}", card.id.0)).child(pill))),
     );
-    let tag = col().w_full().child(if card.selected && (taken || hexed) { selection_ring(tag_wrap, &card.id, 12.0, state, p) } else { tag_wrap });
+    let tag = col().w_full().child(if card.selected && (taken || hexed) { selection_ring(tag_wrap, &card.id, 12.0, p) } else { tag_wrap });
     let select_id = card.id.clone();
     col()
         .key(format!("node-{}-header", card.id.0))
@@ -1012,7 +1012,7 @@ pub(crate) fn potion_stand_view<S: 'static>(
     let stand = col().key("potion-stand").w(width).gap(4.0).items_center().absolute(pos[0], pos[1]);
     let tag_card = tag_card.key("potion-tag");
     let tag_card = match primary_output.filter(|_| selected && hexed) {
-        Some(output) => col().w_full().child(selection_ring(tag_card, &output.id, 14.0, state, p)),
+        Some(output) => col().w_full().child(selection_ring(tag_card, &output.id, 14.0, p)),
         None => tag_card,
     };
     let mut stand = stand.child(bottle_art).child(tag_card);

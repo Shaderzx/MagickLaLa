@@ -1339,8 +1339,9 @@ pub fn pouring_stream_shape(mut shape: Shape, from: [f32; 2], to: [f32; 2], styl
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn ribbon_halo_alpha(light: bool, _ribbons: usize) -> f32 {
-    if light { 0.44 } else { 0.30 }
+pub fn ribbon_halo_alpha(light: bool, ribbons: usize) -> f32 {
+    let single: f32 = if light { 0.44 } else { 0.30 };
+    1.0 - (1.0 - single).powf(1.0 / ribbons.max(1) as f32)
 }
 
 pub fn distillation_ribbon_shape(
@@ -1351,6 +1352,7 @@ pub fn distillation_ribbon_shape(
     active: bool,
     untaken: bool,
     tint: Option<Color>,
+    sharing: usize,
 ) -> Shape {
     let p = HearthPalette::for_theme(light);
     if pts.len() < 2 {
@@ -1376,7 +1378,7 @@ pub fn distillation_ribbon_shape(
     };
     let halo = p.gold_hi;
     let w = if mood == CauldronMood::Brewed || mood == CauldronMood::Simmering { 4.2 } else { 3.2 };
-    shape = shape.stroke_path(&path, 11.5, LineCap::Round, with_alpha(halo, ribbon_halo_alpha(light, 1)));
+    shape = shape.stroke_path(&path, 11.5, LineCap::Round, with_alpha(halo, ribbon_halo_alpha(light, sharing)));
     shape = shape.stroke_path(&path, w, LineCap::Round, core);
     shape = shape.stroke_path(&path, 1.4, LineCap::Round, with_alpha(p.broth_spark, 0.90));
     for &t in &[0.24_f32, 0.50, 0.76] {

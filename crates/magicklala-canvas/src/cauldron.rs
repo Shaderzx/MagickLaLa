@@ -755,18 +755,27 @@ pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32
                     }));
                     let drop_end = turn[1] - elbow;
                     let drop_top = from[1] + bend;
-                    let reach = (mates as f32 - 1.0) * 0.5 * strand;
-                    let phase = rank as f32 * std::f32::consts::TAU / mates as f32;
-                    let cycles = ((drop_end - drop_top).abs() / (46.0 * plan.scale)).max(3.0);
+                    let tau = std::f32::consts::TAU;
                     let ease = |edge: f32, x: f32| {
                         let k = (x / edge).clamp(0.0, 1.0);
                         k * k * (3.0 - 2.0 * k)
                     };
+                    let gentle = |wave: f32| wave * wave / (tau * tau * 32.0 * plan.scale);
+                    let crowd = ingredients.len() as f32;
+                    let top_turn = floor - (crowd - 1.0) * step;
+                    let edge = 30.0 * plan.scale;
+                    let soft = edge * edge / (200.0 * plan.scale);
+                    let drop_wave = 56.0 * plan.scale;
+                    let neighbour_room = if mates > 1 { strand * 0.6 } else { f32::MAX };
+                    let drop_reach =
+                        ((channel - (mates as f32 - 1.0) * strand) * 0.5 - 2.0 * plan.scale).max(0.0).min(neighbour_room).min(gentle(drop_wave)).min(soft);
+                    let ripple_y = |y: f32| {
+                        let window = ease(edge, y - drop_top) * ease(edge, top_turn - 30.0 * plan.scale - y);
+                        drop_reach * window * (tau * (y - shelf_bottom) / drop_wave).sin()
+                    };
                     points.extend((1..=48).map(|step| {
-                        let t = step as f32 / 48.0;
-                        let weave = ease(0.18, t) * ease(0.18, 1.0 - t);
-                        let sway = reach * (std::f32::consts::TAU * cycles * t + phase).sin() - offset * strand;
-                        [lane_x + weave * sway, drop_top + (drop_end - drop_top) * t]
+                        let y = drop_top + (drop_end - drop_top) * step as f32 / 48.0;
+                        [lane_x + ripple_y(y), y]
                     }));
                     let start = if run > 1.0 {
                         points.extend((1..=6).map(|step| {
@@ -774,17 +783,25 @@ pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32
                             let u = 1.0 - t;
                             [u * u * lane_x + 2.0 * u * t * lane_x + t * t * (lane_x - elbow), u * u * drop_end + 2.0 * u * t * turn[1] + t * t * turn[1]]
                         }));
-                        let crowd = ingredients.len() as f32;
-                        let rope = (crowd - 1.0) * 0.5 * step;
-                        let rope_phase = lane_rank * std::f32::consts::TAU / crowd.max(1.0);
-                        let run_len = (clear_x - lane_x + elbow).abs();
-                        let rope_cycles = (run_len / (60.0 * plan.scale)).max(1.0);
-                        let settle = turn[1] - (floor - (crowd - 1.0) * 0.5 * step);
+                        let narrowest_lane = ingredients
+                            .iter()
+                            .map(|other| {
+                                let together = ingredients.iter().filter(|mate| (mate.rect[0] - other.rect[0]).abs() < 1.0).count().max(1) as f32;
+                                let spacing = (channel * 0.7 / together).min(6.0 * plan.scale);
+                                other.rect[0] + other.rect[2] + channel * 0.5 - (together - 1.0) * 0.5 * spacing
+                            })
+                            .fold(f32::MAX, f32::min);
+                        let run_from = spout_point(plan)[0] - 8.0 * plan.scale;
+                        let run_to = narrowest_lane - 30.0 * plan.scale;
+                        let run_wave = 80.0 * plan.scale;
+                        let run_reach = (ribbon_top - floor - 6.0 * plan.scale).max(0.0).min(gentle(run_wave) * 2.0).min(soft);
+                        let ripple_x = |x: f32| {
+                            let window = ease(edge, x - run_from) * ease(edge, run_to - x);
+                            run_reach * window * (1.0 - (tau * (x - run_from) / run_wave).cos()) * 0.5
+                        };
                         points.extend((1..=40).map(|k| {
-                            let t = k as f32 / 40.0;
-                            let weave = ease(0.15, t) * ease(0.15, 1.0 - t);
-                            let sway = rope * (std::f32::consts::TAU * rope_cycles * t + rope_phase).sin() - settle;
-                            [lane_x - elbow + (clear_x - lane_x + elbow) * t, turn[1] + weave * sway]
+                            let x = lane_x - elbow + (clear_x - lane_x + elbow) * k as f32 / 40.0;
+                            [x, turn[1] + ripple_x(x)]
                         }));
                         [clear_x, turn[1]]
                     } else {
@@ -911,10 +928,11 @@ fn streams_shape(state: &CanvasState, plan: &BrewPlan, mood: CauldronMood, p: &H
             taken,
             untaken,
             if multi { bottle_tint(state, plan, &placed.id) } else { potion_tint(state, plan) },
+            if plan.cards.iter().filter(|card| card.role == BrewRole::Bottle).count() >= RACK_FROM { taken_ribbons.len() } else { 1 },
         );
     }
     if let Some(ghost) = ribbons.get(bottles.len()).filter(|_| plan.ghost_bottle.is_some()) {
-        shape = distillation_ribbon_shape(shape, ghost, CauldronMood::Empty, state.light, false, false, None);
+        shape = distillation_ribbon_shape(shape, ghost, CauldronMood::Empty, state.light, false, false, None, 1);
     }
     shape
 }

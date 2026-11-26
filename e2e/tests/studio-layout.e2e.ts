@@ -913,12 +913,12 @@ test('A source chip never cuts its output name: at 960 and in the 1280 set-aside
   expect(report.chips.find((chip: { scene: string; socket: string }) => chip.scene === '960' && chip.socket === 'system').output).toBeNull();
 });
 
-test('A crowded kitchen braids its pours: in lane mode every two streams that share a channel twist around each other at least twice on the way down, and every stream still starts at its vial mouth', { timeout: 900_000 }, async () => {
-  const report = await studioProbe(['braided-pours']);
+test('A crowded kitchen pours like liquid, not wiring: in lane mode most of the twelve streams ripple side to side on their way into the pot instead of running ruler-straight, and every stream still starts at its vial mouth', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['rippling-pours']);
 
   expect(report.lanes).toBe(true);
-  expect(report.pairs).toBeGreaterThan(0);
-  expect(report.leastCrossings).toBeGreaterThanOrEqual(2);
+  expect(report.pours).toBe(12);
+  expect(report.rippling).toBeGreaterThanOrEqual(8);
   expect(report.startAtMouths).toBe(true);
 });
 
@@ -927,7 +927,7 @@ test('A big rack glows no louder than one bottle: when 8 or 14 ribbons share a r
 
   for (const theme of [report.dark, report.light]) {
     expect(theme.one).toBeGreaterThan(0.2);
-    expect(theme.eight).toBeLessThanOrEqual(theme.one);
-    expect(theme.fourteen).toBeLessThanOrEqual(theme.one);
+    expect(theme.eight).toBeCloseTo(theme.one, 4);
+    expect(theme.fourteen).toBeCloseTo(theme.one, 4);
   }
 });
