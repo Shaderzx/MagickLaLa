@@ -140,32 +140,65 @@ fn socket_pairs(wires: &[Wire]) -> Vec<(SocketRef, SocketRef)> {
         .collect()
 }
 
-fn set_earlier_on_route(graph: &SpellGraph, node: &NodeId, name: &str, is_flow: impl Fn(&magicklala_graph::Wire) -> bool) -> bool {
+#[derive(Clone, Copy, PartialEq)]
+enum Held {
+    Set,
+    Unset,
+    Reset,
+}
+
+fn held_before(graph: &SpellGraph, id: &NodeId, name: &str, is_flow: &dyn Fn(&magicklala_graph::Wire) -> bool, memo: &mut HashMap<NodeId, Held>) -> Held {
+    if let Some(held) = memo.get(id) {
+        return *held;
+    }
+    memo.insert(id.clone(), Held::Unset);
     let touches = |id: &NodeId, kind: &str| {
         graph.node(id).is_some_and(|step| step.kind == kind && step.config.get("name").and_then(|value| value.as_str()).map(str::trim) == Some(name))
     };
-    let sets_it = |id: &NodeId| touches(id, "var/set");
-    let resets_it = |id: &NodeId| touches(id, "var/reset");
+    let feeders: Vec<NodeId> = graph.wires.iter().filter(|wire| &wire.to_node == id && is_flow(wire)).map(|wire| wire.from_node.clone()).collect();
+    let arms: Vec<Held> = feeders
+        .iter()
+        .map(|from| {
+            if touches(from, "var/reset") {
+                Held::Reset
+            } else if touches(from, "var/set") {
+                Held::Set
+            } else {
+                held_before(graph, from, name, is_flow, memo)
+            }
+        })
+        .collect();
+    let join = graph.node(id).is_some_and(|step| step.kind == "flow/wait_for_all");
+    let held = if arms.is_empty() {
+        Held::Unset
+    } else if arms.contains(&Held::Reset) {
+        Held::Reset
+    } else if (join && arms.contains(&Held::Set)) || arms.iter().all(|arm| *arm == Held::Set) {
+        Held::Set
+    } else {
+        Held::Unset
+    };
+    memo.insert(id.clone(), held);
+    held
+}
+
+fn set_earlier_on_route(graph: &SpellGraph, node: &NodeId, name: &str, is_flow: impl Fn(&magicklala_graph::Wire) -> bool) -> bool {
+    let runs_on_flow = |id: &NodeId| graph.wires.iter().any(|wire| &wire.to_node == id && is_flow(wire));
+    let mut readers = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut frontier = vec![node.clone()];
-    let mut met_a_set = false;
     while let Some(current) = frontier.pop() {
-        let feeders: Vec<&NodeId> = graph.wires.iter().filter(|wire| wire.to_node == current && is_flow(wire)).map(|wire| &wire.from_node).collect();
-        if feeders.is_empty() && &current != node {
-            return false;
+        if !seen.insert(current.clone()) {
+            continue;
         }
-        for from in feeders {
-            if resets_it(from) {
-                return false;
-            }
-            if sets_it(from) {
-                met_a_set = true;
-            } else if seen.insert(from.clone()) {
-                frontier.push(from.clone());
-            }
+        if runs_on_flow(&current) {
+            readers.push(current);
+        } else {
+            frontier.extend(graph.wires.iter().filter(|wire| wire.from_node == current && !is_flow(wire)).map(|wire| wire.to_node.clone()));
         }
     }
-    met_a_set
+    let mut memo = HashMap::new();
+    !readers.is_empty() && readers.iter().all(|reader| held_before(graph, reader, name, &is_flow, &mut memo) == Held::Set)
 }
 
 fn same_recipe(a: &SpellGraph, b: &SpellGraph) -> bool {
@@ -3260,7 +3293,7 @@ impl StudioApp {
                     }
                     FieldKind::Boolean => Some("true or false".to_owned()),
                     FieldKind::Select { options } => Some(format!("one of {}", options.join(", "))),
-                    FieldKind::Json => None,
+                    FieldKind::Json => Some("JSON".to_owned()),
                     FieldKind::Text | FieldKind::TextArea | FieldKind::Code { .. } | FieldKind::Credential { .. } | FieldKind::Model { .. } => {
                         Some("text".to_owned())
                     }
@@ -3269,6 +3302,7 @@ impl StudioApp {
                 let type_fits = match &field.kind {
                     FieldKind::Number { .. } => matches!(variable.ty, SocketType::Int | SocketType::Float | SocketType::Any),
                     FieldKind::Boolean => matches!(variable.ty, SocketType::Bool | SocketType::Any),
+                    FieldKind::Json => matches!(variable.ty, SocketType::Json | SocketType::Any),
                     _ => matches!(variable.ty, SocketType::String | SocketType::Any),
                 };
                 let value_fits = |value: &serde_json::Value| match &field.kind {
@@ -3277,12 +3311,12 @@ impl StudioApp {
                         .is_some_and(|number| min.is_none_or(|min| number >= min) && max.is_none_or(|max| number <= max) && (!whole || number.fract() == 0.0)),
                     FieldKind::Boolean => value.is_boolean(),
                     FieldKind::Select { options } => value.as_str().is_some_and(|text| options.iter().any(|option| option == text)),
+                    FieldKind::Json => value.is_object() || value.is_array(),
                     _ => value.is_string(),
                 };
                 let problem = match &value {
                     _ if !type_fits => Some(format!("holds {}", type_words(variable.ty))),
-                    None if matches!(field.kind, FieldKind::Number { .. } | FieldKind::Boolean | FieldKind::Select { .. })
-                        && !set_earlier_on_route(&graph, &node.id, name, |wire| {
+                    None if !set_earlier_on_route(&graph, &node.id, name, |wire| {
                             self.input_type(&SocketRef::new(wire.to_node.clone(), wire.to_socket.clone())).is_some_and(|ty| ty.is_flow())
                         }) =>
                     {
