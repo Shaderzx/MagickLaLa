@@ -4901,6 +4901,40 @@ fn chip_outputs() -> Result<serde_json::Value, String> {
     read(&aside, "1280-aside", &["prompt", "system"]);
     Ok(json!({ "chips": chips }))
 }
+fn braided_pours() -> Result<serde_json::Value, String> {
+    let rt = headless(StudioApp::with_spell(crowded_kitchen(), registry_specs()));
+    let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+    let paths = magicklala_canvas::cauldron::pour_paths(&rt.state.canvas, &plan);
+    let column_of = |id: &NodeId| plan.card(id).map(|card| (card.rect[0] / 4.0).round() as i64);
+    let mut crossings = Vec::new();
+    for (a_index, (a_id, a)) in paths.iter().enumerate() {
+        for (b_id, b) in paths.iter().skip(a_index + 1) {
+            if column_of(a_id) != column_of(b_id) || a.len() != b.len() {
+                continue;
+            }
+            let mut sign = 0.0f32;
+            let mut swaps = 0;
+            for (pa, pb) in a.iter().zip(b) {
+                if (pa[1] - pb[1]).abs() > 40.0 {
+                    continue;
+                }
+                let now = (pa[0] - pb[0]).signum();
+                if now != 0.0 && sign != 0.0 && now != sign {
+                    swaps += 1;
+                }
+                if now != 0.0 {
+                    sign = now;
+                }
+            }
+            crossings.push(swaps);
+        }
+    }
+    let ends = paths.iter().map(|(id, points)| {
+        let placed = plan.card(id).map(|card| magicklala_canvas::cauldron::vial_mouth_of(card, &plan));
+        placed.is_some_and(|mouth| (mouth[0] - points[0][0]).abs() < 0.5 && (mouth[1] - points[0][1]).abs() < 0.5)
+    });
+    Ok(json!({ "lanes": plan.lanes.is_some(), "pairs": crossings.len(), "leastCrossings": crossings.iter().min(), "startAtMouths": ends.clone().all(|ok| ok) }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11682,6 +11716,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("grimoire-tags") => grimoire_tags(),
         Some("plug-voices") => plug_voices(),
         Some("chip-outputs") => chip_outputs(),
+        Some("braided-pours") => braided_pours(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

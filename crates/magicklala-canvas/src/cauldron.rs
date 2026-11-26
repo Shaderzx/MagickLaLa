@@ -704,6 +704,10 @@ fn column_clearance(plan: &BrewPlan, placed: &BrewCard, from: [f32; 2]) -> Optio
     })
 }
 
+pub fn vial_mouth_of(placed: &BrewCard, plan: &BrewPlan) -> [f32; 2] {
+    vial_mouth(placed, plan)
+}
+
 pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32; 2]>)> {
     let ingredients: Vec<&BrewCard> = plan.with_role(BrewRole::Ingredient).filter(|placed| state.card(&placed.id).is_some()).collect();
     let spread = ingredients.len().max(2) as f32 - 1.0;

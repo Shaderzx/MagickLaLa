@@ -912,3 +912,12 @@ test('A source chip never cuts its output name: at 960 and in the 1280 set-aside
   expect(report.chips.find((chip: { scene: string; socket: string }) => chip.scene === '960' && chip.socket === 'prompt').output).toBe('· content');
   expect(report.chips.find((chip: { scene: string; socket: string }) => chip.scene === '960' && chip.socket === 'system').output).toBeNull();
 });
+
+test('A crowded kitchen braids its pours: in lane mode every two streams that share a channel twist around each other at least twice on the way down, and every stream still starts at its vial mouth', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['braided-pours']);
+
+  expect(report.lanes).toBe(true);
+  expect(report.pairs).toBeGreaterThan(0);
+  expect(report.leastCrossings).toBeGreaterThanOrEqual(2);
+  expect(report.startAtMouths).toBe(true);
+});
