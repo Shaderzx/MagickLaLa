@@ -4940,35 +4940,6 @@ fn rack_glow() -> Result<serde_json::Value, String> {
         "light": { "one": stacked(true, 1), "fourteen": stacked(true, 14), "eight": stacked(true, 8) },
     }))
 }
-fn seal_air() -> Result<serde_json::Value, String> {
-    let mut report = Vec::new();
-    for size in [(1280.0_f32, 800.0_f32), (960.0, 640.0)] {
-        let mut app = StudioApp::with_spell(crowded_kitchen(), registry_specs());
-        app.size = size;
-        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
-        rt.frame(0.0);
-        click(&mut rt, "run-spell")?;
-        live_finish(&mut rt)?;
-        rt.frame(3.0);
-        let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
-        let canvas_rect = layout_rect(&rt, "canvas").or_else(|| layout_rect(&rt, "cauldron-canvas")).unwrap_or([0.0; 4]);
-        let pipes: Vec<[f32; 2]> = magicklala_canvas::cauldron::ribbon_paths(&plan).into_iter().flatten().collect();
-        let mut tightest = f32::MAX;
-        for card in plan.with_role(magicklala_canvas::BrewRole::Bottle) {
-            let Some(seal) = layout_rect(&rt, &format!("step-badge-{}", card.id.0)) else { continue };
-            for point in &pipes {
-                let px = canvas_rect[0] + point[0];
-                let py = canvas_rect[1] + point[1];
-                let dx = (seal[0] - px).max(px - (seal[0] + seal[2])).max(0.0);
-                let dy = (seal[1] - py).max(py - (seal[1] + seal[3])).max(0.0);
-                tightest = tightest.min(dx.hypot(dy));
-            }
-        }
-        let glass_half = (9.0 * plan.scale.max(0.4) + 2.4) * 0.5;
-        report.push(json!({ "width": size.0, "air": tightest - glass_half }));
-    }
-    Ok(json!({ "sizes": report }))
-}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11751,7 +11722,6 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("plug-voices") => plug_voices(),
         Some("chip-outputs") => chip_outputs(),
         Some("rippling-pours") => rippling_pours(),
-        Some("seal-air") => seal_air(),
         Some("rack-glow") => rack_glow(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
