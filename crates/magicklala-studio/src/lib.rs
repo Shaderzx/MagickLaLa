@@ -4623,6 +4623,9 @@ pub fn palette_categories(specs: &[NodeSpec]) -> Vec<String> {
 
 fn hex_plaque(findings: &[HexFinding], canvas: &CanvasState) -> String {
     let title_of = |id: &NodeId| canvas.card(id).map(|_| canvas.display_title(id));
+    if findings.len() > 1 {
+        return format!("Hexed · {} issues", findings.len());
+    }
     match findings.first() {
         Some(HexFinding { socket: Some(socket), mistyped: true, .. }) => format!("Hexed · wrong type \"{socket}\""),
         Some(HexFinding { socket: Some(socket), .. }) => format!("Hexed · missing \"{socket}\""),
