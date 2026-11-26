@@ -880,3 +880,10 @@ test('Red marks on a crowded recipe stay readable: at 960 with and without the P
     expect(view.plaque).toBe('Hexed · 8 issues');
   }
 });
+
+test('Grimoire tags never sit on a name and Fit keeps names whole: after a Webhook Router brew no Untaken or timing tag covers a card title at 1280 or 960, and at 960 Fit every Parallel Research title shows whole except the twin Generate Text cards, which keep their number', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['grimoire-tags']);
+
+  expect(report.covered).toEqual([]);
+  expect(report.cutTitles.filter((title: string) => !/^Generate Text · [12]$/.test(title))).toEqual([]);
+});

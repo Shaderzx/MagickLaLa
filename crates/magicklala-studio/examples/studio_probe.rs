@@ -4785,6 +4785,48 @@ fn hex_marks() -> Result<serde_json::Value, String> {
     }
     Ok(json!({ "views": views }))
 }
+fn grimoire_tags() -> Result<serde_json::Value, String> {
+    let open = |name: &str, size: (f32, f32), brew: bool| -> Result<Runtime<StudioApp>, String> {
+        let mut app = StudioApp::with_spell(example(name)?, registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        if brew {
+            click(&mut rt, "run-spell")?;
+            live_finish(&mut rt)?;
+        }
+        click(&mut rt, "mode-grimoire")?;
+        rt.frame(4.0);
+        Ok(rt)
+    };
+    let mut covered = Vec::new();
+    for size in [(1280.0, 800.0), (960.0, 640.0)] {
+        let rt = open("webhook_router.json", size, true)?;
+        for card in &rt.state.canvas.nodes {
+            let Some(tag) = layout_rect(&rt, &format!("perched-{}", card.id.0)) else { continue };
+            for (line, rect) in text_lines_under(&rt, &format!("node-{}-header", card.id.0)) {
+                if rects_touch(tag, rect) {
+                    covered.push(format!("{} at {}: {line}", card.id.0, size.0));
+                }
+            }
+        }
+    }
+    let rt = open("parallel_research.json", (960.0, 640.0), false)?;
+    let title_size = (13.6 * rt.state.canvas.camera.zoom).clamp(11.0, 15.5);
+    let mut measure = studio_text_system();
+    let mut cut = Vec::new();
+    for card in &rt.state.canvas.nodes {
+        let title = rt.state.canvas.display_title(&card.id);
+        let head = title.split(" · ").next().unwrap_or_default().to_owned();
+        if let Some((_, rect)) = text_lines_under(&rt, &format!("node-{}-header", card.id.0)).into_iter().find(|(line, _)| line.starts_with(head.as_str())) {
+            let (natural, _) = measure.measure(&head, rune::TextStyle::new(title_size, 750.0), 1.0);
+            if natural > rect[2] + 0.5 {
+                cut.push(title);
+            }
+        }
+    }
+    Ok(json!({ "covered": covered, "cutTitles": cut, "zoom": rt.state.canvas.camera.zoom }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11563,6 +11605,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("squeezed-unplug") => squeezed_unplug(),
         Some("selection-rings") => selection_rings(),
         Some("hex-marks") => hex_marks(),
+        Some("grimoire-tags") => grimoire_tags(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),
