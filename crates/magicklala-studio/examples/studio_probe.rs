@@ -4865,6 +4865,40 @@ fn plug_voices() -> Result<serde_json::Value, String> {
         "lightRingContrast": contrast(light.selection_ring(), light.paper),
     }))
 }
+fn chip_outputs() -> Result<serde_json::Value, String> {
+    let mut measure = studio_text_system();
+    let mut chips = Vec::new();
+    let mut read = |rt: &Runtime<StudioApp>, scene: &str, sockets: &[&str]| {
+        let panel = layout_rect(rt, "inspector");
+        for socket in sockets {
+            let chip = layout_rect(rt, &format!("unplug-{socket}"));
+            let output = text_lines_under(rt, &format!("plug-output-{socket}")).into_iter().next();
+            let cut = output.as_ref().is_some_and(|(line, rect)| measure.measure(line, rune::TextStyle::new(10.5, 500.0), 1.0).0 > rect[2] + 2.0);
+            let inside = chip.zip(panel).is_some_and(|(chip, panel)| chip[0] >= panel[0] && chip[0] + chip[2] <= panel[0] + panel[2] + 0.5);
+            chips.push(json!({ "scene": scene, "socket": socket, "output": output.map(|(line, _)| line), "cut": cut, "inside": inside }));
+        }
+    };
+    let mut app = StudioApp::with_spell(StudioApp::from_registry().spell.clone(), registry_specs());
+    app.size = (960.0, 640.0);
+    let mut compact = Runtime::new(app, studio_view, (960.0, 640.0), Env::new(true, 1.0));
+    compact.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("llm")));
+        app.right_tab = RightTab::Inspector;
+    });
+    compact.frame(1.0);
+    compact.frame(2.0);
+    read(&compact, "960", &["prompt", "system"]);
+    let mut aside = runtime_for(StudioApp::from_registry().spell.clone());
+    aside.update(|app, _| {
+        app.toss(magicklala_canvas::Toss::Aside(NodeId::from("recall")));
+        app.canvas.select(Some(NodeId::from("llm")));
+        app.right_tab = RightTab::Inspector;
+    });
+    aside.frame(1.0);
+    aside.frame(2.0);
+    read(&aside, "1280-aside", &["prompt", "system"]);
+    Ok(json!({ "chips": chips }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11645,6 +11679,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("hex-marks") => hex_marks(),
         Some("grimoire-tags") => grimoire_tags(),
         Some("plug-voices") => plug_voices(),
+        Some("chip-outputs") => chip_outputs(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

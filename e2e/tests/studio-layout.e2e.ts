@@ -900,3 +900,15 @@ test('One verb reads one way: the open Plug in toggle is never filled red and sh
   expect(report.darkRingContrast).toBeGreaterThanOrEqual(3);
   expect(report.lightRingContrast).toBeGreaterThanOrEqual(3);
 });
+
+test('A source chip never cuts its output name: at 960 and in the 1280 set-aside scene every Unplug chip on Generate Text stays inside the panel, and its output name is either shown whole or left out because the source has no other output of that type', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['chip-outputs']);
+
+  expect(report.chips).toHaveLength(4);
+  for (const chip of report.chips) {
+    expect(chip.inside, `${chip.scene} ${chip.socket}`).toBe(true);
+    expect(chip.cut, `${chip.scene} ${chip.socket}`).toBe(false);
+  }
+  expect(report.chips.find((chip: { scene: string; socket: string }) => chip.scene === '960' && chip.socket === 'prompt').output).toBe('· content');
+  expect(report.chips.find((chip: { scene: string; socket: string }) => chip.scene === '960' && chip.socket === 'system').output).toBeNull();
+});
