@@ -843,3 +843,10 @@ test('A Plug in list left open behind another tab never swallows Undo: open it, 
   expect(report.afterUndo).toBe(report.before);
   expect(report.menuLeftOpen).toBe(false);
 });
+
+test('Each bottle takes its colour from the ingredients that fed it: in a two-arm brew the Delay on the second arm tints only the second bottle, never the first', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['own-bottle-tint']);
+
+  expect(report.second).toBe(report.delayTone);
+  expect(report.first).not.toBe(report.delayTone);
+});

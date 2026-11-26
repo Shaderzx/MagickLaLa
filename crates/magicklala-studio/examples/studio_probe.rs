@@ -4635,6 +4635,35 @@ fn hidden_plug_undo() -> Result<serde_json::Value, String> {
     rt.frame(3.0);
     Ok(json!({ "before": before, "added": added, "afterUndo": rt.state.spell.variables.len(), "menuLeftOpen": rt.state.plug_menu.is_some() }))
 }
+fn own_bottle_tint() -> Result<serde_json::Value, String> {
+    let mut spell = SpellGraph::new("Two Arms");
+    spell.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("fork", "flow/split", 150.0, serde_json::Value::Null),
+        studio_node("wait", "time/delay", 300.0, json!({ "ms": 30 })),
+        studio_node("first", "io/send_message", 450.0, json!({ "content": "A" })),
+        studio_node("second", "io/send_message", 450.0, json!({ "content": "B" })),
+    ];
+    spell.wires = vec![
+        studio_wire("t1", ("trigger", "out"), ("fork", "in")),
+        studio_wire("t2", ("fork", "out_0"), ("first", "in")),
+        studio_wire("t3", ("fork", "out_1"), ("wait", "in")),
+        studio_wire("t4", ("wait", "out"), ("second", "in")),
+    ];
+    let mut rt = headless(StudioApp::with_spell(spell, registry_specs()));
+    click(&mut rt, "run-spell")?;
+    live_finish(&mut rt)?;
+    let plan = magicklala_canvas::brew_plan(&rt.state.canvas, rt.state.canvas_size());
+    let light = rt.state.canvas.light;
+    let tint = |color: Option<rune::Color>| color.map(|c| format!("{:.3},{:.3},{:.3}", c.r, c.g, c.b));
+    let tone = |category: &str| tint(Some(magicklala_canvas::hearth::category_tone(category, light).liquid));
+    Ok(json!({
+        "first": tint(magicklala_canvas::cauldron::bottle_tint(&rt.state.canvas, &plan, &NodeId::from("first"))),
+        "second": tint(magicklala_canvas::cauldron::bottle_tint(&rt.state.canvas, &plan, &NodeId::from("second"))),
+        "delayTone": tone(&rt.state.canvas.card(&NodeId::from("wait")).map(|card| card.category.clone()).unwrap_or_default()),
+        "statuses": rt.state.canvas.nodes.iter().map(|card| format!("{}:{:?}", card.id.0, card.status)).collect::<Vec<_>>(),
+    }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11409,6 +11438,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("check-routes") => check_routes(),
         Some("plug-routes") => plug_routes(),
         Some("hidden-plug-undo") => hidden_plug_undo(),
+        Some("own-bottle-tint") => own_bottle_tint(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),
