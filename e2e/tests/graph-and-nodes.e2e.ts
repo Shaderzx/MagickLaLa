@@ -1276,3 +1276,37 @@ test('typed braces in a Send Message content are sent as typed even when a varia
     expect(summaryOf(run)?.replies).toEqual(['{{note}}']);
   }, { variables: [{ name: 'note', ty: 'string' }] });
 });
+
+test('a typed while_loop limit that is not a whole number of at least 1 fails the loop by name instead of running to the default', async () => {
+  for (const limit of ['abc', -3]) {
+    const nodes = [
+      spellNode('start', 'event/on_start'),
+      spellNode('always', 'logic/regex_match', { text: 'go', pattern: 'go' }),
+      spellNode('loop', 'flow/while_loop', { max_iterations: limit }),
+      spellNode('tick', 'var/set', { name: 'ticks', value: 1 }),
+    ];
+    const wires = [spellWire('w_start', 'start', 'out', 'loop', 'in'), spellWire('w_condition', 'always', 'matched', 'loop', 'condition'), spellWire('w_body', 'loop', 'body', 'tick', 'in')];
+    await withSpellFile(nodes, wires, async (path) => {
+      const run = await runSpell([path], {});
+      expect(run.code).toBe(1);
+      expect(run.events.filter((event) => event.event === 'node_finished' && event.node_id === 'tick').length).toBe(0);
+      expect(failureOf(run, 'loop')).toContain('max_iterations must be a whole number of at least 1');
+    });
+  }
+});
+
+test('a negative wait wired into Delay fails the Delay by name instead of waiting no time', async () => {
+  const nodes = [
+    spellNode('start', 'event/on_start'),
+    spellNode('read', 'var/get', { name: 'ms' }),
+    spellNode('wait', 'time/delay'),
+    spellNode('reply', 'io/send_message', { content: 'Ready' }),
+  ];
+  const wires = [spellWire('w1', 'start', 'out', 'wait', 'in'), spellWire('w2', 'read', 'value', 'wait', 'ms'), spellWire('w3', 'wait', 'out', 'reply', 'in')];
+  await withSpellFile(nodes, wires, async (path) => {
+    const run = await runSpell([path], {});
+    expect(run.code).toBe(1);
+    expect(failureOf(run, 'wait')).toContain('ms needs a whole number of at least 0, but got -5');
+    expect(run.events.some((event) => event.event === 'node_finished' && event.node_id === 'reply')).toBe(false);
+  }, { variables: [{ name: 'ms', ty: 'int', default: { type: 'int', value: -5 } }] });
+});
