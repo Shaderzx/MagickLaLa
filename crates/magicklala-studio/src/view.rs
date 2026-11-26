@@ -1869,10 +1869,14 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             let name = socket.name.clone();
             let node = card.id.clone();
             let wire_id = app.canvas.wires.iter().find(|w| w.to_node == card.id && w.to_socket == socket.name).map(|w| w.id.clone());
+            let menu_open = app.plug_menu.as_ref().is_some_and(|(node, open)| node == &card.id && open == &socket.name);
             let action = match wire_id {
                 Some(wire) => row()
                     .key(format!("unplug-{name}"))
-                    .label(format!("Unplug {name}"))
+                    .label(match &fed_from {
+                        Some((step, output)) => format!("Unplug {name} from {step} · {output}"),
+                        None => format!("Unplug {name}"),
+                    })
                     .min_h(24.0)
                     .min_w(24.0)
                     .max_w(if compact { 168.0 } else { 190.0 })
@@ -1902,10 +1906,10 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                     .continuous_corners()
                     .items_center()
                     .justify_center()
-                    .fill(if flagged { t.hex } else { t.card })
-                    .border(1.0, if flagged { t.hex } else { t.rule_2 })
-                    .shadow(1.0, 3.0, with_alpha(t.ink, 0.08))
-                    .child(label("Plug in", 11.0, 700.0, if flagged { t.primary_ink } else { t.ink }))
+                    .fill(if menu_open { t.wash_2 } else { t.card })
+                    .border(if menu_open { 1.4 } else { 1.0 }, if menu_open { t.ink_2 } else { t.rule_2 })
+                    .shadow(if menu_open { 0.0 } else { 1.0 }, 3.0, with_alpha(t.ink, 0.08))
+                    .child(label("Plug in", 11.0, 700.0, t.ink))
                     .on_press(move |app: &mut StudioApp| app.toggle_plug_menu(&node, &name)),
             };
             right_meta = right_meta.child(action);
@@ -2076,7 +2080,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                 .border(1.4, t.hex)
                 .child(label(headline, 12.0, 750.0, t.hex).wrap())
                 .child(actions.children(
-                    flagged_socket.is_some().then(|| button_el("inspector-open-grimoire", "Grimoire", ButtonKind::Secondary, 8.0, t, StudioApp::open_grimoire)),
+                    flagged_socket.is_some().then(|| button_el("inspector-open-grimoire", "Open in Grimoire", ButtonKind::Secondary, 8.0, t, StudioApp::open_grimoire)),
                 )),
         );
     }

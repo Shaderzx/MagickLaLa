@@ -254,7 +254,7 @@ impl HearthPalette {
     }
 
     pub fn selection_ring(&self) -> Color {
-        if self.light { self.ink } else { self.primary_bg }
+        self.ink
     }
 
     pub fn summary_ink(&self) -> Color {
