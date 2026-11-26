@@ -3855,6 +3855,10 @@ impl StudioApp {
         true
     }
 
+    pub fn plug_menu_shown(&self) -> bool {
+        self.plug_menu.as_ref().is_some_and(|(node, _)| self.right_tab == RightTab::Inspector && self.canvas.selection.as_ref() == Some(node))
+    }
+
     pub fn has_open_popover(&self) -> bool {
         self.pantry_drag.is_some()
             || self.canvas.context_menu.is_some()
@@ -3863,7 +3867,7 @@ impl StudioApp {
             || self.pending_type_reset.is_some()
             || self.pending_restore_version.is_some()
             || self.pending_switch.is_some()
-            || self.plug_menu.is_some()
+            || self.plug_menu_shown()
     }
 
     pub fn dismiss_topmost(&mut self) -> bool {
@@ -4450,6 +4454,9 @@ fn remember_size(size: (f32, f32)) {
 }
 
 pub fn studio_key(app: &mut StudioApp, key: &rune::KeyEvent, _: &mut rune::Tx) -> bool {
+    if !app.plug_menu_shown() {
+        app.plug_menu = None;
+    }
     if key.key == rune::Key::Escape {
         return app.dismiss_topmost();
     }
