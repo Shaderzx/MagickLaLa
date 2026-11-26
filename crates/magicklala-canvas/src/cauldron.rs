@@ -754,14 +754,38 @@ pub fn pour_paths(state: &CanvasState, plan: &BrewPlan) -> Vec<(NodeId, Vec<[f32
                         [u * u * corner[0] + 2.0 * u * t * lane_x + t * t * lane_x, u * u * from[1] + 2.0 * u * t * from[1] + t * t * (from[1] + bend)]
                     }));
                     let drop_end = turn[1] - elbow;
-                    points.extend((1..=12).map(|step| [lane_x, from[1] + bend + (drop_end - from[1] - bend) * step as f32 / 12.0]));
+                    let drop_top = from[1] + bend;
+                    let reach = (mates as f32 - 1.0) * 0.5 * strand;
+                    let phase = rank as f32 * std::f32::consts::TAU / mates as f32;
+                    let cycles = ((drop_end - drop_top).abs() / (46.0 * plan.scale)).max(3.0);
+                    let ease = |edge: f32, x: f32| {
+                        let k = (x / edge).clamp(0.0, 1.0);
+                        k * k * (3.0 - 2.0 * k)
+                    };
+                    points.extend((1..=48).map(|step| {
+                        let t = step as f32 / 48.0;
+                        let weave = ease(0.18, t) * ease(0.18, 1.0 - t);
+                        let sway = reach * (std::f32::consts::TAU * cycles * t + phase).sin() - offset * strand;
+                        [lane_x + weave * sway, drop_top + (drop_end - drop_top) * t]
+                    }));
                     let start = if run > 1.0 {
                         points.extend((1..=6).map(|step| {
                             let t = step as f32 / 6.0;
                             let u = 1.0 - t;
                             [u * u * lane_x + 2.0 * u * t * lane_x + t * t * (lane_x - elbow), u * u * drop_end + 2.0 * u * t * turn[1] + t * t * turn[1]]
                         }));
-                        points.extend((1..=6).map(|step| [lane_x - elbow + (clear_x - lane_x + elbow) * step as f32 / 6.0, turn[1]]));
+                        let crowd = ingredients.len() as f32;
+                        let rope = (crowd - 1.0) * 0.5 * step;
+                        let rope_phase = lane_rank * std::f32::consts::TAU / crowd.max(1.0);
+                        let run_len = (clear_x - lane_x + elbow).abs();
+                        let rope_cycles = (run_len / (60.0 * plan.scale)).max(1.0);
+                        let settle = turn[1] - (floor - (crowd - 1.0) * 0.5 * step);
+                        points.extend((1..=40).map(|k| {
+                            let t = k as f32 / 40.0;
+                            let weave = ease(0.15, t) * ease(0.15, 1.0 - t);
+                            let sway = rope * (std::f32::consts::TAU * rope_cycles * t + rope_phase).sin() - settle;
+                            [lane_x - elbow + (clear_x - lane_x + elbow) * t, turn[1] + weave * sway]
+                        }));
                         [clear_x, turn[1]]
                     } else {
                         turn
