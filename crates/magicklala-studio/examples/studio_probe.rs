@@ -1558,6 +1558,12 @@ fn capture_surfaces(out_dir: &Path) -> Result<serde_json::Value, String> {
     save("24-plug-in-menu-1280x800.png", plugging(false, (1280.0, 800.0)))?;
     save("25-plug-in-menu-dark-960x640.png", plugging(true, (960.0, 640.0)))?;
 
+    let mut aside_undo = base_desktop();
+    aside_undo.toss(magicklala_canvas::Toss::Aside(NodeId::from("recall")));
+    aside_undo.canvas.select(Some(NodeId::from("llm")));
+    aside_undo.right_tab = RightTab::Inspector;
+    save("26-set-aside-undo-1280x800.png", aside_undo)?;
+
     Ok(json!({ "surfaces": files }))
 }
 
