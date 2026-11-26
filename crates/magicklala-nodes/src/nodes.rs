@@ -164,7 +164,9 @@ fn required_config(ctx: &dyn NodeContext, key: &str) -> Result<String, NodeError
 pub(crate) fn config_u64(ctx: &dyn NodeContext, key: &str, default: u64) -> Result<u64, NodeError> {
     match ctx.node().config.get(key) {
         None | Some(serde_json::Value::Null) => Ok(default),
-        Some(value) => magicklala_graph::whole_number(value).ok_or_else(|| NodeError::Other(format!("{key} needs a whole number of at least 0, but got {value}"))),
+        Some(value) => {
+            magicklala_graph::whole_number(value).ok_or_else(|| NodeError::Other(format!("{key} needs a whole number of at least 0, but got {value}")))
+        }
     }
 }
 

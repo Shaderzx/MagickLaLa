@@ -4485,7 +4485,10 @@ fn fix_fits() -> Result<serde_json::Value, String> {
 fn literal_braces() -> Result<serde_json::Value, String> {
     let spell_with = |variables: Vec<magicklala_graph::VariableDef>| {
         let mut spell = SpellGraph::new("Literal Braces");
-        spell.nodes = vec![studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null), studio_node("reply", "io/send_message", 260.0, json!({ "content": "{{note}}" }))];
+        spell.nodes = vec![
+            studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+            studio_node("reply", "io/send_message", 260.0, json!({ "content": "{{note}}" })),
+        ];
         spell.wires = vec![studio_wire("w1", ("trigger", "out"), ("reply", "in"))];
         spell.variables = variables;
         spell
@@ -4520,7 +4523,9 @@ fn rename_reach() -> Result<serde_json::Value, String> {
         app.sync_edits();
     });
     rt.frame(0.0);
-    let setting = |app: &StudioApp, id: &str, key: &str| app.spell.nodes.iter().find(|node| node.id.0 == id).and_then(|node| node.config.get(key).cloned()).unwrap_or_default();
+    let setting = |app: &StudioApp, id: &str, key: &str| {
+        app.spell.nodes.iter().find(|node| node.id.0 == id).and_then(|node| node.config.get(key).cloned()).unwrap_or_default()
+    };
     Ok(json!({
         "variables": rt.state.spell.variables.iter().map(|variable| variable.name.clone()).collect::<Vec<_>>(),
         "setName": setting(&rt.state, "keep", "name"),
@@ -4581,7 +4586,10 @@ fn check_routes() -> Result<serde_json::Value, String> {
 fn plug_routes() -> Result<serde_json::Value, String> {
     let offered = |spell: SpellGraph| {
         let app = StudioApp::with_spell(spell, registry_specs());
-        app.earlier_fitting_outputs(&NodeId::from("reply"), "content").into_iter().map(|source| format!("{}.{}", source.node.0, source.socket)).collect::<Vec<_>>()
+        app.earlier_fitting_outputs(&NodeId::from("reply"), "content")
+            .into_iter()
+            .map(|source| format!("{}.{}", source.node.0, source.socket))
+            .collect::<Vec<_>>()
     };
     let routed = |join: bool| {
         let mut spell = SpellGraph::new("Routes");

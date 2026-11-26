@@ -1840,11 +1840,6 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         } else {
             el().size(7.0, 7.0).radius(2.0).fill(t.card).border(1.5, stream_ink(&card.category, light))
         };
-        let mut right_meta = row().gap(8.0).items_center().shrink();
-        if flagged {
-            right_meta = right_meta
-                .child(label(if socket.mistyped { "Wrong type" } else { "Missing" }, 10.5, 700.0, t.hex).key(format!("socket-missing-{}", socket.name)));
-        }
         let fed_from = app
             .canvas
             .wires
@@ -1855,6 +1850,21 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
         let stand_in = is_input && app.is_stand_in(&card.id, &socket.name);
         let name_weight = if socket.ty.is_flow() || flagged { 650.0 } else { 500.0 };
         let name_room = 16.5 + studio_text_width(&socket.name, if compact { 11.5 } else { 12.0 }, name_weight).min(if compact { 96.0 } else { 120.0 });
+        let type_shown = !(compact && fed_from.is_some());
+        let status_w = if flagged { studio_text_width(if socket.mistyped { "Wrong type" } else { "Missing" }, 10.5, 700.0) + 8.0 } else { 0.0 };
+        let chip_w = fed_from.as_ref().filter(|_| has_plug_button).map_or(0.0, |(step, _)| {
+            16.0 + studio_text_width(step, 10.5, 650.0)
+                + 5.0
+                + studio_text_width("✕", 10.5, 700.0)
+                + if stand_in { studio_text_width("stand-in", 10.0, 700.0) + 5.0 } else { 0.0 }
+        });
+        let type_w = if type_shown { studio_text_width(&format!("{:?}", socket.ty), if compact { 10.5 } else { 11.0 }, 550.0) + 8.0 } else { 0.0 };
+        let needs_wrap = chip_w > 0.0 && name_room + 8.0 + status_w + chip_w + type_w > app.inspector_width() - 28.0;
+        let mut right_meta = if needs_wrap { row().gap(8.0).items_center().grow(1.0).justify_end() } else { row().gap(8.0).items_center().shrink() };
+        if flagged {
+            right_meta = right_meta
+                .child(label(if socket.mistyped { "Wrong type" } else { "Missing" }, 10.5, 700.0, t.hex).key(format!("socket-missing-{}", socket.name)));
+        }
         if has_plug_button {
             let name = socket.name.clone();
             let node = card.id.clone();
@@ -1876,6 +1886,7 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                     .border(if stand_in { 1.4 } else { 1.0 }, if stand_in { t.gold } else { t.rule_2 })
                     .shadow(1.0, 3.0, with_alpha(t.ink, 0.08))
                     .shrink()
+                    .min_w(if needs_wrap { chip_w } else { 24.0 })
                     .children(stand_in.then(|| label("stand-in", 10.0, 700.0, t.gold)))
                     .children(fed_from.clone().map(|(step, _)| label(step, 10.5, 650.0, t.ink).key(format!("plug-source-{name}"))))
                     .children(fed_from.clone().map(|(_, output)| label(format!("· {output}"), 10.5, 500.0, t.ink_2).truncate().shrink()))
@@ -1899,10 +1910,10 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
             };
             right_meta = right_meta.child(action);
         }
-        if !(compact && fed_from.is_some()) {
+        if type_shown {
             right_meta = right_meta.child(label(format!("{:?}", socket.ty), if compact { 10.5 } else { 11.0 }, 550.0, if flagged { t.hex } else { t.mute }));
         }
-        row()
+        let socket_row = row()
             .w_full()
             .min_h(socket_h)
             .py(if has_plug_button { 0.0 } else { 2.0 })
@@ -1923,7 +1934,8 @@ fn inspector_body(app: &StudioApp, light: bool, t: &HearthPalette) -> El {
                     ),
                 ),
             )
-            .child(right_meta)
+            .child(right_meta);
+        if needs_wrap { socket_row.flex_wrap() } else { socket_row }
     };
     let plug_menu_el = |socket: &magicklala_canvas::SocketModel| -> Option<El> {
         let (node, name) = app.plug_menu.as_ref()?;

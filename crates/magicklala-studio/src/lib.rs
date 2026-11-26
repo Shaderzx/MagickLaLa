@@ -1395,7 +1395,8 @@ impl StudioApp {
                 cfg.as_object().is_some_and(|map| {
                     (renders && map.values().any(|v| v.as_str().is_some_and(|s| s.contains(&template_token))))
                         || map.iter().any(|(key, value)| {
-                            self.specs.iter().any(|spec| spec.kind == card.kind && spec.binds_setting(key)) && magicklala_graph::bound_variable(value) == Some(name)
+                            self.specs.iter().any(|spec| spec.kind == card.kind && spec.binds_setting(key))
+                                && magicklala_graph::bound_variable(value) == Some(name)
                         })
                         || (card.kind.starts_with("var/") && map.get("name").and_then(serde_json::Value::as_str) == Some(name))
                 })
@@ -1919,7 +1920,8 @@ impl StudioApp {
             }
         }
         let graph = self.brew_graph();
-        let is_flow = |wire: &magicklala_graph::Wire| self.input_type(&SocketRef::new(wire.to_node.clone(), wire.to_socket.clone())).is_some_and(|ty| ty.is_flow());
+        let is_flow =
+            |wire: &magicklala_graph::Wire| self.input_type(&SocketRef::new(wire.to_node.clone(), wire.to_socket.clone())).is_some_and(|ty| ty.is_flow());
         let readers = flow_readers(&graph, node, &is_flow);
         let mut ready: HashMap<NodeId, bool> = HashMap::new();
         let mut fitting: Vec<(bool, bool, SocketRef)> = self
@@ -2679,7 +2681,8 @@ impl StudioApp {
                 if let Some(name) = settings.get_mut("name").filter(|name| name.as_str().is_some_and(|name| name.trim() == old)) {
                     *name = serde_json::Value::String(new.to_owned());
                 }
-            } else if kind == "text/template" && !fed.contains(id)
+            } else if kind == "text/template"
+                && !fed.contains(id)
                 && let Some(template) = settings.get_mut("template")
                 && let Some(text) = template.as_str().filter(|text| template_roots(text).iter().any(|root| root == old))
             {
@@ -3364,8 +3367,8 @@ impl StudioApp {
                 let problem = match &value {
                     _ if !type_fits => Some(format!("holds {}", type_words(variable.ty))),
                     None if !set_earlier_on_route(&graph, &node.id, name, |wire| {
-                            self.input_type(&SocketRef::new(wire.to_node.clone(), wire.to_socket.clone())).is_some_and(|ty| ty.is_flow())
-                        }) =>
+                        self.input_type(&SocketRef::new(wire.to_node.clone(), wire.to_socket.clone())).is_some_and(|ty| ty.is_flow())
+                    }) =>
                     {
                         Some("has no value".to_owned())
                     }
