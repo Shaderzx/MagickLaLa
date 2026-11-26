@@ -931,3 +931,10 @@ test('A big rack glows no louder than one bottle: when 8 or 14 ribbons share a r
     expect(theme.fourteen).toBeCloseTo(theme.one, 4);
   }
 });
+
+test('Rack seals keep off the glass: after brewing the crowded kitchen at 1280 and 960 every bottle seal keeps at least 2 points of air from the glass pipes that feed the rack', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['seal-air']);
+
+  expect(report.sizes).toHaveLength(2);
+  for (const size of report.sizes) expect(size.air, String(size.width)).toBeGreaterThanOrEqual(2);
+});
