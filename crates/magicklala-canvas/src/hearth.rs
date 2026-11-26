@@ -1344,6 +1344,7 @@ pub fn ribbon_halo_alpha(light: bool, ribbons: usize) -> f32 {
     1.0 - (1.0 - single).powf(1.0 / ribbons.max(1) as f32)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn distillation_ribbon_shape(
     mut shape: Shape,
     pts: &[[f32; 2]],
