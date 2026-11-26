@@ -4828,8 +4828,10 @@ fn grimoire_tags() -> Result<serde_json::Value, String> {
     Ok(json!({ "covered": covered, "cutTitles": cut, "zoom": rt.state.canvas.camera.zoom }))
 }
 fn plug_voices() -> Result<serde_json::Value, String> {
-    let label_of = |rt: &Runtime<StudioApp>, key: &str| rt.elements().into_iter().find(|element| element.key.as_deref() == Some(key)).and_then(|element| element.label);
-    let fill_of = |rt: &Runtime<StudioApp>, key: &str| rt.elements().into_iter().find(|element| element.key.as_deref() == Some(key)).map(|element| element.fill);
+    let label_of =
+        |rt: &Runtime<StudioApp>, key: &str| rt.elements().into_iter().find(|element| element.key.as_deref() == Some(key)).and_then(|element| element.label);
+    let fill_of =
+        |rt: &Runtime<StudioApp>, key: &str| rt.elements().into_iter().find(|element| element.key.as_deref() == Some(key)).map(|element| element.fill);
     let mut demo = StudioApp::from_registry().spell.clone();
     demo.wires.retain(|wire| !(wire.to_node.0 == "recall" && wire.to_socket == "query"));
     let mut rt = runtime_for(demo);
