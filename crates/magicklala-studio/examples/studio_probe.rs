@@ -4742,6 +4742,49 @@ fn selection_rings() -> Result<serde_json::Value, String> {
     let grimoire_failed = ringed(&book, "llm", "node-llm");
     Ok(json!({ "rackTaken": rack_taken, "soloHexed": solo_hexed, "grimoireFailed": grimoire_failed }))
 }
+fn hex_marks() -> Result<serde_json::Value, String> {
+    let mut views = Vec::new();
+    for (size, pantry) in [((960.0, 640.0), true), ((960.0, 640.0), false), ((1280.0, 800.0), false)] {
+        let mut app = StudioApp::with_spell(dozen_ingredient_spell(), registry_specs());
+        app.size = size;
+        let mut rt = Runtime::new(app, studio_view, size, Env::new(true, 1.0));
+        rt.frame(0.0);
+        if pantry && rt.find("expand-nodes").is_some() {
+            click(&mut rt, "expand-nodes")?;
+            rt.frame(1.0);
+        }
+        let _ = validation_of(&mut rt)?;
+        rt.update(|app, _| app.canvas.select(None));
+        rt.frame(2.0);
+        rt.frame(3.0);
+        let ids: Vec<String> = rt.state.canvas.nodes.iter().map(|card| card.id.0.clone()).collect();
+        let mut on_icon = Vec::new();
+        let mut unquoted = Vec::new();
+        let mut tightest: f32 = f32::MAX;
+        for id in &ids {
+            let Some(pill) = layout_rect(&rt, &format!("status-pill-{id}")) else { continue };
+            if layout_rect(&rt, &format!("vial-{id}")).is_some_and(|vial| rects_touch(pill, vial)) {
+                on_icon.push(id.clone());
+            }
+            for line in texts_under(&mut rt, &format!("status-pill-{id}")).split('\n') {
+                if (line.starts_with("Missing ") || line.starts_with("No ") || line.starts_with("Wrong ")) && !line.contains('"') {
+                    unquoted.push(line.to_owned());
+                }
+            }
+            for other in ids.iter().filter(|other| *other != id) {
+                if let Some(card) = layout_rect(&rt, &format!("node-{other}")) {
+                    let overlaps_x = card[0] < pill[0] + pill[2] && pill[0] < card[0] + card[2];
+                    let gap = pill[1] - (card[1] + card[3]);
+                    if overlaps_x && gap > -pill[3] && card[1] < pill[1] {
+                        tightest = tightest.min(gap);
+                    }
+                }
+            }
+        }
+        views.push(json!({ "width": size.0, "pantry": pantry, "onIcon": on_icon, "unquoted": unquoted, "tightestAbove": if tightest == f32::MAX { None } else { Some(tightest) }, "plaque": texts_under(&mut rt, "cauldron-plaque") }));
+    }
+    Ok(json!({ "views": views }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11519,6 +11562,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("own-bottle-tint") => own_bottle_tint(),
         Some("squeezed-unplug") => squeezed_unplug(),
         Some("selection-rings") => selection_rings(),
+        Some("hex-marks") => hex_marks(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

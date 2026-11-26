@@ -868,3 +868,15 @@ test('A selected card always wears a selection ring, even when it is red or brew
   expect(report.soloHexed).toEqual({ ring: true, encloses: true });
   expect(report.grimoireFailed).toEqual({ ring: true, encloses: true });
 });
+
+test('Red marks on a crowded recipe stay readable: at 960 with and without the Pantry and at 1280, no mark sits on an ingredient icon, every missing input keeps its quotes, every pill keeps at least 2 points from the card above, and the plaque counts the 8 issues', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['hex-marks']);
+
+  expect(report.views).toHaveLength(3);
+  for (const view of report.views) {
+    expect(view.onIcon).toEqual([]);
+    expect(view.unquoted).toEqual([]);
+    expect(view.tightestAbove ?? 99).toBeGreaterThanOrEqual(2);
+    expect(view.plaque).toBe('Hexed · 8 issues');
+  }
+});
