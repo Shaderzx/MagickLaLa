@@ -4707,6 +4707,41 @@ fn squeezed_unplug() -> Result<serde_json::Value, String> {
         "source": texts_under(&mut rt, "plug-source-replace_with"),
     }))
 }
+fn selection_rings() -> Result<serde_json::Value, String> {
+    let ringed = |rt: &Runtime<StudioApp>, id: &str, inner: &str| {
+        let ring = layout_rect(rt, &format!("selection-ring-{id}"));
+        let body = layout_rect(rt, inner);
+        json!({ "ring": ring.is_some(), "encloses": ring.zip(body).is_some_and(|(r, b)| r[0] <= b[0] && r[1] <= b[1] && r[0] + r[2] >= b[0] + b[2] && r[1] + r[3] >= b[1] + b[3]) })
+    };
+    let mut rack = headless(StudioApp::with_spell(many_bottle_spell(8), registry_specs()));
+    click(&mut rack, "run-spell")?;
+    live_finish(&mut rack)?;
+    rack.update(|app, _| app.canvas.select(Some(NodeId::from("reply_0"))));
+    rack.frame(2.0);
+    let rack_taken = ringed(&rack, "reply_0", "bottle-tag-reply_0");
+
+    let mut hollow = StudioApp::from_registry().spell.clone();
+    let reply = hollow.nodes.iter().find(|node| node.kind == "io/send_message").map(|node| node.id.0.clone()).ok_or("no reply")?;
+    hollow.wires.retain(|wire| wire.to_node.0 != reply || wire.to_socket != "content");
+    let mut solo = runtime_for(hollow);
+    let _ = validation_of(&mut solo)?;
+    let chosen = NodeId::from(reply.as_str());
+    solo.update(move |app, _| app.canvas.select(Some(chosen.clone())));
+    solo.frame(2.0);
+    let solo_hexed = ringed(&solo, &reply, "potion-tag");
+
+    let mut book = runtime_for(StudioApp::from_registry().spell.clone());
+    click(&mut book, "mode-grimoire")?;
+    book.update(|app, _| {
+        if let Some(card) = app.canvas.nodes.iter_mut().find(|card| card.id.0 == "llm") {
+            card.status = ExecutionStatus::Failed;
+        }
+        app.canvas.select(Some(NodeId::from("llm")));
+    });
+    book.frame(2.0);
+    let grimoire_failed = ringed(&book, "llm", "node-llm");
+    Ok(json!({ "rackTaken": rack_taken, "soloHexed": solo_hexed, "grimoireFailed": grimoire_failed }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11483,6 +11518,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("hidden-plug-undo") => hidden_plug_undo(),
         Some("own-bottle-tint") => own_bottle_tint(),
         Some("squeezed-unplug") => squeezed_unplug(),
+        Some("selection-rings") => selection_rings(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

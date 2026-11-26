@@ -860,3 +860,11 @@ test('At 960 a Wrong type row keeps its Unplug button usable: the button stays a
   expect(report.nameInsideButton).toBe(true);
   expect(report.source).toBe('On Message');
 });
+
+test('A selected card always wears a selection ring, even when it is red or brewed: a brewed rack bottle, a hexed solo bottle and a failed Grimoire card each get a ring around them once selected', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['selection-rings']);
+
+  expect(report.rackTaken).toEqual({ ring: true, encloses: true });
+  expect(report.soloHexed).toEqual({ ring: true, encloses: true });
+  expect(report.grimoireFailed).toEqual({ ring: true, encloses: true });
+});
