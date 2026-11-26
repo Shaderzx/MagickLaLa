@@ -215,7 +215,7 @@ async fn switch(ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeError> {
 
 async fn delay(ctx: &mut dyn NodeContext) -> Result<NodeOutcome, NodeError> {
     let millis = match ctx.input("ms").await? {
-        Some(Value::Int(millis)) => u64::try_from(millis).unwrap_or_default(),
+        Some(Value::Int(millis)) => u64::try_from(millis).map_err(|_| NodeError::Other(format!("ms needs a whole number of at least 0, but got {millis}")))?,
         _ => config_u64(ctx, "ms", 1000)?,
     };
     let cancellation = ctx.cancellation();

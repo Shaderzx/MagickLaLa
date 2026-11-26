@@ -732,8 +732,13 @@ impl RunState {
         let Some(setting) = self.instances.get(node).and_then(|instance| instance.config.get("max_iterations")) else {
             return Ok(DEFAULT_WHILE_LOOP_MAX_ITERATIONS);
         };
+        if setting.is_null() {
+            return Ok(DEFAULT_WHILE_LOOP_MAX_ITERATIONS);
+        }
         let Some(name) = bound_variable(setting) else {
-            return Ok(whole_number(setting).unwrap_or(DEFAULT_WHILE_LOOP_MAX_ITERATIONS).max(1));
+            return whole_number(setting)
+                .filter(|limit| *limit >= 1)
+                .ok_or_else(|| NodeError::Other(format!("while loop max_iterations must be a whole number of at least 1, but got {setting}")));
         };
         let value = locked(&self.variables).get(name).map(Value::to_json);
         let whole = value.as_ref().and_then(whole_number);
