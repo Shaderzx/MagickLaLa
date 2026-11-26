@@ -4820,7 +4820,7 @@ fn grimoire_tags() -> Result<serde_json::Value, String> {
         let head = title.split(" · ").next().unwrap_or_default().to_owned();
         if let Some((_, rect)) = text_lines_under(&rt, &format!("node-{}-header", card.id.0)).into_iter().find(|(line, _)| line.starts_with(head.as_str())) {
             let (natural, _) = measure.measure(&head, rune::TextStyle::new(title_size, 750.0), 1.0);
-            if natural > rect[2] + 0.5 {
+            if natural > rect[2] + 2.0 {
                 cut.push(title);
             }
         }
