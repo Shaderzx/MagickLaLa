@@ -561,6 +561,17 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
     shell
 }
 
+fn selection_ring(inner: El, id: &magicklala_graph::NodeId, radius: f32, state: &CanvasState, p: &HearthPalette) -> El {
+    el().key(format!("selection-ring-{}", id.0))
+        .mx(-4.0)
+        .my(-4.0)
+        .padding(4.0)
+        .radius(radius + 4.0)
+        .continuous_corners()
+        .border(2.4, if state.light { p.ink } else { p.primary_bg })
+        .child(inner)
+}
+
 fn compact_hex_mark(reason: &str, font_size: f32, p: &HearthPalette) -> El {
     row()
         .label(reason.to_owned())
@@ -707,7 +718,7 @@ pub(crate) fn branch_bottle_view<S: 'static>(
         (!(chipless_when_taken && taken))
             .then(|| row().w_full().pl(8.0).pr(22.0).justify_end().absolute(0.0, -8.0).child(el().key(format!("bottle-pill-{}", card.id.0)).child(pill))),
     );
-    let tag = col().w_full().child(tag_wrap);
+    let tag = col().w_full().child(if card.selected && (taken || hexed) { selection_ring(tag_wrap, &card.id, 12.0, state, p) } else { tag_wrap });
     let select_id = card.id.clone();
     col()
         .key(format!("node-{}-header", card.id.0))
@@ -933,6 +944,11 @@ pub(crate) fn potion_stand_view<S: 'static>(
     }
 
     let stand = col().key("potion-stand").w(width).gap(4.0).items_center().absolute(pos[0], pos[1]);
+    let tag_card = tag_card.key("potion-tag");
+    let tag_card = match primary_output.filter(|_| selected && hexed) {
+        Some(output) => col().w_full().child(selection_ring(tag_card, &output.id, 14.0, state, p)),
+        None => tag_card,
+    };
     let mut stand = stand.child(bottle_art).child(tag_card);
 
     if let Some(id) = select_id {
@@ -1293,6 +1309,16 @@ fn grimoire_card_view<S: 'static>(
         .child(face);
     let border_overlay = el().size(card_w, card_h).radius(corner).continuous_corners().border(border_width, border_color).absolute(0.0, 0.0);
     let mut shell = el().key(format!("node-{}", card.id.0)).size(card_w, card_h).absolute(x, y).child(card_frame).child(border_overlay);
+    if card.selected && card.status == ExecutionStatus::Failed {
+        shell = shell.child(
+            el().key(format!("selection-ring-{}", card.id.0))
+                .absolute(-4.0, -4.0)
+                .size(card_w + 8.0, card_h + 8.0)
+                .radius(corner + 4.0)
+                .continuous_corners()
+                .border(2.4, if state.light { p.ink } else { p.primary_bg }),
+        );
+    }
     let _ = palette;
     let inputs = card.inputs.iter().map(|socket| socket_port::<S>(state, card, socket, false, dimmed, p, zoom, lens));
     let outputs = card.outputs.iter().map(|socket| socket_port::<S>(state, card, socket, true, dimmed, p, zoom, lens));
