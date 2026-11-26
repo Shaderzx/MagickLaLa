@@ -253,6 +253,10 @@ impl HearthPalette {
         if self.light { hex(0x137B60) } else { self.broth_mid }
     }
 
+    pub fn selection_ring(&self) -> Color {
+        if self.light { self.ink } else { self.primary_bg }
+    }
+
     pub fn summary_ink(&self) -> Color {
         if self.light { self.mute } else { self.ink_2 }
     }

@@ -534,7 +534,7 @@ pub(crate) fn ingredient_vial_card<S: 'static>(
             .size(dims[0] + 10.0, dims[1] + 10.0)
             .radius(29.0)
             .continuous_corners()
-            .border(2.4, if state.light { p.ink } else { p.primary_bg })
+            .border(2.4, p.selection_ring())
     });
     let mut shell = el().key(format!("node-{}", card.id.0)).size(dims[0], dims[1]).absolute(pos[0], pos[1]).children(ring).child(content);
     if let Some(badge) = step_badge {
@@ -634,7 +634,7 @@ fn selection_ring(inner: El, id: &magicklala_graph::NodeId, radius: f32, state: 
         .padding(4.0)
         .radius(radius + 4.0)
         .continuous_corners()
-        .border(2.4, if state.light { p.ink } else { p.primary_bg })
+        .border(2.4, p.selection_ring())
         .child(inner)
 }
 
@@ -1439,7 +1439,7 @@ fn grimoire_card_view<S: 'static>(
                 .size(card_w + 8.0, card_h + 8.0)
                 .radius(corner + 4.0)
                 .continuous_corners()
-                .border(2.4, if state.light { p.ink } else { p.primary_bg }),
+                .border(2.4, p.selection_ring()),
         );
     }
     let _ = palette;
