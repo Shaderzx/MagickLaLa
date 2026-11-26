@@ -850,3 +850,13 @@ test('Each bottle takes its colour from the ingredients that fed it: in a two-ar
   expect(report.second).toBe(report.delayTone);
   expect(report.first).not.toBe(report.delayTone);
 });
+
+test('At 960 a Wrong type row keeps its Unplug button usable: the button stays at least 24 points wide inside the panel and holds its whole source step name', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['squeezed-unplug']);
+
+  expect(report.check).toBe('invalid');
+  expect(report.unplugWidth).toBeGreaterThanOrEqual(24);
+  expect(report.insidePanel).toBe(true);
+  expect(report.nameInsideButton).toBe(true);
+  expect(report.source).toBe('On Message');
+});

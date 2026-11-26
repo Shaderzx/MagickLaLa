@@ -4664,6 +4664,41 @@ fn own_bottle_tint() -> Result<serde_json::Value, String> {
         "statuses": rt.state.canvas.nodes.iter().map(|card| format!("{}:{:?}", card.id.0, card.status)).collect::<Vec<_>>(),
     }))
 }
+fn squeezed_unplug() -> Result<serde_json::Value, String> {
+    let mut spell = SpellGraph::new("Squeezed");
+    spell.nodes = vec![
+        studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+        studio_node("swap", "text/replace", 200.0, json!({ "find": "a" })),
+        studio_node("reply", "io/send_message", 400.0, serde_json::Value::Null),
+    ];
+    spell.wires = vec![
+        studio_wire("s1", ("trigger", "out"), ("reply", "in")),
+        studio_wire("s2", ("trigger", "content"), ("swap", "text")),
+        studio_wire("s3", ("trigger", "payload"), ("swap", "replace_with")),
+        studio_wire("s4", ("swap", "text"), ("reply", "content")),
+    ];
+    let mut app = StudioApp::with_spell(spell, registry_specs());
+    app.size = (960.0, 640.0);
+    let mut rt = Runtime::new(app, studio_view, (960.0, 640.0), Env::new(true, 1.0));
+    rt.frame(0.0);
+    let check = validation_of(&mut rt)?;
+    rt.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("swap")));
+        app.right_tab = RightTab::Inspector;
+    });
+    rt.frame(1.0);
+    rt.frame(2.0);
+    let unplug = layout_rect(&rt, "unplug-replace_with");
+    let named = layout_rect(&rt, "plug-source-replace_with");
+    let panel = layout_rect(&rt, "inspector");
+    Ok(json!({
+        "check": check["validation"],
+        "unplugWidth": unplug.map(|rect| rect[2]),
+        "insidePanel": unplug.zip(panel).map(|(rect, panel)| rect[0] >= panel[0] && rect[0] + rect[2] <= panel[0] + panel[2] + 0.5),
+        "nameInsideButton": named.zip(unplug).map(|(name, button)| name[0] >= button[0] - 0.5 && name[0] + name[2] <= button[0] + button[2] + 0.5),
+        "source": texts_under(&mut rt, "plug-source-replace_with"),
+    }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11439,6 +11474,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("plug-routes") => plug_routes(),
         Some("hidden-plug-undo") => hidden_plug_undo(),
         Some("own-bottle-tint") => own_bottle_tint(),
+        Some("squeezed-unplug") => squeezed_unplug(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),
