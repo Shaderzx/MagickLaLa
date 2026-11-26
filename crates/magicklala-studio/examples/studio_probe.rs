@@ -4578,6 +4578,41 @@ fn check_routes() -> Result<serde_json::Value, String> {
     keyed.variables.push(var("keys", SocketType::String, Some(Value::String("abc".to_owned()))));
     Ok(json!({ "joined": check(joined)?, "valueSetFirst": check(valued(true))?, "valueNeverSet": check(valued(false))?, "jsonFromText": check(keyed)? }))
 }
+fn plug_routes() -> Result<serde_json::Value, String> {
+    let offered = |spell: SpellGraph| {
+        let app = StudioApp::with_spell(spell, registry_specs());
+        app.earlier_fitting_outputs(&NodeId::from("reply"), "content").into_iter().map(|source| format!("{}.{}", source.node.0, source.socket)).collect::<Vec<_>>()
+    };
+    let routed = |join: bool| {
+        let mut spell = SpellGraph::new("Routes");
+        spell.nodes = vec![
+            studio_node("trigger", "event/on_message", 0.0, serde_json::Value::Null),
+            studio_node("fork", "flow/split", 150.0, serde_json::Value::Null),
+            studio_node("recall", "memory/search", 300.0, serde_json::Value::Null),
+            studio_node("reply", "io/send_message", 600.0, serde_json::Value::Null),
+        ];
+        if !join {
+            spell.nodes[1] = studio_node("fork", "flow/branch", 150.0, json!({ "condition": true }));
+        }
+        let (first, second) = if join { ("out_0", "out_1") } else { ("true", "false") };
+        spell.wires = vec![
+            studio_wire("r1", ("trigger", "out"), ("fork", "in")),
+            studio_wire("r2", ("fork", first), ("recall", "in")),
+            studio_wire("r3", ("trigger", "content"), ("recall", "query")),
+        ];
+        if join {
+            spell.nodes.push(studio_node("join", "flow/wait_for_all", 450.0, serde_json::Value::Null));
+            spell.wires.push(studio_wire("r4", ("recall", "out"), ("join", "in")));
+            spell.wires.push(studio_wire("r5", ("fork", second), ("join", "in")));
+            spell.wires.push(studio_wire("r6", ("join", "out"), ("reply", "in")));
+        } else {
+            spell.wires.push(studio_wire("r4", ("recall", "out"), ("reply", "in")));
+            spell.wires.push(studio_wire("r5", ("fork", second), ("reply", "in")));
+        }
+        spell
+    };
+    Ok(json!({ "branched": offered(routed(false)), "joined": offered(routed(true)) }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11350,6 +11385,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("literal-braces") => literal_braces(),
         Some("rename-reach") => rename_reach(),
         Some("check-routes") => check_routes(),
+        Some("plug-routes") => plug_routes(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),

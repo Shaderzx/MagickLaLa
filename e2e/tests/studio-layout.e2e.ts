@@ -827,3 +827,11 @@ test('Check agrees with Brew on variable-bound settings: a Delay after Wait For 
   expect(report.jsonFromText.check).toBe('invalid');
   expect(report.jsonFromText.errors).toEqual([expect.stringContaining('the variable keys holds text')]);
 });
+
+test('Plug in offers only sources that have run on every route into the input: after a Branch whose arms both reach Send, the one-arm Search Memory is left out, and after Wait For All it is offered', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['plug-routes']);
+
+  expect(report.branched).toContain('trigger.content');
+  expect(report.branched.filter((source: string) => source.startsWith('recall.'))).toEqual([]);
+  expect(report.joined).toEqual(expect.arrayContaining(['trigger.content', 'recall.text']));
+});
