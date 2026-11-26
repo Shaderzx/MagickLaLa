@@ -887,3 +887,16 @@ test('Grimoire tags never sit on a name and Fit keeps names whole: after a Webho
   expect(report.covered).toEqual([]);
   expect(report.cutTitles.filter((title: string) => !/^Generate Text · [12]$/.test(title))).toEqual([]);
 });
+
+test('One verb reads one way: the open Plug in toggle is never filled red and shows when it is open, Unplug says which source it cuts, the Grimoire button says where it goes, and the selection ring is never the teal go colour in dark mode', { timeout: 900_000 }, async () => {
+  const report = await studioProbe(['plug-voices']);
+
+  expect(report.toggleRed).toBe(false);
+  expect(report.toggleShowsOpen).toBe(true);
+  expect(report.fixFilled).toBe(true);
+  expect(report.grimoire).toBe('Open in Grimoire');
+  expect(report.unplugLabel).toBe('Unplug system from Search Memory · text');
+  expect(report.darkRingIsGo).toBe(false);
+  expect(report.darkRingContrast).toBeGreaterThanOrEqual(3);
+  expect(report.lightRingContrast).toBeGreaterThanOrEqual(3);
+});

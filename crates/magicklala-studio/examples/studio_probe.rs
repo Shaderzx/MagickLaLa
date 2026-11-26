@@ -4827,6 +4827,44 @@ fn grimoire_tags() -> Result<serde_json::Value, String> {
     }
     Ok(json!({ "covered": covered, "cutTitles": cut, "zoom": rt.state.canvas.camera.zoom }))
 }
+fn plug_voices() -> Result<serde_json::Value, String> {
+    let label_of = |rt: &Runtime<StudioApp>, key: &str| rt.elements().into_iter().find(|element| element.key.as_deref() == Some(key)).and_then(|element| element.label);
+    let fill_of = |rt: &Runtime<StudioApp>, key: &str| rt.elements().into_iter().find(|element| element.key.as_deref() == Some(key)).map(|element| element.fill);
+    let mut demo = StudioApp::from_registry().spell.clone();
+    demo.wires.retain(|wire| !(wire.to_node.0 == "recall" && wire.to_socket == "query"));
+    let mut rt = runtime_for(demo);
+    let _ = validation_of(&mut rt)?;
+    rt.update(|app, _| {
+        app.canvas.select(Some(NodeId::from("recall")));
+        app.right_tab = RightTab::Inspector;
+    });
+    rt.frame(1.0);
+    let light = magicklala_canvas::HearthPalette::for_theme(true);
+    let dark = magicklala_canvas::HearthPalette::for_theme(false);
+    let toggle_closed = fill_of(&rt, "plug-query");
+    rt.update(|app, _| app.toggle_plug_menu(&NodeId::from("recall"), "query"));
+    rt.frame(2.0);
+    let toggle_open = fill_of(&rt, "plug-query");
+    let fix_fill = fill_of(&rt, "inspector-fix");
+    let grimoire_words = texts_under(&mut rt, "inspector-open-grimoire");
+    rt.update(|app, _| {
+        app.toggle_plug_menu(&NodeId::from("recall"), "query");
+        app.canvas.select(Some(NodeId::from("llm")));
+    });
+    rt.frame(3.0);
+    let unplug_label = label_of(&rt, "unplug-system");
+    let same = |a: Option<rune::Color>, b: rune::Color| a.is_some_and(|a| (a.r - b.r).abs() < 0.01 && (a.g - b.g).abs() < 0.01 && (a.b - b.b).abs() < 0.01);
+    Ok(json!({
+        "toggleRed": same(toggle_closed, light.hex) || same(toggle_open, light.hex),
+        "toggleShowsOpen": toggle_closed.zip(toggle_open).is_some_and(|(a, b)| (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs() > 0.02),
+        "fixFilled": fix_fill.is_some(),
+        "grimoire": grimoire_words,
+        "unplugLabel": unplug_label,
+        "darkRingIsGo": same(Some(dark.selection_ring()), dark.primary_bg),
+        "darkRingContrast": contrast(dark.selection_ring(), dark.paper),
+        "lightRingContrast": contrast(light.selection_ring(), light.paper),
+    }))
+}
 fn finish_then_fail_log() -> Result<serde_json::Value, String> {
     let mut spell = SpellGraph::new("Late Failure");
     spell.nodes = vec![
@@ -11606,6 +11644,7 @@ fn dispatch(args: &[String]) -> Result<serde_json::Value, String> {
         Some("selection-rings") => selection_rings(),
         Some("hex-marks") => hex_marks(),
         Some("grimoire-tags") => grimoire_tags(),
+        Some("plug-voices") => plug_voices(),
         Some("stopped-not-failed") => stopped_not_failed(),
         Some("named-missing") => named_missing(),
         Some("stub-clear") => stub_clear(),
